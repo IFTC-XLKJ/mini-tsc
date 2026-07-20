@@ -3432,6 +3432,13 @@ export class ExpressionEmitter {
       }
     }
 
+    // error.message / err.message: Error is stored as TAG_STRING message text
+    // (ts_error_new). Prefer the string itself; fall back to object.message if present.
+    if (node.property === "message" && node.object.kind === "identifier" &&
+        /^(error|err|e)$/i.test(node.object.name)) {
+      return `({ Value __em = ${object}; (__em.tag == TAG_STRING) ? __em : ((__em.tag == TAG_OBJECT && __em.as.object) ? ts_hashmap_get((TSHashMap*)__em.as.object, ts_string_new("message")) : ts_value_string(ts_string_new(""))); })`;
+    }
+
     // Value / object hashmap property access: req.url → ts_hashmap_get(...)
     // Only for actual Value types (tagged union wrapping hashmap objects)
     if ((isValueObject || node.objectType === "any" || node.objectType === "map") && node.objectType !== "class") {
@@ -3445,14 +3452,10 @@ export class ExpressionEmitter {
       }
     }
 
-    // Value type — hashmap access (Error.message, req.url, …)
+    // Value type — hashmap access
     if (node.object.kind === "identifier") {
       const varType = this.varTypes.get(node.object.name);
       if (varType === "Value") {
-        // error.message / err.message: if error is a plain string Value, use it as message
-        if (node.property === "message" && /^(error|err|e)$/i.test(node.object.name)) {
-          return `({ Value __em = ${object}; (__em.tag == TAG_STRING) ? __em : ts_hashmap_get((TSHashMap*)__em.as.object, ts_string_new("message")); })`;
-        }
         return `ts_hashmap_get((TSHashMap*)${object}.as.object, ts_string_new("${node.property}"))`;
       }
       // Fallback for remaining pointer types (TSString*, TSArray*, etc.)
