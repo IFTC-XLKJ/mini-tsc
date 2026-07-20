@@ -415,8 +415,10 @@ void ts_throw(Value val) {
 }
 
 Value ts_error_new(TSString* message) {
-  /* Return a Value wrapping the error message as a string */
-  return ts_value_string(message);
+  /* Lightweight Error: store message as TAG_STRING.
+   * error.message is handled in codegen for string Values; object form
+   * with hashmap is used when TS_NEED_HASHMAP is available via other paths. */
+  return ts_value_string(message ? message : ts_string_new(""));
 }
 
 /* Promise constructor (stub - executor is called synchronously for now) */

@@ -3445,10 +3445,14 @@ export class ExpressionEmitter {
       }
     }
 
-    // Value type — hashmap access
+    // Value type — hashmap access (Error.message, req.url, …)
     if (node.object.kind === "identifier") {
       const varType = this.varTypes.get(node.object.name);
       if (varType === "Value") {
+        // error.message / err.message: if error is a plain string Value, use it as message
+        if (node.property === "message" && /^(error|err|e)$/i.test(node.object.name)) {
+          return `({ Value __em = ${object}; (__em.tag == TAG_STRING) ? __em : ts_hashmap_get((TSHashMap*)__em.as.object, ts_string_new("message")); })`;
+        }
         return `ts_hashmap_get((TSHashMap*)${object}.as.object, ts_string_new("${node.property}"))`;
       }
       // Fallback for remaining pointer types (TSString*, TSArray*, etc.)

@@ -4,6 +4,11 @@ import { ExpressionEmitter, sanitizeCIdentifier } from "./expression-emitter.js"
 export class StatementEmitter {
   private exprEmitter = new ExpressionEmitter();
 
+  /** Register a local/global variable type for expression emission (console.log wrapping, etc.) */
+  declareVar(name: string, type: string): void {
+    this.exprEmitter.declareVar(name, type);
+  }
+
   /** Set imported symbols mapping for identifier resolution */
   setImportedSymbols(symbols: Map<string, ImportedSymbolInfo>): void {
     this.exprEmitter.setImportedSymbols(symbols);

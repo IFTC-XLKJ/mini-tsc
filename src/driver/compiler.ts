@@ -867,7 +867,7 @@ extern TsErrorContext _ts_current_error;
       if (topLevelTry.catchClause?.body && topLevelTry.catchClause.body.length > 0) {
         const se = new StatementEmitter();
         // Register error var as Value so property access / console.log wrap correctly
-        se["exprEmitter"].declareVar(errorVar, "Value");
+        se.declareVar(errorVar, "Value");
         catchBodyC = topLevelTry.catchClause.body
           .map((s: any) => se.emit(s))
           .filter((s: string) => s && s.trim())
