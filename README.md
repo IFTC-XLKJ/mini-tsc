@@ -1,5 +1,7 @@
 # mini-tsc
 
+https://iftc.koyeb.app/mini-tsc
+
 A simple TypeScript compiler. It can compile TypeScript code to Executable files.
 
 Supported Platform: Windows/Linux(include Termux)
