@@ -1,0 +1,30 @@
+{
+  "name": "mini-tsc",
+  "version": "0.1.0",
+  "description": "TypeScript-to-C transpiler",
+  "type": "module",
+  "main": "dist/cli/index.js",
+  "bin": {
+    "mini-tsc": "dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli/index.ts",
+    "test": "node --test dist/**/*.test.js",
+    "start": "node dist/cli/index.js"
+  },
+  "keywords": [
+    "typescript",
+    "transpiler",
+    "c",
+    "compiler"
+  ],
+  "license": "MIT",
+  "author": "IFTC",
+  "dependencies": {
+    "typescript": "^5.4.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0"
+  }
+}
