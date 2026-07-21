@@ -292,6 +292,17 @@ export function analyzeFeatureUsage(
             usage.features.add("dialogs");
           }
 
+          // gc() / global.gc() — explicit collection
+          if (cal.kind === "identifier" && cal.name === "gc") {
+            usage.features.add("gc");
+          }
+          if (cal.kind === "property_access" &&
+              cal.property === "gc" &&
+              cal.object?.kind === "identifier" &&
+              (cal.object.name === "global" || cal.object.name === "globalThis")) {
+            usage.features.add("gc");
+          }
+
           // module.method(...)  e.g. fs.readFileSync, child_process.spawn
           if (cal.kind === "property_access" &&
               cal.object?.kind === "identifier" &&

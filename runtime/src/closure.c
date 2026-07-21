@@ -1,7 +1,8 @@
 #include "runtime.h"
 
 Closure* ts_closure_new(void* fn, Value* captures, int32_t count) {
-  Closure* c = (Closure*)malloc(sizeof(Closure));
+  Closure* c = (Closure*)ts_gc_alloc_kind(sizeof(Closure), GC_KIND_CLOSURE);
+  if (!c) return NULL;
   c->function_ptr = fn;
   c->captured_count = count;
   if (count > 0 && captures) {
@@ -21,8 +22,6 @@ Value ts_closure_call(Closure* closure, Value* args, int32_t arg_count) {
 }
 
 void ts_closure_free(Closure* closure) {
-  if (closure->captured_vars) {
-    free(closure->captured_vars);
-  }
-  free(closure);
+  if (!closure) return;
+  ts_gc_free_object(closure);
 }

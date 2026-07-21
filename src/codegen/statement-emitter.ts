@@ -238,6 +238,7 @@ export class StatementEmitter {
           initExpr.startsWith("ts_buffer_") || initExpr.startsWith("ts_blob_") ||
           initExpr.startsWith("ts_headers") || initExpr.startsWith("ts_fetch") ||
           initExpr.startsWith("ts_json_") || initExpr.startsWith("ts_value_") ||
+          initExpr.startsWith("ts_writable_stream_") || initExpr.startsWith("ts_response_") ||
           initExpr.startsWith("node_") || initExpr.startsWith("ts_error_")
         ) {
           // keep as-is
@@ -544,6 +545,12 @@ ${body}
         } else {
           emitted = `((void)(${emitted}), ts_value_undefined())`;
         }
+      }
+      // Value-returning functions must not return bare double (setTimeout id)
+      if (ret === "Value" &&
+          (emitted.startsWith("ts_set_timeout(") || emitted.startsWith("ts_set_interval(") ||
+           emitted.startsWith("ts_clear_timeout(") || emitted.startsWith("ts_clear_interval("))) {
+        emitted = `((void)(${emitted}), ts_value_undefined())`;
       }
       return `return ${emitted};`;
     }

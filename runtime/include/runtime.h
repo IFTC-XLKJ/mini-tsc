@@ -118,10 +118,31 @@ Closure* ts_closure_new(void* fn, Value* captures, int32_t count);
 Value ts_closure_call(Closure* closure, Value* args, int32_t arg_count);
 void ts_closure_free(Closure* closure);
 
-/* Garbage collector */
-void ts_gc_init(void);
+/* Garbage collector — automatic mark-sweep + refcount immediate free */
+typedef enum {
+  GC_KIND_RAW = 0,
+  GC_KIND_STRING,
+  GC_KIND_ARRAY,
+  GC_KIND_HASHMAP,
+  GC_KIND_CLOSURE,
+  GC_KIND_PROMISE
+} GcKind;
+
+void  ts_gc_init(void);
+void  ts_gc_set_stack_bottom(void* bottom);
+void  ts_gc_set_threshold(size_t bytes);
 void* ts_gc_alloc(size_t size);
-void ts_gc_collect(void);
+void* ts_gc_alloc_kind(size_t size, GcKind kind);
+void  ts_gc_free_object(void* ptr);
+int   ts_gc_is_managed(void* ptr);
+void  ts_gc_collect(void);
+void  ts_gc_maybe_collect(void);
+void  ts_gc_maybe_collect_idle(void);
+void  ts_gc_add_root(void** slot);
+void  ts_gc_remove_root(void** slot);
+size_t ts_gc_allocated_bytes(void);
+size_t ts_gc_object_count(void);
+size_t ts_gc_collect_count(void);
 
 /* Value constructors */
 Value ts_value_number(double n);
@@ -169,6 +190,8 @@ void ts_clear_timeout(Value id);
 void ts_clear_interval(Value id);
 void ts_timers_run(void);
 int ts_timers_pending(void);
+/* Fire due timers once (or sleep briefly until next); returns 1 if any fired */
+int ts_timers_poll(void);
 
 /* Browser-like dialogs (stdin/stdout) */
 void ts_alert(Value message);
@@ -182,7 +205,7 @@ void ts_throw(Value val);
 Value ts_error_new(TSString* message);
 
 /* Math builtins */
-Value ts_math_random(void);
+double ts_math_random(void);
 double ts_math_floor(double x);
 double ts_math_ceil(double x);
 double ts_math_round(double x);
@@ -280,6 +303,42 @@ Value ts_fetch_response_body(Value response);
 Value ts_fetch_body_get_reader(Value body);
 Value ts_fetch_reader_read(Value reader);
 
+/* Web Response constructor (server + client): new Response(body[, init])
+ * body: string | Buffer | string[] (array → chunked stream body)
+ * init: { status?, statusText?, headers? }
+ * Streaming: array body sets body_complete=0 and stream = StreamBody* */
+#define STREAM_BODY_TAG 0x53424F44  /* 'SBOD' */
+
+typedef struct StreamBody {
+  int32_t type_tag;
+  TSArray* chunks;   /* Value array of string/buffer chunks */
+  int delay_ms;      /* pause between chunks when serving (0 = none) */
+} StreamBody;
+
+Value ts_response_new(Value body, Value init);
+int  ts_response_is_stream(Value response);
+StreamBody* ts_response_stream_body(Value response);
+
+/* WritableStream → StreamBody (server-side chunked response body) */
+Value ts_writable_stream_new(void);
+Value ts_writable_stream_get_writer(Value stream);
+Value ts_writable_stream_write(Value writer, Value chunk);
+Value ts_writable_stream_close(Value writer);
+/* Call Value as 0-arg function; StreamBody identity for bound getWriter */
+Value ts_value_call0(Value v);
+
+/* Closure binding: snapshot free vars for setTimeout / Promise executors */
+#define BOUND_FN_TAG 0x42464E00  /* 'BFN\0' */
+typedef struct {
+  int32_t type_tag;
+  void* fn;          /* Value (*)(Value, Value, Value, Value) */
+  Value caps[4];
+  int ncaps;
+} BoundFn;
+Value ts_bind_function(void* fn, Value* caps, int ncaps);
+/* Call bound or plain function with up to 4 Value args (missing = undefined) */
+Value ts_value_call(Value callee, Value* args, int argc);
+
 /* Headers constructor */
 Value ts_headers(void);
 Value ts_headers_from_object(TSHashMap* obj);
@@ -366,6 +425,7 @@ extern TsErrorContext _ts_current_error;
 
 /* ==================== Promise ==================== */
 #define PROMISE_TAG 0x50524F4D  /* 'PROM' */
+#define PROMISE_RESOLVE_TAG 0x50525356  /* 'PRSV' resolve/reject binder */
 
 typedef enum {
   PROMISE_PENDING = 0,
@@ -383,6 +443,13 @@ typedef struct TSPromise {
   Value onFinally;
   struct TSPromise* then_promise; /* promise returned by .then (optional) */
 } TSPromise;
+
+/* Bound resolve/reject passed to Promise executor and usable as setTimeout callback */
+typedef struct {
+  int32_t type_tag;
+  TSPromise* promise;
+  int is_reject; /* 0 = resolve, 1 = reject */
+} PromiseResolver;
 
 Value ts_promise_new(void);
 Value ts_promise_resolve(Value p, Value v);

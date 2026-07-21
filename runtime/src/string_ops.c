@@ -7,7 +7,8 @@ TSString* ts_string_new(const char* cstr) {
 
 TSString* ts_string_new_len(const char* data, int32_t len) {
   if (len < 0) len = 0;
-  TSString* s = (TSString*)malloc(sizeof(TSString));
+  TSString* s = (TSString*)ts_gc_alloc_kind(sizeof(TSString), GC_KIND_STRING);
+  if (!s) return NULL;
   s->refcount = 1;
   s->length = len;
   s->data = (char*)malloc((size_t)len + 1);
@@ -48,10 +49,11 @@ char ts_string_char_at(TSString* s, int32_t index) {
 }
 
 void ts_string_free(TSString* s) {
+  if (!s) return;
   s->refcount--;
   if (s->refcount <= 0) {
-    free(s->data);
-    free(s);
+    /* Immediate reclaim via GC heap (finalizes data buffer) */
+    ts_gc_free_object(s);
   }
 }
 

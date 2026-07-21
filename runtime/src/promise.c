@@ -14,7 +14,7 @@ int ts_value_is_promise(Value v) {
 }
 
 Value ts_promise_new(void) {
-  TSPromise* p = (TSPromise*)malloc(sizeof(TSPromise));
+  TSPromise* p = (TSPromise*)ts_gc_alloc_kind(sizeof(TSPromise), GC_KIND_PROMISE);
   if (!p) return ts_value_undefined();
   p->type_tag = PROMISE_TAG;
   p->refcount = 1;
@@ -111,25 +111,32 @@ Value ts_promise_finally(Value pv, Value onFinally) {
   return pv;
 }
 
+/* Declared in builtins.c / runtime.h */
+extern int ts_timers_pending(void);
+extern int ts_timers_poll(void);
+
 Value ts_await(Value v) {
   TSPromise* p = as_promise(v);
   if (!p) return v;
 
   while (p->state == PROMISE_PENDING) {
-    /* Must poll completions so worker results can resolve this promise */
+    /* Prefer timers first (setTimeout(resolve)); then I/O completions */
+    int t = 0;
+    if (ts_timers_pending()) {
+      t = ts_timers_poll();
+    }
+    if (p->state != PROMISE_PENDING) break;
     int n = ts_completion_poll();
     if (p->state != PROMISE_PENDING) break;
-    if (n == 0) {
+    if (n == 0 && t == 0) {
       if (ts_jobs_pending()) {
         ts_completion_wait(50);
+      } else if (ts_timers_pending()) {
+        /* Sleep until next timer (poll sleeps up to 50ms) */
+        ts_timers_poll();
       } else {
-        /* No jobs and still pending — avoid infinite spin */
-        ts_completion_wait(10);
-        ts_completion_poll();
-        if (p->state == PROMISE_PENDING && !ts_jobs_pending()) {
-          /* Dead promise: nothing will settle it */
-          break;
-        }
+        /* Nothing will settle this promise */
+        break;
       }
     }
   }
@@ -142,21 +149,32 @@ Value ts_await(Value v) {
   return ts_value_undefined();
 }
 
-/* Promise constructor: executor(resolve, reject) called synchronously.
- * resolve/reject are not first-class JS functions here; we call executor
- * as a 0-arg stub if present, otherwise return a pending promise.
- * Full executor support would need codegen for resolve/reject closures. */
+static Value make_resolver(TSPromise* p, int is_reject) {
+  PromiseResolver* r = (PromiseResolver*)malloc(sizeof(PromiseResolver));
+  if (!r) return ts_value_undefined();
+  r->type_tag = PROMISE_RESOLVE_TAG;
+  r->promise = p;
+  r->is_reject = is_reject;
+  return ts_value_object(r);
+}
+
+/* Promise constructor: new Promise((resolve, reject) => { ... })
+ * Executor is invoked synchronously with resolve/reject binders.
+ * Binders are TAG_OBJECT (PROMISE_RESOLVE_TAG) and work as setTimeout callbacks. */
 Value Promise_constructor(Value executor) {
   Value p = ts_promise_new();
-  (void)executor;
-  /* If executor is a function taking no useful resolve/reject in C ABI,
-     leave promise pending — callers typically use fs async which creates
-     promises directly via ts_promise_new. */
-  if (executor.tag == TAG_FUNCTION && executor.as.function) {
-    /* Best-effort: call as void fn(void) — may not match real executor shape */
-    typedef void (*Exec0)(void);
-    /* Don't call — signature mismatch would crash. Leave pending. */
-    (void)(Exec0)0;
+  TSPromise* pp = as_promise(p);
+  if (!pp) return p;
+
+  Value resolve = make_resolver(pp, 0);
+  Value reject = make_resolver(pp, 1);
+
+  /* BoundFn (captures) or plain function — pass resolve as first call arg */
+  if (executor.tag == TAG_FUNCTION ||
+      (executor.tag == TAG_OBJECT && executor.as.object &&
+       *((int32_t*)executor.as.object) == BOUND_FN_TAG)) {
+    Value args[2] = { resolve, reject };
+    ts_value_call(executor, args, 2);
   }
   return p;
 }

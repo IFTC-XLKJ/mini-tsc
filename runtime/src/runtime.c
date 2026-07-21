@@ -13,6 +13,13 @@ TSString* ts_buffer_toString_utf8(Value buf) {
 }
 #endif
 
+/* Promise settle helpers live in promise.c. Provide weak stubs so runtime.c
+ * can call them when Promise feature is off (lld drops unused promise.o). */
+#if !defined(TS_NEED_PROMISE)
+Value ts_promise_resolve(Value p, Value v) { (void)p; (void)v; return p; }
+Value ts_promise_reject(Value p, Value err) { (void)p; (void)err; return p; }
+#endif
+
 /* Debug: verify runtime is compiled correctly */
 #include <stdio.h>
 static int __runtime_debug = 0;
@@ -2618,25 +2625,249 @@ int ts_buffer_isBuffer(Value val) {
 }
 #endif /* TS_NEED_BUFFER */
 
-/* GC init placeholder */
-#if defined(TS_NEED_GC)
-static int gc_initialized = 0;
+/* ==================== Web Response constructor (always linked) ==================== */
+/* Used by http.createServer handlers: new Response(body[, init]).
+ * Array body → StreamBody for Transfer-Encoding: chunked streaming. */
 
-void ts_gc_init(void) {
-  if (gc_initialized) return;
-  gc_initialized = 1;
-  /* Initialize mark-sweep GC */
+Value ts_response_new(Value body, Value init) {
+  FetchResponse* resp = (FetchResponse*)malloc(sizeof(FetchResponse));
+  if (!resp) return ts_value_undefined();
+  memset(resp, 0, sizeof(FetchResponse));
+  resp->type_tag = FETCH_RESPONSE_TAG;
+  resp->status = 200;
+  resp->statusText = ts_string_new("OK");
+  resp->body = ts_string_new("");
+  resp->headers = ts_hashmap_new();
+  resp->url = ts_string_new("");
+  resp->stream = NULL;
+  resp->body_complete = 1;
+
+  /* Parse init: { status, statusText, headers } */
+  if (init.tag == TAG_OBJECT && init.as.object) {
+    int32_t itag = *((int32_t*)init.as.object);
+    if (itag != BUFFER_TAG && itag != FETCH_RESPONSE_TAG && itag != BLOB_TAG &&
+        itag != URL_TAG && itag != STREAM_BODY_TAG) {
+      TSHashMap* map = (TSHashMap*)init.as.object;
+      Value st = ts_hashmap_get(map, ts_string_new("status"));
+      if (st.tag == TAG_NUMBER) {
+        resp->status = (int32_t)st.as.number;
+        if (resp->status == 201) resp->statusText = ts_string_new("Created");
+        else if (resp->status == 204) resp->statusText = ts_string_new("No Content");
+        else if (resp->status == 404) resp->statusText = ts_string_new("Not Found");
+        else if (resp->status == 500) resp->statusText = ts_string_new("Internal Server Error");
+      }
+      Value stt = ts_hashmap_get(map, ts_string_new("statusText"));
+      if (stt.tag == TAG_STRING && stt.as.string) {
+        resp->statusText = stt.as.string;
+      }
+      Value hdrs = ts_hashmap_get(map, ts_string_new("headers"));
+      if (hdrs.tag == TAG_OBJECT && hdrs.as.object) {
+        int32_t htag = *((int32_t*)hdrs.as.object);
+        if (htag != BUFFER_TAG && htag != FETCH_RESPONSE_TAG) {
+          /* Copy headers from plain object / Headers map */
+          TSHashMap* hm = (TSHashMap*)hdrs.as.object;
+          for (int32_t i = 0; i < hm->capacity; i++) {
+            if (hm->entries[i].occupied && hm->entries[i].key) {
+              ts_hashmap_set(resp->headers, hm->entries[i].key, hm->entries[i].value);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /* Body */
+  if (body.tag == TAG_STRING && body.as.string) {
+    resp->body = body.as.string;
+    resp->body_complete = 1;
+  } else if (body.tag == TAG_OBJECT && body.as.object) {
+    int32_t btag = *((int32_t*)body.as.object);
+    if (btag == BUFFER_TAG) {
+      Buffer* b = (Buffer*)body.as.object;
+      resp->body = ts_string_new_len(b->data ? (const char*)b->data : "", b->length);
+      resp->body_complete = 1;
+      if (!ts_hashmap_has(resp->headers, ts_string_new("Content-Type")) &&
+          !ts_hashmap_has(resp->headers, ts_string_new("content-type"))) {
+        ts_hashmap_set(resp->headers, ts_string_new("Content-Type"),
+                       ts_value_string(ts_string_new("application/octet-stream")));
+      }
+    } else if (btag == BLOB_TAG) {
+      Blob* blob = (Blob*)body.as.object;
+      if (blob->data) resp->body = blob->data;
+      if (blob->type) {
+        ts_hashmap_set(resp->headers, ts_string_new("Content-Type"),
+                       ts_value_string(blob->type));
+      }
+      resp->body_complete = 1;
+    } else if (btag == STREAM_BODY_TAG) {
+      /* WritableStream / StreamBody body — apply pacing from headers */
+      StreamBody* sb = (StreamBody*)body.as.object;
+      if (sb && resp->headers) {
+        Value d = ts_hashmap_get(resp->headers, ts_string_new("X-Stream-Delay-Ms"));
+        if (d.tag != TAG_STRING && d.tag != TAG_NUMBER) {
+          d = ts_hashmap_get(resp->headers, ts_string_new("x-stream-delay-ms"));
+        }
+        if (d.tag == TAG_STRING && d.as.string && d.as.string->data) {
+          sb->delay_ms = (int)atoi(d.as.string->data);
+        } else if (d.tag == TAG_NUMBER) {
+          sb->delay_ms = (int)d.as.number;
+        }
+        if (sb->delay_ms < 0) sb->delay_ms = 0;
+      }
+      resp->stream = body.as.object;
+      resp->body_complete = 0;
+      resp->body = ts_string_new("");
+    } else {
+      /* Generic object — stringify */
+      resp->body = ts_to_string(body);
+      resp->body_complete = 1;
+    }
+  } else if (body.tag == TAG_ARRAY && body.as.array) {
+    /* string[] → chunked streaming body */
+    StreamBody* sb = (StreamBody*)malloc(sizeof(StreamBody));
+    sb->type_tag = STREAM_BODY_TAG;
+    sb->chunks = body.as.array;
+    sb->delay_ms = 0; /* no delay unless X-Stream-Delay-Ms is set */
+    /* Optional: headers X-Stream-Delay-Ms (milliseconds between chunks) */
+    if (resp->headers) {
+      Value d = ts_hashmap_get(resp->headers, ts_string_new("X-Stream-Delay-Ms"));
+      if (d.tag != TAG_STRING && d.tag != TAG_NUMBER) {
+        d = ts_hashmap_get(resp->headers, ts_string_new("x-stream-delay-ms"));
+      }
+      if (d.tag == TAG_STRING && d.as.string && d.as.string->data) {
+        sb->delay_ms = (int)atoi(d.as.string->data);
+      } else if (d.tag == TAG_NUMBER) {
+        sb->delay_ms = (int)d.as.number;
+      }
+      if (sb->delay_ms < 0) sb->delay_ms = 0;
+    }
+    resp->stream = sb;
+    resp->body_complete = 0;
+    resp->body = ts_string_new("");
+  } else if (body.tag == TAG_NULL) {
+    resp->body = ts_string_new("");
+  } else {
+    resp->body = ts_to_string(body);
+  }
+
+  return ts_value_object(resp);
 }
 
-void* ts_gc_alloc(size_t size) {
-  return malloc(size);
+int ts_response_is_stream(Value response) {
+  if (response.tag != TAG_OBJECT || !response.as.object) return 0;
+  FetchResponse* fr = (FetchResponse*)response.as.object;
+  if (fr->type_tag != FETCH_RESPONSE_TAG) return 0;
+  return fr->stream != NULL && !fr->body_complete;
 }
 
-void ts_gc_collect(void) {
-  /* Mark-sweep pass — placeholder */
+StreamBody* ts_response_stream_body(Value response) {
+  if (!ts_response_is_stream(response)) return NULL;
+  FetchResponse* fr = (FetchResponse*)response.as.object;
+  StreamBody* sb = (StreamBody*)fr->stream;
+  if (!sb || sb->type_tag != STREAM_BODY_TAG) return NULL;
+  return sb;
 }
-#else
-void ts_gc_init(void) {}
-void* ts_gc_alloc(size_t size) { return malloc(size); }
-void ts_gc_collect(void) {}
-#endif /* TS_NEED_GC */
+
+/* ==================== WritableStream (StreamBody-backed) ==================== */
+
+static StreamBody* stream_body_from_value(Value v) {
+  if (v.tag != TAG_OBJECT || !v.as.object) return NULL;
+  StreamBody* sb = (StreamBody*)v.as.object;
+  if (sb->type_tag != STREAM_BODY_TAG) return NULL;
+  return sb;
+}
+
+Value ts_writable_stream_new(void) {
+  StreamBody* sb = (StreamBody*)malloc(sizeof(StreamBody));
+  if (!sb) return ts_value_undefined();
+  sb->type_tag = STREAM_BODY_TAG;
+  sb->chunks = ts_array_new();
+  sb->delay_ms = 0;
+  return ts_value_object(sb);
+}
+
+/* Writer is the stream itself (same StreamBody*). */
+Value ts_writable_stream_get_writer(Value stream) {
+  if (stream_body_from_value(stream)) return stream;
+  return ts_writable_stream_new();
+}
+
+Value ts_writable_stream_write(Value writer, Value chunk) {
+  StreamBody* sb = stream_body_from_value(writer);
+  if (!sb) return ts_value_undefined();
+  if (!sb->chunks) sb->chunks = ts_array_new();
+  /* Coerce chunk to string Value for HTTP chunked body */
+  if (chunk.tag == TAG_STRING || chunk.tag == TAG_OBJECT) {
+    ts_array_push(sb->chunks, chunk);
+  } else {
+    ts_array_push(sb->chunks, ts_value_string(ts_to_string(chunk)));
+  }
+  return ts_value_undefined();
+}
+
+Value ts_writable_stream_close(Value writer) {
+  (void)writer;
+  return ts_value_undefined();
+}
+
+/* Call a Value as a zero-arg function. WritableStream's getWriter may be
+ * stored as the StreamBody itself after destructuring — treat as identity. */
+Value ts_value_call0(Value v) {
+  return ts_value_call(v, NULL, 0);
+}
+
+Value ts_bind_function(void* fn, Value* caps, int ncaps) {
+  BoundFn* b = (BoundFn*)malloc(sizeof(BoundFn));
+  if (!b) return ts_value_undefined();
+  b->type_tag = BOUND_FN_TAG;
+  b->fn = fn;
+  b->ncaps = ncaps > 4 ? 4 : (ncaps < 0 ? 0 : ncaps);
+  for (int i = 0; i < 4; i++) {
+    b->caps[i] = (i < b->ncaps && caps) ? caps[i] : ts_value_undefined();
+  }
+  return ts_value_object(b);
+}
+
+/* Call TAG_FUNCTION or BoundFn. BoundFn prepends captured free vars, then
+ * appends call-site args (e.g. Promise resolve). Signature is always
+ * Value fn(Value a0, Value a1, Value a2, Value a3) for ABI stability. */
+Value ts_value_call(Value callee, Value* args, int argc) {
+  typedef Value (*Fn4)(Value, Value, Value, Value);
+  Value a[4];
+  for (int i = 0; i < 4; i++) a[i] = ts_value_undefined();
+
+  if (callee.tag == TAG_OBJECT && callee.as.object) {
+    int32_t tag = *((int32_t*)callee.as.object);
+    if (tag == BOUND_FN_TAG) {
+      BoundFn* b = (BoundFn*)callee.as.object;
+      int pos = 0;
+      for (int i = 0; i < b->ncaps && pos < 4; i++) a[pos++] = b->caps[i];
+      for (int i = 0; i < argc && pos < 4; i++) a[pos++] = args[i];
+      if (!b->fn) return ts_value_undefined();
+      return ((Fn4)b->fn)(a[0], a[1], a[2], a[3]);
+    }
+    if (tag == STREAM_BODY_TAG) return callee; /* getWriter identity */
+    if (tag == PROMISE_RESOLVE_TAG) {
+      /* setTimeout(resolve, ms) — settle promise when promise.c is linked */
+      PromiseResolver* r = (PromiseResolver*)callee.as.object;
+      Value v = (argc > 0 && args) ? args[0] : ts_value_undefined();
+      if (r->promise) {
+        /* Weak-link via function pointers resolved only when promise.o is present:
+         * call through declared symbols; programs without Promise still link via stubs. */
+        extern Value ts_promise_resolve(Value p, Value val);
+        extern Value ts_promise_reject(Value p, Value err);
+        if (r->is_reject) ts_promise_reject(ts_value_object(r->promise), v);
+        else ts_promise_resolve(ts_value_object(r->promise), v);
+      }
+      return ts_value_undefined();
+    }
+  }
+  if (callee.tag == TAG_FUNCTION && callee.as.function) {
+    for (int i = 0; i < argc && i < 4; i++) a[i] = args[i];
+    /* 0-arg C functions (listen callbacks) — still pass 4 Values (ignored) */
+    return ((Fn4)callee.as.function)(a[0], a[1], a[2], a[3]);
+  }
+  return ts_value_undefined();
+}
+
+/* GC implementation lives in gc.c (always linked with runtime). */

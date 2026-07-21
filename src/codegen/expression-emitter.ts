@@ -135,8 +135,26 @@ export class ExpressionEmitter {
         return this.emitArrowFunction(node);
       case "function_expression":
         return this.emitFunctionExpression(node);
-      case "function_ref":
-        return `ts_value_function((void*)${node.name})`;
+      case "function_ref": {
+        // Bind free vars as a per-call snapshot (BoundFn) so loop captures are correct
+        const caps: { outerName: string; captureName: string; type?: string }[] =
+          node.captures || [];
+        if (caps.length === 0) {
+          return `ts_value_function((void*)${node.name})`;
+        }
+        const wrapCap = (outer: string): string => {
+          const t = this.varTypes.get(outer);
+          if (t === "Value" || t === "any" || t === "unknown" || !t) return outer;
+          if (t === "double" || t === "number" || t === "int") return `ts_value_number(${outer})`;
+          if (t === "boolean") return `ts_value_boolean(${outer})`;
+          if (t === "TSString*" || t === "string") return `ts_value_string(${outer})`;
+          if (t === "TSArray*") return `ts_value_array(${outer})`;
+          if (t.endsWith("*") && !t.startsWith("TS")) return `ts_value_object((void*)${outer})`;
+          return outer;
+        };
+        const capExprs = caps.map(c => wrapCap(c.outerName));
+        return `ts_bind_function((void*)${node.name}, (Value[]){${capExprs.join(", ")}}, ${caps.length})`;
+      }
       case "conditional_expression":
         return this.emitConditional(node);
       case "template_expression":
@@ -815,6 +833,17 @@ export class ExpressionEmitter {
   private emitCall(node: CNode): string {
     const callee = node.callee;
 
+    // Explicit GC: gc() / global.gc() → ts_gc_collect()
+    if (callee.kind === "identifier" && callee.name === "gc") {
+      return "(ts_gc_collect(), ts_value_undefined())";
+    }
+    if (callee.kind === "property_access" &&
+        callee.property === "gc" &&
+        callee.object?.kind === "identifier" &&
+        (callee.object.name === "global" || callee.object.name === "globalThis")) {
+      return "(ts_gc_collect(), ts_value_undefined())";
+    }
+
     // Array.isArray(x) → check Value tag / pointer
     if (callee.kind === "property_access" &&
         (callee.property === "isArray") &&
@@ -937,7 +966,49 @@ export class ExpressionEmitter {
     if (callee.kind === "identifier" &&
         (callee.name === "setTimeout" || callee.name === "setInterval" ||
          callee.name === "clearTimeout" || callee.name === "clearInterval")) {
-      const wrap = (a: CNode): string => {
+      const wrapCb = (a: CNode | undefined): string => {
+        if (!a) return "ts_value_null()";
+        const emitted = this.emit(a);
+        if (emitted.startsWith("ts_value_") || a.kind === "function_ref" ||
+            a.kind === "arrow_function" || a.kind === "function_expression") return emitted;
+        if (a.kind === "identifier") {
+          const t = this.varTypes.get(a.name);
+          if (t === "Value") return emitted;
+        }
+        // Bare function name / expression
+        if (emitted.startsWith("ts_value_function(")) return emitted;
+        return `ts_value_function((void*)${emitted})`;
+      };
+      /** Delay is always a number (ms). Never stringify binary/call expressions. */
+      const wrapDelay = (a: CNode | undefined): string => {
+        if (!a) return "ts_value_number(0)";
+        const emitted = this.emit(a);
+        if (emitted.startsWith("ts_value_number(")) return emitted;
+        if (emitted.startsWith("ts_value_")) {
+          // Value that may hold a number
+          return `ts_value_number(ts_to_number(${emitted}))`;
+        }
+        // double-producing: literals, arithmetic, Math.*, randomInt(), identifiers
+        if (a.kind === "number_literal" || a.kind === "binary_expression" ||
+            a.kind === "unary_expression" || a.kind === "call_expression" ||
+            a.kind === "parenthesized" || a.kind === "conditional_expression") {
+          return `ts_value_number(${emitted})`;
+        }
+        if (a.kind === "identifier") {
+          const t = this.varTypes.get(a.name);
+          if (t === "double" || t === "number" || t === "int" || t === "boolean" || !t) {
+            return `ts_value_number(${emitted})`;
+          }
+          if (t === "Value") return `ts_value_number(ts_to_number(${emitted}))`;
+        }
+        // ts_math_* / bare double expressions
+        if (emitted.startsWith("ts_math_") || emitted.startsWith("ts_to_number(") ||
+            emitted.startsWith("date_") || /^[a-zA-Z_][\w]*\(/.test(emitted)) {
+          return `ts_value_number(${emitted})`;
+        }
+        return `ts_value_number(ts_to_number(${emitted}))`;
+      };
+      const wrapRest = (a: CNode): string => {
         const emitted = this.emit(a);
         if (emitted.startsWith("ts_value_") || a.kind === "function_ref" ||
             a.kind === "arrow_function" || a.kind === "function_expression") return emitted;
@@ -954,29 +1025,16 @@ export class ExpressionEmitter {
         if (emitted.startsWith("node_") || emitted.startsWith("ts_")) return emitted;
         return `ts_value_string(ts_to_string(${emitted}))`;
       };
-      const args = (node.arguments || []).map(wrap);
       if (callee.name === "clearTimeout" || callee.name === "clearInterval") {
-        let idArg = args[0] || "ts_value_number(0)";
-        // Timer ids are stored as double; wrap bare identifiers / numbers
-        if (!idArg.startsWith("ts_value_")) {
-          const a0 = node.arguments?.[0];
-          if (a0?.kind === "identifier") {
-            const t = this.varTypes.get(a0.name);
-            if (t === "double" || t === "number" || t === "int" || !t) {
-              idArg = `ts_value_number(${this.emit(a0)})`;
-            }
-          } else if (a0?.kind === "number_literal") {
-            idArg = `ts_value_number(${this.emit(a0)})`;
-          }
-        }
+        let idArg = wrapDelay(node.arguments?.[0]);
         return callee.name === "clearTimeout"
           ? `ts_clear_timeout(${idArg})`
           : `ts_clear_interval(${idArg})`;
       }
       // setTimeout(fn, delay, ...args) / setInterval(fn, delay, ...args)
-      const cb = args[0] || "ts_value_null()";
-      const delay = args[1] || "ts_value_number(0)";
-      const rest = args.slice(2);
+      const cb = wrapCb(node.arguments?.[0]);
+      const delay = wrapDelay(node.arguments?.[1]);
+      const rest = (node.arguments || []).slice(2).map(wrapRest);
       const cFn = callee.name === "setInterval" ? "ts_set_interval" : "ts_set_timeout";
       if (rest.length === 0) {
         return `${cFn}(${cb}, ${delay}, NULL, 0)`;
@@ -1379,6 +1437,45 @@ export class ExpressionEmitter {
       }
     }
 
+    // WritableStream / WritableStreamDefaultWriter methods
+    if (callee.kind === "property_access" && callee.property === "getWriter") {
+      const obj = this.emit(callee.object);
+      return `ts_writable_stream_get_writer(${obj})`;
+    }
+    if (callee.kind === "property_access" &&
+        (callee.property === "write" || callee.property === "close")) {
+      const typeName = String(callee.checkerTypeName || "");
+      const objName = callee.object.kind === "identifier" ? callee.object.name : "";
+      const isWritableWriter =
+        /WritableStream/i.test(typeName) ||
+        /writer/i.test(objName);
+      if (isWritableWriter) {
+        const obj = this.emit(callee.object);
+        if (callee.property === "close") {
+          return `ts_writable_stream_close(${obj})`;
+        }
+        const chunk = node.arguments?.[0] ? this.emit(node.arguments[0]) : `ts_value_string(ts_string_new(""))`;
+        let chunkVal = chunk;
+        if (!chunk.startsWith("ts_value_") && !chunk.startsWith("ts_null(") && !chunk.startsWith("ts_undefined(")) {
+          if (node.arguments?.[0]?.kind === "string_literal") {
+            chunkVal = `ts_value_string(${chunk})`;
+          } else if (chunk.startsWith("ts_string_new(") || chunk.startsWith("ts_string_concat(") ||
+                     chunk.startsWith("ts_to_string(") || chunk.includes("/*__ts_str*/")) {
+            chunkVal = `ts_value_string(${chunk})`;
+          } else if (node.arguments?.[0]?.kind === "identifier") {
+            const t = this.varTypes.get(node.arguments[0].name);
+            if (t === "TSString*" || t === "string") chunkVal = `ts_value_string(${chunk})`;
+            else if (t === "double" || t === "number") chunkVal = `ts_value_number(${chunk})`;
+            else if (t === "Value" || !t) chunkVal = chunk;
+            else chunkVal = `ts_value_string(ts_to_string(${chunk}))`;
+          } else {
+            chunkVal = `ts_value_string(ts_to_string(${chunk}))`;
+          }
+        }
+        return `ts_writable_stream_write(${obj}, ${chunkVal})`;
+      }
+    }
+
     // Special handling for Blob methods: arrayBuffer()
     if (callee.kind === "property_access" && callee.property === "arrayBuffer") {
       const obj = this.emit(callee.object);
@@ -1408,7 +1505,7 @@ export class ExpressionEmitter {
       }
     }
 
-    // Special handling for URL / Buffer / Value toString() — not typed class instances
+    // Special handling for URL / Buffer / Value / number toString()
     // (class Point* etc. fall through to Class_toString dispatch below).
     if (callee.kind === "property_access" && callee.property === "toString") {
       const objName = callee.object.kind === "identifier" ? callee.object.name : "";
@@ -1418,13 +1515,24 @@ export class ExpressionEmitter {
            objType !== "Url*" && !/Promise/i.test(objType));
       if (!isClassPtr) {
         const obj = this.emit(callee.object);
+        // number / length scalars — never treat as Buffer just because name has "file"
+        // e.g. file.length.toString() → ts_buffer_length(file) is int32_t
+        const isNumberExpr =
+          objType === "double" || objType === "number" || objType === "int" ||
+          callee.object?.kind === "number_literal" ||
+          obj.startsWith("ts_buffer_length(") ||
+          obj.startsWith("ts_array_") && /length/.test(obj) ||
+          /\.length\b/.test(obj) ||
+          (callee.object?.kind === "property_access" && callee.object.property === "length");
+        if (isNumberExpr) {
+          return `ts_number_to_string((double)(${obj}))`;
+        }
         // Known URL variables or URL constructor results
         if (obj.startsWith("ts_url_") || /url/i.test(objName) || objType === "Url*") {
           return `ts_url_toString(${obj})`;
         }
-        // Buffer-like toString — return TSString* (not Value) so assignments stay typed
+        // Buffer-like toString — only when the receiver itself is a Buffer/Value, not a scalar
         const isBufferLike =
-          /buf|buffer|file|chunk|data|body/i.test(objName) ||
           obj.startsWith("ts_buffer_") ||
           (objType === "Value" && /buf|buffer|file|chunk|data|body/i.test(objName));
         const encodingArg = node.arguments?.[0];
@@ -2470,9 +2578,15 @@ export class ExpressionEmitter {
             !callee.checkerTypeName.startsWith("TS") && !callee.checkerTypeName.includes(" ") &&
             !callee.checkerTypeName.includes("{") &&
             // Runtime Value wrappers — not real C class structs
-            !/^(Server|IncomingMessage|ClientRequest|Socket|Agent|Buffer|URL|Url|Headers|Response|Request)$/i.test(
-              callee.checkerTypeName.replace(/\*$/, ""))) {
-          className = callee.checkerTypeName.replace(/\*$/, "");
+            !/^(Server|IncomingMessage|ClientRequest|Socket|Agent|Buffer|URL|Url|Headers|Response|Request|WritableStream|ReadableStream|TransformStream)$/i.test(
+              callee.checkerTypeName.replace(/\*$/, "").replace(/<.*>/, ""))) {
+          // Strip TypeScript generics: WritableStreamDefaultWriter<any> → invalid C
+          const rawName = callee.checkerTypeName.replace(/\*$/, "").replace(/<.*>/, "");
+          if (/[<>]/.test(rawName) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(rawName)) {
+            className = null;
+          } else {
+            className = rawName;
+          }
         } else if (commandMethods.has(methodName) &&
                    /program|cmd|command|this/i.test(objectName)) {
           className = "Command";
@@ -2485,8 +2599,9 @@ export class ExpressionEmitter {
           // formatHelp callbacks use short names like `c`
           className = "Command";
         }
+        const checkerBase = callee.checkerTypeName?.replace(/\*$/, "").replace(/<.*>/, "");
         if (className && (commandMethods.has(methodName) || optionMethods.has(methodName) ||
-            argumentMethods.has(methodName) || className === callee.checkerTypeName?.replace(/\*$/, ""))) {
+            argumentMethods.has(methodName) || className === checkerBase)) {
           const selfCast = varType === "Value" || !varType || varType === "any"
             ? `((${className}*)${objectName}.as.object)`
             : objectName;
@@ -2780,8 +2895,11 @@ export class ExpressionEmitter {
       // Method dispatch for Value-typed variables backed by struct types
       // Uses checkerTypeName from the visitor to determine the actual class
       if (varType === "Value" && callee.checkerTypeName && /^[A-Z]/.test(callee.checkerTypeName) &&
-          !/Promise|<|>/.test(callee.checkerTypeName)) {
-        const className = callee.checkerTypeName.replace(/\*$/, "");
+          !/Promise|<|>|WritableStream|ReadableStream|TransformStream/.test(callee.checkerTypeName)) {
+        const className = callee.checkerTypeName.replace(/\*$/, "").replace(/<.*>/, "");
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(className)) {
+          // fall through — invalid C identifier from generics/unions
+        } else {
         const selfCast = `((${className}*)${objectName}.as.object)`;
         // Only use expected param types if propertyCType is a real function pointer type
         const hasSignature = callee.propertyCType && callee.propertyCType.includes("(*)");
@@ -2847,6 +2965,7 @@ export class ExpressionEmitter {
         const allArgsStr = args.join(", ");
         const allArgs = allArgsStr ? `${selfCast}, ${allArgsStr}` : selfCast;
         return `${className}_${methodName}(${allArgs})`;
+        } // end valid className
       }
 
       // Method dispatch for Value-typed variables backed by struct types
@@ -3112,8 +3231,9 @@ export class ExpressionEmitter {
         }
         return `(((void(*)(TSString*))(${calleeStr}).as.function)(${a0}))`;
       }
+      // Zero-arg: TAG_FUNCTION call, or StreamBody identity (destructured getWriter)
       if (rawArgs.length === 0) {
-        return `(((Value(*)(void))(${calleeStr}).as.function)())`;
+        return `ts_value_call0(${calleeStr})`;
       }
       // ActionHandler: Value(*)(TSArray*) roughly — use variadic cast
       return `(((Value(*)())(${calleeStr}).as.function)(${rawArgs.join(", ")}))`;
@@ -3189,6 +3309,11 @@ export class ExpressionEmitter {
         (node.object.name === "Array" || node.object.name === "Array_") &&
         node.property === "isArray") {
       return "/*Array_isArray*/";
+    }
+
+    // WritableStream.getWriter as property (destructuring / bound method)
+    if (node.property === "getWriter") {
+      return `ts_writable_stream_get_writer(${object})`;
     }
     // Math.max / Math.min as property — emitCall will handle Math.max(...)
     if (node.object.kind === "identifier" && node.object.name === "Math") {
@@ -3583,6 +3708,11 @@ export class ExpressionEmitter {
       return `ts_headers()`;
     }
 
+    // WritableStream → StreamBody-backed chunk collector for Response streaming
+    if (className === "WritableStream") {
+      return `ts_writable_stream_new()`;
+    }
+
     // Handle URL constructor — supports new URL(url) and new URL(url, base)
     // Returns Value (not TSString*)
     if (className === "URL") {
@@ -3609,33 +3739,51 @@ export class ExpressionEmitter {
     }
 
     // Handle Response constructor — new Response(body[, init])
-    // Preserve Buffer/Value bodies as-is (binary-safe); only stringify primitives.
+    // Emits ts_response_new so headers/status/streaming (string[]) are preserved.
     if (className === "Response") {
-      if (!node.arguments || node.arguments.length === 0) {
-        return `ts_value_string(ts_string_new(""))`;
-      }
-      const body = this.emit(node.arguments[0]);
-      // Already a Value (e.g. Buffer from readFile, or ts_value_string(...))
-      if (body.startsWith("ts_value_") ||
-          body.startsWith("node_fs_readFile") ||
-          body.startsWith("ts_buffer_")) {
-        return body;
-      }
-      if (node.arguments[0].kind === "string_literal") {
-        return `ts_value_string(${body})`;
-      }
-      if (body.startsWith("ts_string_new(") || body.startsWith("ts_string_concat(") ||
-          body.startsWith("ts_string_new_len(")) {
-        return `ts_value_string(${body})`;
-      }
-      // Identifier that may be a Buffer/Value — do not force string conversion
-      if (node.arguments[0].kind === "identifier") {
-        const t = this.varTypes.get(node.arguments[0].name);
-        if (t === "Value" || t === "any" || t === "unknown" || !t) {
+      const wrapBody = (arg: CNode | undefined): string => {
+        if (!arg) return `ts_value_string(ts_string_new(""))`;
+        const body = this.emit(arg);
+        if (body.startsWith("ts_value_") ||
+            body.startsWith("node_fs_readFile") ||
+            body.startsWith("ts_buffer_") ||
+            body.startsWith("ts_response_new(") ||
+            body.startsWith("ts_writable_stream_") ||
+            body.startsWith("ts_array_")) {
           return body;
         }
-      }
-      return `ts_value_string(ts_to_string(${body}))`;
+        if (arg.kind === "string_literal") return `ts_value_string(${body})`;
+        if (body.startsWith("ts_string_new(") || body.startsWith("ts_string_concat(") ||
+            body.startsWith("ts_string_new_len(")) {
+          return `ts_value_string(${body})`;
+        }
+        if (arg.kind === "array_literal") {
+          return `ts_value_array(${body})`;
+        }
+        if (arg.kind === "identifier") {
+          const t = this.varTypes.get(arg.name);
+          if (t === "TSArray*" || t === "array") return `ts_value_array(${body})`;
+          if (t === "TSString*" || t === "string") return `ts_value_string(${body})`;
+          if (t === "Value" || t === "any" || t === "unknown" || !t) return body;
+        }
+        return `ts_value_string(ts_to_string(${body}))`;
+      };
+      const wrapInit = (arg: CNode | undefined): string => {
+        if (!arg) return `ts_value_null()`;
+        const init = this.emit(arg);
+        if (init.startsWith("ts_value_")) return init;
+        if (arg.kind === "object_literal" || init.includes("ts_hashmap_new()")) {
+          return `ts_value_object(${init})`;
+        }
+        if (arg.kind === "identifier") {
+          const t = this.varTypes.get(arg.name);
+          if (t === "Value") return init;
+        }
+        return `ts_value_object(${init})`;
+      };
+      const bodyArg = wrapBody(node.arguments?.[0]);
+      const initArg = wrapInit(node.arguments?.[1]);
+      return `ts_response_new(${bodyArg}, ${initArg})`;
     }
 
     // Handle Error constructors (Error, TypeError, RangeError, etc.)

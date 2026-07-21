@@ -4,16 +4,20 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #pragma comment(lib, "ws2_32.lib")
 typedef int socklen_t;
 #define CLOSE_SOCKET closesocket
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <strings.h>
 #define CLOSE_SOCKET close
+#define _stricmp strcasecmp
 #endif
 
 #include <stdio.h>
@@ -41,14 +45,25 @@ static void http_send_all(int client_fd, const char* data, size_t len) {
   }
 }
 
+/* Disable Nagle so each chunk is pushed to the wire immediately (true streaming). */
+static void http_set_nodelay(int fd) {
+  int one = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
+}
+
+static const char* http_status_text(int status) {
+  if (status == 404) return "Not Found";
+  if (status == 500) return "Internal Server Error";
+  if (status == 201) return "Created";
+  if (status == 204) return "No Content";
+  if (status == 200) return "OK";
+  return "OK";
+}
+
 static void http_respond(int client_fd, int status, const char* content_type,
                          const char* body, size_t body_len) {
   char header[1024];
-  const char* statusText = "OK";
-  if (status == 404) statusText = "Not Found";
-  else if (status == 500) statusText = "Internal Server Error";
-  else if (status == 201) statusText = "Created";
-  else if (status == 204) statusText = "No Content";
+  const char* statusText = http_status_text(status);
   if (!content_type) content_type = "application/octet-stream";
   if (!body) {
     body = "";
@@ -70,18 +85,175 @@ static void http_respond(int client_fd, int status, const char* content_type,
   }
 }
 
+#ifdef _WIN32
+static void http_sleep_ms(int ms) {
+  if (ms > 0) Sleep((DWORD)ms);
+}
+#else
+static void http_sleep_ms(int ms) {
+  if (ms > 0) usleep((useconds_t)ms * 1000);
+}
+#endif
+
+/* Append custom headers from FetchResponse (skip hop-by-hop / length we set). */
+static void http_append_custom_headers(char* buf, size_t cap, size_t* pos, TSHashMap* headers) {
+  if (!headers) return;
+  for (int32_t i = 0; i < headers->capacity; i++) {
+    if (!headers->entries[i].occupied || !headers->entries[i].key) continue;
+    const char* k = headers->entries[i].key->data;
+    if (!k) continue;
+    /* Skip ones we manage */
+    if (_stricmp(k, "Content-Length") == 0 || _stricmp(k, "content-length") == 0) continue;
+    if (_stricmp(k, "Content-Type") == 0 || _stricmp(k, "content-type") == 0) continue;
+    if (_stricmp(k, "Transfer-Encoding") == 0 || _stricmp(k, "transfer-encoding") == 0) continue;
+    if (_stricmp(k, "Connection") == 0 || _stricmp(k, "connection") == 0) continue;
+    if (_stricmp(k, "Cache-Control") == 0 || _stricmp(k, "cache-control") == 0) continue;
+    if (_stricmp(k, "X-Stream-Delay-Ms") == 0) continue;
+    Value v = headers->entries[i].value;
+    TSString* vs = (v.tag == TAG_STRING) ? v.as.string : ts_to_string(v);
+    if (!vs || !vs->data) continue;
+    if (*pos + (size_t)headers->entries[i].key->length + (size_t)vs->length + 8 >= cap) break;
+    *pos += (size_t)snprintf(buf + *pos, cap - *pos, "%s: %s\r\n", k, vs->data);
+  }
+}
+
+/* Send one HTTP/1.1 chunk and force it onto the wire. */
+static void http_send_chunk(int client_fd, const char* data, size_t len) {
+  char size_line[32];
+  int sl = snprintf(size_line, sizeof(size_line), "%zx\r\n", len);
+  if (sl > 0) http_send_all(client_fd, size_line, (size_t)sl);
+  if (len > 0 && data) http_send_all(client_fd, data, len);
+  http_send_all(client_fd, "\r\n", 2);
+}
+
+/* Send one StreamBody chunk item to the client. */
+static void http_send_stream_item(int client_fd, Value item) {
+  const char* data = "";
+  size_t len = 0;
+  if (item.tag == TAG_STRING && item.as.string) {
+    data = item.as.string->data ? item.as.string->data : "";
+    len = (size_t)item.as.string->length;
+  } else if (item.tag == TAG_OBJECT && item.as.object &&
+             *((int32_t*)item.as.object) == BUFFER_TAG) {
+    Buffer* b = (Buffer*)item.as.object;
+    data = b->data ? (const char*)b->data : "";
+    len = (size_t)(b->length > 0 ? b->length : 0);
+  } else {
+    TSString* s = ts_to_string(item);
+    data = s && s->data ? s->data : "";
+    len = s ? (size_t)s->length : 0;
+  }
+  http_send_chunk(client_fd, data, len);
+}
+
+/* True streaming: headers first, then body chunks.
+ * Supports (1) pre-buffered chunks with X-Stream-Delay-Ms pacing, and
+ * (2) live mode: setTimeout callbacks that writer.write() after Response returns —
+ * we pump timers and flush new chunks as they appear. */
+static void http_respond_chunked(int client_fd, FetchResponse* fr) {
+  StreamBody* sb = (StreamBody*)fr->stream;
+  if (!sb || sb->type_tag != STREAM_BODY_TAG) {
+    http_respond(client_fd, fr->status, "text/plain", "", 0);
+    return;
+  }
+  if (!sb->chunks) sb->chunks = ts_array_new();
+
+  http_set_nodelay(client_fd);
+
+  char header[2048];
+  size_t hpos = 0;
+  const char* ctype = "text/plain; charset=utf-8";
+  if (fr->headers) {
+    Value ct = ts_hashmap_get(fr->headers, ts_string_new("Content-Type"));
+    if (ct.tag != TAG_STRING) ct = ts_hashmap_get(fr->headers, ts_string_new("content-type"));
+    if (ct.tag == TAG_STRING && ct.as.string && ct.as.string->data) {
+      ctype = ct.as.string->data;
+    }
+  }
+
+  int is_sse = (strstr(ctype, "text/event-stream") != NULL);
+  if (is_sse) {
+    hpos += (size_t)snprintf(header + hpos, sizeof(header) - hpos,
+      "HTTP/1.1 %d %s\r\n"
+      "Content-Type: text/event-stream; charset=utf-8\r\n"
+      "Transfer-Encoding: chunked\r\n"
+      "Connection: keep-alive\r\n"
+      "Cache-Control: no-cache, no-transform\r\n"
+      "X-Accel-Buffering: no\r\n",
+      fr->status,
+      fr->statusText && fr->statusText->data ? fr->statusText->data : http_status_text(fr->status));
+  } else {
+    hpos += (size_t)snprintf(header + hpos, sizeof(header) - hpos,
+      "HTTP/1.1 %d %s\r\n"
+      "Content-Type: %s\r\n"
+      "Transfer-Encoding: chunked\r\n"
+      "Connection: close\r\n"
+      "Cache-Control: no-cache\r\n"
+      "X-Accel-Buffering: no\r\n",
+      fr->status,
+      fr->statusText && fr->statusText->data ? fr->statusText->data : http_status_text(fr->status),
+      ctype);
+  }
+  http_append_custom_headers(header, sizeof(header), &hpos, fr->headers);
+  if (hpos + 3 < sizeof(header)) {
+    header[hpos++] = '\r';
+    header[hpos++] = '\n';
+    header[hpos] = '\0';
+  }
+  http_send_all(client_fd, header, hpos);
+
+  int delay = sb->delay_ms;
+  if (delay < 0) delay = 0;
+
+  /* Live stream: flush existing chunks, pump timers for deferred writer.write() */
+  int32_t sent = 0;
+  int idle_rounds = 0;
+  for (;;) {
+    TSArray* chunks = sb->chunks;
+    int32_t len = chunks ? chunks->length : 0;
+
+    /* Send any newly written chunks */
+    while (sent < len) {
+      http_send_stream_item(client_fd, ts_array_get(chunks, sent));
+      sent++;
+      if (delay > 0 && sent < len) {
+        http_sleep_ms(delay);
+      }
+    }
+
+    /* Deferred setTimeout writers still pending? */
+    if (ts_timers_pending()) {
+      ts_timers_poll();
+      idle_rounds = 0;
+      continue;
+    }
+
+    /* No timers, no new chunks — done (or empty stream) */
+    if (sent >= (chunks ? chunks->length : 0)) {
+      idle_rounds++;
+      if (idle_rounds >= 1) break;
+    }
+  }
+
+  http_send_all(client_fd, "0\r\n\r\n", 5);
+}
+
 /* Extract body bytes + content-type from handler return value.
- * Supports: string, Buffer, FetchResponse, { body, headers }. */
-static void extract_response(Value result, const char** out_body, size_t* out_len,
-                             const char** out_ctype) {
+ * Supports: string, Buffer, FetchResponse (buffered or stream), { body, headers }.
+ * Returns 1 if caller should use chunked streaming (fr filled), else 0 for buffered. */
+static int extract_response(Value result, const char** out_body, size_t* out_len,
+                            const char** out_ctype, int* out_status,
+                            FetchResponse** out_stream_fr) {
   *out_body = "";
   *out_len = 0;
   *out_ctype = "text/plain";
+  *out_status = 200;
+  *out_stream_fr = NULL;
 
   if (result.tag == TAG_STRING && result.as.string) {
     *out_body = result.as.string->data ? result.as.string->data : "";
     *out_len = (size_t)result.as.string->length;
-    return;
+    return 0;
   }
 
   if (result.tag == TAG_OBJECT && result.as.object) {
@@ -92,15 +264,12 @@ static void extract_response(Value result, const char** out_body, size_t* out_le
       *out_body = b->data ? (const char*)b->data : "";
       *out_len = (size_t)(b->length > 0 ? b->length : 0);
       *out_ctype = "application/octet-stream";
-      return;
+      return 0;
     }
 
     if (tag == FETCH_RESPONSE_TAG) {
       FetchResponse* fr = (FetchResponse*)result.as.object;
-      if (fr->body) {
-        *out_body = fr->body->data ? fr->body->data : "";
-        *out_len = (size_t)fr->body->length;
-      }
+      *out_status = fr->status > 0 ? fr->status : 200;
       if (fr->headers) {
         Value ct = ts_hashmap_get(fr->headers, ts_string_new("Content-Type"));
         if (ct.tag != TAG_STRING) ct = ts_hashmap_get(fr->headers, ts_string_new("content-type"));
@@ -108,7 +277,19 @@ static void extract_response(Value result, const char** out_body, size_t* out_le
           *out_ctype = ct.as.string->data;
         }
       }
-      return;
+      /* Streaming body (array chunks / StreamBody) */
+      if (fr->stream && !fr->body_complete) {
+        StreamBody* sb = (StreamBody*)fr->stream;
+        if (sb && sb->type_tag == STREAM_BODY_TAG) {
+          *out_stream_fr = fr;
+          return 1;
+        }
+      }
+      if (fr->body) {
+        *out_body = fr->body->data ? fr->body->data : "";
+        *out_len = (size_t)fr->body->length;
+      }
+      return 0;
     }
 
     /* HashMap with body key */
@@ -134,16 +315,17 @@ static void extract_response(Value result, const char** out_body, size_t* out_le
         *out_ctype = ct.as.string->data;
       }
     }
-    return;
+    return 0;
   }
 
   if (result.tag == TAG_NULL) {
-    return;
+    return 0;
   }
 
   TSString* s = ts_to_string(result);
   *out_body = s && s->data ? s->data : "";
   *out_len = s ? (size_t)s->length : 0;
+  return 0;
 }
 
 Value node_http_createServer(Value callback) {
@@ -209,6 +391,7 @@ Value node_http_server_listen(Value serverVal, Value portVal, Value callback) {
     socklen_t client_len = sizeof(client_addr);
     int client_fd = (int)accept(server->server_fd, (struct sockaddr*)&client_addr, &client_len);
     if (client_fd < 0) continue;
+    http_set_nodelay(client_fd);
 
     /* Read request */
     char buf[4096];
@@ -250,11 +433,21 @@ Value node_http_server_listen(Value serverVal, Value portVal, Value callback) {
     if (server->callback.tag == TAG_FUNCTION && server->callback.as.function) {
       HttpRequestHandler handler = (HttpRequestHandler)server->callback.as.function;
       Value result = handler(ts_value_object(req));
+      /* Await Promise if handler is async */
+      if (ts_value_is_promise(result)) {
+        result = ts_await(result);
+      }
       const char* body = "";
       size_t body_len = 0;
       const char* ctype = "text/plain";
-      extract_response(result, &body, &body_len, &ctype);
-      http_respond(client_fd, 200, ctype, body, body_len);
+      int status = 200;
+      FetchResponse* stream_fr = NULL;
+      int is_stream = extract_response(result, &body, &body_len, &ctype, &status, &stream_fr);
+      if (is_stream && stream_fr) {
+        http_respond_chunked(client_fd, stream_fr);
+      } else {
+        http_respond(client_fd, status, ctype, body, body_len);
+      }
     } else {
       const char* fallback = "Hello, World!";
       http_respond(client_fd, 200, "text/plain", fallback, strlen(fallback));

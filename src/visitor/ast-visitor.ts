@@ -35,6 +35,8 @@ export class AstVisitor {
   private inConstructor = false;
   /** Current function's return type — used to decide if `return this` needs Value wrapping */
   private currentReturnType = "void";
+  /** Free-var renames active while visiting a closure body: outerName → __cap_N_name */
+  private activeCaptures: Map<string, string> = new Map();
 
   constructor(ctx: VisitorContext) {
     this.ctx = ctx;
@@ -1128,6 +1130,11 @@ export class AstVisitor {
         if (name === "undefined") {
           return { kind: "undefined_literal" };
         }
+        // Free-var capture: rewrite outer name to __cap_N_name inside closure body
+        const cap = this.activeCaptures.get(name);
+        if (cap) {
+          return { kind: "identifier", name: cap };
+        }
         // Node/CommonJS globals
         if (name === "__dirname" || name === "__filename") {
           return { kind: "identifier", name };
@@ -1608,50 +1615,36 @@ export class AstVisitor {
       }
     }
 
-    // Free variables referenced in the body but not declared as params → promote
-    // to file-scope statics so the hoisted C function can see them.
+    // Free variables → leading Value formals. Call sites bind a per-call snapshot
+    // via ts_bind_function so loop vars (setTimeout in for-loop) are not shared.
     const freeVars = this.collectFreeVariables(node, new Set(params.map(p => p.name)));
+    const captures: { outerName: string; captureName: string; type: string }[] = [];
+    const captureParams: { name: string; type: string }[] = [];
     for (const name of freeVars) {
-      const outerType = this.ctx.scope.lookup(name) || "double";
-      const cType = outerType === "number" ? "double" : outerType;
-      // Declare file-scope static once (idempotent via name check)
-      const already = this.hoistedClosures.some(
-        n => n.kind === "variable_decl" && n.name === name && n.isStatic,
-      ) || this.ctx.output.some(
-        n => n.kind === "variable_decl" && n.name === name && n.isStatic,
-      );
-      if (!already) {
-        this.hoistedClosures.push({
-          kind: "variable_decl",
-          name,
-          type: cType,
-          init: undefined,
-          isStatic: true,
-          isExport: false,
-        });
-      }
-      // Mark as file-scope so later variable_decl becomes assignment to the static
-      this.ctx.scope.declare(`__static_${name}`, outerType);
-
-      // Retroactively convert already-emitted local decls of this name into
-      // assignments (they would otherwise shadow the static).
-      this.rewriteLocalDeclToStaticAssign(this.ctx.output, name);
-      this.rewriteLocalDeclToStaticAssign(this.hoistedClosures, name);
+      // Always Value so timer/bind packing is uniform; body uses Value ops / ts_to_number
+      captureParams.push({ name, type: "Value" });
+      captures.push({ outerName: name, captureName: name, type: "Value" });
     }
+    // Leading formals: captures first, then original params (e.g. resolve)
+    const allParams = [...captureParams, ...params];
+    // Mutate params in place for the rest of this function
+    params.length = 0;
+    params.push(...allParams);
 
     const bodyNodes: CNode[] = [];
     this.ctx.scope.push();
     for (const p of params) {
       this.ctx.scope.declare(p.name, p.type);
     }
-    // Free vars remain visible via outer scopes / statics
+
+    // Free vars are real params — no static rename
+    const prevCaptures = this.activeCaptures;
+    this.activeCaptures = new Map();
 
     if (ts.isArrowFunction(node)) {
       if (ts.isBlock(node.body)) {
         this.visitBlockTo(node.body, bodyNodes);
       } else {
-        // Expression-bodied arrow: capture chain temps into the closure body
-        // (visitExpression may push __chain_* decls to ctx.output)
         const prevOutput = this.ctx.output;
         this.ctx.output = bodyNodes;
         const expr = this.visitExpression(node.body);
@@ -1662,13 +1655,16 @@ export class AstVisitor {
       this.visitBlockTo(node.body, bodyNodes);
     }
 
+    this.activeCaptures = prevCaptures;
+
     // After building body, check if any return statement calls a runtime function
     // (node_*, ts_json_*, ts_to_string, process.*, console.*, etc.) — these return Value,
     // not the TS-mapped type. Override returnType to Value to avoid type mismatches.
+    // Also: setTimeout returns double but Promise executors / Value callbacks must return Value.
     if (returnType !== "Value") {
       for (const stmt of bodyNodes) {
         if (stmt.kind === "return_statement" && stmt.value) {
-          if (this.callsRuntimeFunction(stmt.value)) {
+          if (this.callsRuntimeFunction(stmt.value) || this.returnsTimerId(stmt.value)) {
             returnType = "Value";
             break;
           }
@@ -1702,7 +1698,8 @@ export class AstVisitor {
     return {
       kind: "function_ref",
       name: fnName,
-      freeVars, // for emitter: ensure static decls exist before use
+      freeVars, // outer names captured
+      captures, // { outerName, captureName, type }[] for emission-site assign
     };
   }
 
@@ -1781,6 +1778,20 @@ export class AstVisitor {
     return [...free].filter(n => !skip.has(n) && !/^[A-Z]/.test(n));
   }
 
+  /** setTimeout/setInterval return double — wrap as Value when used as Promise executor body. */
+  private returnsTimerId(node: CNode): boolean {
+    if (!node || typeof node !== "object") return false;
+    if (node.kind === "call_expression") {
+      const callee = node.callee;
+      if (callee?.kind === "identifier" &&
+          (callee.name === "setTimeout" || callee.name === "setInterval" ||
+           callee.name === "ts_set_timeout" || callee.name === "ts_set_interval")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /** Check if a CNode expression tree contains a call to a runtime function (node_*, ts_*, process.*, console.*). */
   private callsRuntimeFunction(node: CNode): boolean {
     if (!node || typeof node !== "object") return false;
@@ -1788,6 +1799,9 @@ export class AstVisitor {
       const callee = node.callee;
       if (callee?.kind === "identifier") {
         if (callee.name.startsWith("node_") || callee.name.startsWith("ts_")) return true;
+        if (callee.name === "setTimeout" || callee.name === "setInterval" ||
+            callee.name === "clearTimeout" || callee.name === "clearInterval" ||
+            callee.name === "fetch" || callee.name === "Promise") return true;
       }
       if (callee?.kind === "property_access") {
         // Walk the object chain to find the root identifier

@@ -11,7 +11,9 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli/index.ts",
     "test": "node --test dist/**/*.test.js",
-    "start": "node dist/cli/index.js"
+    "start": "node dist/cli/index.js",
+    "typecheck:test": "tsc -p test/tsconfig.json --noEmit",
+    "typecheck:types": "tsc -p test/tsconfig.json --noEmit"
   },
   "keywords": [
     "typescript",
@@ -25,6 +27,7 @@
     "typescript": "^5.4.0"
   },
   "devDependencies": {
+    "@types/node": "^26.1.1",
     "tsx": "^4.7.0"
   }
 }

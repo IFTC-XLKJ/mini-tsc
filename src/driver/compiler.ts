@@ -415,10 +415,31 @@ Closure* ts_closure_new(void* fn, Value* captures, int32_t count);
 Value ts_closure_call(Closure* closure, Value* args, int32_t arg_count);
 void ts_closure_free(Closure* closure);
 
-/* Garbage collector */
-void ts_gc_init(void);
+/* Garbage collector — automatic mark-sweep + refcount immediate free */
+typedef enum {
+  GC_KIND_RAW = 0,
+  GC_KIND_STRING,
+  GC_KIND_ARRAY,
+  GC_KIND_HASHMAP,
+  GC_KIND_CLOSURE,
+  GC_KIND_PROMISE
+} GcKind;
+
+void  ts_gc_init(void);
+void  ts_gc_set_stack_bottom(void* bottom);
+void  ts_gc_set_threshold(size_t bytes);
 void* ts_gc_alloc(size_t size);
-void ts_gc_collect(void);
+void* ts_gc_alloc_kind(size_t size, GcKind kind);
+void  ts_gc_free_object(void* ptr);
+int   ts_gc_is_managed(void* ptr);
+void  ts_gc_collect(void);
+void  ts_gc_maybe_collect(void);
+void  ts_gc_maybe_collect_idle(void);
+void  ts_gc_add_root(void** slot);
+void  ts_gc_remove_root(void** slot);
+size_t ts_gc_allocated_bytes(void);
+size_t ts_gc_object_count(void);
+size_t ts_gc_collect_count(void);
 
 /* Value constructors */
 Value ts_value_number(double n);
@@ -451,6 +472,7 @@ void ts_clear_timeout(Value id);
 void ts_clear_interval(Value id);
 void ts_timers_run(void);
 int ts_timers_pending(void);
+int ts_timers_poll(void);
 
 /* Browser-like dialogs */
 void ts_alert(Value message);
@@ -483,6 +505,13 @@ typedef struct TSPromise {
   struct TSPromise* then_promise;
 } TSPromise;
 
+#define PROMISE_RESOLVE_TAG 0x50525356
+typedef struct {
+  int32_t type_tag;
+  TSPromise* promise;
+  int is_reject;
+} PromiseResolver;
+
 Value ts_promise_new(void);
 Value ts_promise_resolve(Value p, Value v);
 Value ts_promise_reject(Value p, Value err);
@@ -511,7 +540,7 @@ void ts_async_run(void);
 int ts_async_pending(void);
 
 /* Math builtins */
-Value ts_math_random(void);
+double ts_math_random(void);
 double ts_math_floor(double x);
 double ts_math_ceil(double x);
 double ts_math_round(double x);
@@ -629,6 +658,31 @@ Value ts_fetch_response_headers(Value response);
 Value ts_fetch_response_body(Value response);
 Value ts_fetch_body_get_reader(Value body);
 Value ts_fetch_reader_read(Value reader);
+
+/* Web Response constructor + streaming body (server chunked responses) */
+#define STREAM_BODY_TAG 0x53424F44
+typedef struct StreamBody {
+  int32_t type_tag;
+  TSArray* chunks;
+  int delay_ms;
+} StreamBody;
+Value ts_response_new(Value body, Value init);
+int  ts_response_is_stream(Value response);
+StreamBody* ts_response_stream_body(Value response);
+Value ts_writable_stream_new(void);
+Value ts_writable_stream_get_writer(Value stream);
+Value ts_writable_stream_write(Value writer, Value chunk);
+Value ts_writable_stream_close(Value writer);
+Value ts_value_call0(Value v);
+#define BOUND_FN_TAG 0x42464E00
+typedef struct {
+  int32_t type_tag;
+  void* fn;
+  Value caps[4];
+  int ncaps;
+} BoundFn;
+Value ts_bind_function(void* fn, Value* caps, int ncaps);
+Value ts_value_call(Value callee, Value* args, int argc);
 
 /* Headers constructor */
 Value ts_headers(void);
@@ -896,6 +950,9 @@ extern TsErrorContext _ts_current_error;
     lines.push('');
     lines.push('int main(int argc, char* argv[]) {');
     lines.push('  node_process_set_argv(argc, argv);');
+    lines.push('  /* GC: stack bottom for conservative mark + init */');
+    lines.push('  ts_gc_init();');
+    lines.push('  ts_gc_set_stack_bottom((void*)&argc);');
     lines.push('  /* Initialize modules */');
     for (const filePath of graph.sortedOrder) {
       const moduleName = this.filePathToModuleName(filePath);
@@ -939,7 +996,12 @@ extern TsErrorContext _ts_current_error;
         lines.push('  ts_async_run();');
       } else {
         lines.push('  ts_timers_run();');
+        lines.push('  ts_gc_maybe_collect_idle();');
       }
+      lines.push('');
+    } else {
+      lines.push('  /* Final opportunistic GC before exit */');
+      lines.push('  ts_gc_maybe_collect_idle();');
       lines.push('');
     }
     lines.push('  return 0;');
@@ -1023,7 +1085,7 @@ extern TsErrorContext _ts_current_error;
     const needPromise = usage?.features.has("promise") ?? false;
     const coreRuntime: string[] = [];
     if (needsTsRuntime) {
-      // string_ops holds core strings + indexOf/substring/replace/… (GC drops unused)
+      // string_ops holds core strings + indexOf/substring/replace/… (linker GC drops unused)
       coreRuntime.push("runtime.c", "string_ops.c");
       if (needBuiltins) coreRuntime.push("builtins.c");
       if (needArray) coreRuntime.push("array_ops.c");
@@ -1033,6 +1095,8 @@ extern TsErrorContext _ts_current_error;
         coreRuntime.push("promise.c", "thread_pool.c");
       }
     }
+    // Automatic GC is always linked: main() always calls ts_gc_init / set_stack_bottom
+    coreRuntime.push("gc.c");
     for (const entry of coreRuntime) {
       const p = path.join(runtimeDir, entry);
       if (fs.existsSync(p)) runtimeSrcFiles.push(p);

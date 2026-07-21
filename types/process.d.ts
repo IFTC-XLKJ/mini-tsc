@@ -1,4 +1,4 @@
-/** Minimal Node.js `process` ambient types for mini-tsc. */
+/** Node.js `process` ambient types for mini-tsc. */
 declare module "process" {
   interface ProcessStream {
     readonly fd: number;
@@ -14,10 +14,15 @@ declare module "process" {
     clearLine(dir?: number): boolean;
   }
 
+  interface ProcessEnv {
+    [key: string]: string | undefined;
+  }
+
   interface Process {
-    readonly env: { [key: string]: string | undefined };
+    readonly env: ProcessEnv;
     readonly argv: string[];
     readonly pid: number;
+    readonly platform: string;
     readonly stdin: ProcessStream;
     readonly stdout: ProcessStream;
     readonly stderr: ProcessStream;
@@ -30,9 +35,10 @@ declare module "process" {
   }
 
   const process: Process;
-  const env: Process["env"];
+  const env: ProcessEnv;
   const argv: string[];
   const pid: number;
+  const platform: string;
   const stdin: ProcessStream;
   const stdout: ProcessStream;
   const stderr: ProcessStream;
@@ -41,8 +47,20 @@ declare module "process" {
   function exit(code?: number): never;
 
   export {
-    process, env, argv, pid, stdin, stdout, stderr, cwd, chdir, exit,
-    Process, ProcessStream,
+    process,
+    env,
+    argv,
+    pid,
+    platform,
+    stdin,
+    stdout,
+    stderr,
+    cwd,
+    chdir,
+    exit,
+    Process,
+    ProcessStream,
+    ProcessEnv,
   };
   export default process;
 }

@@ -1,4 +1,4 @@
-/** Minimal Node.js `readline` ambient types for mini-tsc. */
+/** Node.js `readline` ambient types for mini-tsc. */
 declare module "readline" {
   interface ReadLineOptions {
     input?: any;
@@ -22,9 +22,16 @@ declare module "readline" {
   }
 
   function createInterface(options?: ReadLineOptions): Interface;
-  function clearLine(stream: any, dir: number): void;
+  function clearLine(stream: any, dir?: number): void;
   function cursorTo(stream: any, x: number, y?: number): void;
   function moveCursor(stream: any, dx: number, dy: number): void;
 
-  export { createInterface, clearLine, cursorTo, moveCursor, Interface, ReadLineOptions };
+  export {
+    createInterface,
+    clearLine,
+    cursorTo,
+    moveCursor,
+    Interface,
+    ReadLineOptions,
+  };
 }

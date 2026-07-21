@@ -550,10 +550,16 @@ typedef struct VTable {
   void* methods[];        // function pointers
 } VTable;
 
-// Garbage collector
+// Garbage collector (runtime/src/gc.c) — automatic mark-sweep
+// Triggers: allocation threshold, event-loop idle, explicit gc() / ts_gc_collect()
+// Roots: explicit list + conservative stack scan + main executable data sections
 void ts_gc_init(void);
+void ts_gc_set_stack_bottom(void* bottom);
 void* ts_gc_alloc(size_t size);
+void* ts_gc_alloc_kind(size_t size, GcKind kind);
 void ts_gc_collect(void);
+void ts_gc_maybe_collect(void);
+void ts_gc_maybe_collect_idle(void);
 
 // console.log, Math, Date, JSON
 void ts_console_log(Value val);

@@ -16,8 +16,31 @@ function main(): void {
             return new Response(file, {
                 headers: {
                     "Content-Type": "application/zip",
-                    "Content-Length": file.length.toString(),
                     "Content-Disposition": "attachment; filename=mini-tsc.zip",
+                },
+            });
+        }
+        if (url.pathname === "/test-stream") {
+            const writableStream = new WritableStream();
+            const { getWriter } = writableStream;
+            const writer = getWriter();
+            if (!writer) {
+                return new Response("No body writer available", { status: 500 });
+            }
+            for (let i = 1; i <= 5; i++) {
+                setTimeout(
+                    () => {
+                        writer.write("id: " + i + "\nevent: tick\ndata: chunk " + i + "\n\n");
+                        if (i === 5) {
+                            writer.close();
+                        }
+                    },
+                    i * randomInt(1000, 5000),
+                );
+            }
+            return new Response(writer, {
+                headers: {
+                    "Content-Type": "text/event-stream",
                 },
             });
         }
@@ -28,3 +51,6 @@ function main(): void {
     });
 }
 main();
+function randomInt(min: number, max: number): number {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}

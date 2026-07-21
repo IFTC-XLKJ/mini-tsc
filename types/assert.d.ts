@@ -1,21 +1,24 @@
-/** Minimal Node.js `assert` ambient types for mini-tsc. */
+/** Node.js `assert` ambient types for mini-tsc. */
 declare module "assert" {
-  function ok(value: any, message?: string | Error): asserts value;
-  function equal(actual: any, expected: any, message?: string | Error): void;
-  function notEqual(actual: any, expected: any, message?: string | Error): void;
-  function strictEqual(actual: any, expected: any, message?: string | Error): void;
-  function notStrictEqual(actual: any, expected: any, message?: string | Error): void;
-  function deepEqual(actual: any, expected: any, message?: string | Error): void;
-  function deepStrictEqual(actual: any, expected: any, message?: string | Error): void;
-  function notDeepEqual(actual: any, expected: any, message?: string | Error): void;
-  function notDeepStrictEqual(actual: any, expected: any, message?: string | Error): void;
-  function fail(message?: string | Error): never;
-  function ifError(value: any): asserts value is null | undefined;
-  function throws(fn: () => any, error?: any): void;
-  function doesNotThrow(fn: () => any, message?: string | Error): void;
-  function match(value: string, regexp: any, message?: string | Error): void;
-  function doesNotMatch(value: string, regexp: any, message?: string | Error): void;
+  type Message = string | Error | undefined;
 
+  function ok(value: any, message?: Message): asserts value;
+  function equal(actual: any, expected: any, message?: Message): void;
+  function notEqual(actual: any, expected: any, message?: Message): void;
+  function strictEqual(actual: any, expected: any, message?: Message): void;
+  function notStrictEqual(actual: any, expected: any, message?: Message): void;
+  function deepEqual(actual: any, expected: any, message?: Message): void;
+  function deepStrictEqual(actual: any, expected: any, message?: Message): void;
+  function notDeepEqual(actual: any, expected: any, message?: Message): void;
+  function notDeepStrictEqual(actual: any, expected: any, message?: Message): void;
+  function fail(message?: Message): never;
+  function ifError(value: any): asserts value is null | undefined;
+  function throws(fn: () => any, error?: any, message?: Message): void;
+  function doesNotThrow(fn: () => any, message?: Message): void;
+  function match(value: string, regexp: RegExp | any, message?: Message): void;
+  function doesNotMatch(value: string, regexp: RegExp | any, message?: Message): void;
+
+  /** Callable assert (assert(value)) plus named methods. */
   const assert: typeof ok & {
     ok: typeof ok;
     equal: typeof equal;
@@ -35,9 +38,21 @@ declare module "assert" {
   };
 
   export {
-    ok, equal, notEqual, strictEqual, notStrictEqual,
-    deepEqual, deepStrictEqual, notDeepEqual, notDeepStrictEqual,
-    fail, ifError, throws, doesNotThrow, match, doesNotMatch,
+    ok,
+    equal,
+    notEqual,
+    strictEqual,
+    notStrictEqual,
+    deepEqual,
+    deepStrictEqual,
+    notDeepEqual,
+    notDeepStrictEqual,
+    fail,
+    ifError,
+    throws,
+    doesNotThrow,
+    match,
+    doesNotMatch,
   };
   export default assert;
 }

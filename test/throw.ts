@@ -3,6 +3,6 @@ function main(): void {
 }
 try {
     main();
-} catch (error) {
+} catch (error: any) {
     console.log(error.message);
 }

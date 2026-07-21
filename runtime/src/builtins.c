@@ -6,8 +6,8 @@
 
 /* Math builtins */
 #if defined(TS_NEED_MATH)
-Value ts_math_random(void) {
-  return ts_value_number((double)rand() / (double)RAND_MAX);
+double ts_math_random(void) {
+  return (double)rand() / (double)RAND_MAX;
 }
 
 double ts_math_floor(double x) {
@@ -191,13 +191,9 @@ static TsTimer* g_timers = NULL;
 static int g_next_timer_id = 1;
 
 static void ts_timer_call(TsTimer* t) {
-  if (t->callback.tag != TAG_FUNCTION || !t->callback.as.function) return;
-  TimerCallback fn = (TimerCallback)t->callback.as.function;
-  Value a0 = (t->argc > 0) ? t->args[0] : ts_value_undefined();
-  Value a1 = (t->argc > 1) ? t->args[1] : ts_value_undefined();
-  Value a2 = (t->argc > 2) ? t->args[2] : ts_value_undefined();
-  Value a3 = (t->argc > 3) ? t->args[3] : ts_value_undefined();
-  fn(a0, a1, a2, a3);
+  /* Unified call path: BoundFn / Promise resolve / plain function */
+  ts_value_call(t->callback, t->args, t->argc);
+  (void)(TimerCallback)0;
 }
 
 static double ts_timer_add(Value callback, Value delayMs, Value* args, int argc, int repeating) {
@@ -247,45 +243,7 @@ int ts_timers_pending(void) {
   return 0;
 }
 
-void ts_timers_run(void) {
-  /* Simple single-threaded event loop: fire due timers until none remain. */
-  while (ts_timers_pending()) {
-    double now = ts_now_ms();
-    double next = -1;
-    int fired = 0;
-
-    for (TsTimer* t = g_timers; t; t = t->next) {
-      if (!t->active) continue;
-      if (t->next_fire_ms <= now + 0.5) {
-        /* Fire */
-        if (t->repeating) {
-          ts_timer_call(t);
-          if (t->active) {
-            /* reschedule from now to avoid drift pile-up under load */
-            t->next_fire_ms = ts_now_ms() + t->interval_ms;
-          }
-        } else {
-          t->active = 0;
-          ts_timer_call(t);
-        }
-        fired = 1;
-      } else {
-        if (next < 0 || t->next_fire_ms < next) next = t->next_fire_ms;
-      }
-    }
-
-    if (!ts_timers_pending()) break;
-    if (!fired && next > 0) {
-      int sleep_ms = (int)(next - ts_now_ms());
-      if (sleep_ms < 1) sleep_ms = 1;
-      if (sleep_ms > 100) sleep_ms = 100; /* wake periodically */
-      ts_sleep_ms(sleep_ms);
-    } else if (!fired) {
-      ts_sleep_ms(1);
-    }
-  }
-
-  /* Free inactive timers */
+static void ts_timers_gc_inactive(void) {
   TsTimer** prev = &g_timers;
   while (*prev) {
     TsTimer* t = *prev;
@@ -296,6 +254,51 @@ void ts_timers_run(void) {
       prev = &t->next;
     }
   }
+}
+
+/* One poll step: fire all currently due timers, or sleep briefly until next.
+ * Returns 1 if any timer fired. Used by ts_await so setTimeout(resolve) works. */
+int ts_timers_poll(void) {
+  if (!ts_timers_pending()) return 0;
+  double now = ts_now_ms();
+  double next = -1;
+  int fired = 0;
+
+  for (TsTimer* t = g_timers; t; t = t->next) {
+    if (!t->active) continue;
+    if (t->next_fire_ms <= now + 0.5) {
+      if (t->repeating) {
+        ts_timer_call(t);
+        if (t->active) t->next_fire_ms = ts_now_ms() + t->interval_ms;
+      } else {
+        t->active = 0;
+        ts_timer_call(t);
+      }
+      fired = 1;
+    } else {
+      if (next < 0 || t->next_fire_ms < next) next = t->next_fire_ms;
+    }
+  }
+
+  if (!fired && next > 0) {
+    int sleep_ms = (int)(next - ts_now_ms());
+    if (sleep_ms < 1) sleep_ms = 1;
+    if (sleep_ms > 50) sleep_ms = 50;
+    ts_sleep_ms(sleep_ms);
+  } else if (!fired) {
+    ts_sleep_ms(1);
+  }
+
+  ts_timers_gc_inactive();
+  return fired;
+}
+
+void ts_timers_run(void) {
+  /* Simple single-threaded event loop: fire due timers until none remain. */
+  while (ts_timers_pending()) {
+    ts_timers_poll();
+  }
+  ts_timers_gc_inactive();
 }
 
 #else /* !TS_NEED_TIMERS */
@@ -312,6 +315,7 @@ void ts_clear_timeout(Value id) { (void)id; }
 void ts_clear_interval(Value id) { (void)id; }
 void ts_timers_run(void) {}
 int ts_timers_pending(void) { return 0; }
+int ts_timers_poll(void) { return 0; }
 
 #endif /* TS_NEED_TIMERS */
 

@@ -12,7 +12,8 @@ static uint32_t hash_string(const char* str) {
 }
 
 TSHashMap* ts_hashmap_new(void) {
-  TSHashMap* map = (TSHashMap*)malloc(sizeof(TSHashMap));
+  TSHashMap* map = (TSHashMap*)ts_gc_alloc_kind(sizeof(TSHashMap), GC_KIND_HASHMAP);
+  if (!map) return NULL;
   map->refcount = 1;
   map->size = 0;
   map->capacity = HASHMAP_INITIAL_CAPACITY;
@@ -77,10 +78,10 @@ int ts_hashmap_has(TSHashMap* map, TSString* key) {
 }
 
 void ts_hashmap_free(TSHashMap* map) {
+  if (!map) return;
   map->refcount--;
   if (map->refcount <= 0) {
-    free(map->entries);
-    free(map);
+    ts_gc_free_object(map);
   }
 }
 

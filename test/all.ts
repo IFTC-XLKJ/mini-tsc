@@ -49,8 +49,10 @@ async function main(): Promise<void> {
     console.log(0.1 > 0.2);
     console.log(0.1 <= 0.2);
     console.log(0.1 >= 0.2);
-    console.log(0.1 == 0.2);
-    console.log(0.1 !== 0.2);
+    const n1: number = 0.1;
+    const n2: number = 0.2;
+    console.log(n1 == n2);
+    console.log(n1 !== n2);
     console.log(typeof 0.1);
     for (let i = 0; i < 10; i++) {
         console.log(i);

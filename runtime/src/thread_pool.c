@@ -217,6 +217,7 @@ void ts_thread_pool_submit(TsJob* job) {
 }
 
 int ts_jobs_pending(void) {
+  if (!g_pool_inited) return 0;
   int n;
 #ifdef _WIN32
   EnterCriticalSection(&g_done.mu);
@@ -231,6 +232,8 @@ int ts_jobs_pending(void) {
 }
 
 int ts_completion_poll(void) {
+  /* Pool not started → no jobs; avoid EnterCriticalSection on uninit mutex */
+  if (!g_pool_inited) return 0;
   int n = 0;
   for (;;) {
     TsJob* job = q_pop(&g_done, 0, NULL);
@@ -253,6 +256,7 @@ int ts_completion_poll(void) {
 
 void ts_completion_wait(int timeout_ms) {
   /* Wait until a completion is available or timeout. Does not consume. */
+  if (!g_pool_inited) return;
   if (timeout_ms < 0) timeout_ms = 50;
 #ifdef _WIN32
   EnterCriticalSection(&g_done.mu);
@@ -330,7 +334,11 @@ void ts_async_run(void) {
     } else if (!did && !ts_jobs_pending()) {
       break;
     }
+    /* Opportunistic GC while waiting on async work */
+    ts_gc_maybe_collect_idle();
   }
   if (ts_timers_pending()) ts_timers_run();
   ts_completion_poll();
+  /* Event-loop drained: reclaim garbage if enough was allocated */
+  ts_gc_maybe_collect_idle();
 }

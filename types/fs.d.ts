@@ -1,4 +1,4 @@
-/** Minimal Node.js `fs` ambient types for mini-tsc. */
+/** Node.js `fs` / `fs/promises` ambient types for mini-tsc. */
 declare module "fs" {
   interface Stats {
     size: number;
@@ -23,45 +23,83 @@ declare module "fs" {
     mode?: number | string;
   }
 
+  type PathLike = string;
+
   /* Synchronous */
-  function readFileSync(path: string): Buffer;
-  function readFileSync(path: string, encoding: BufferEncoding): string;
-  function readFileSync(path: string, options: ReadFileOptions): Buffer | string;
+  function readFileSync(path: PathLike): Buffer;
+  function readFileSync(path: PathLike, encoding: BufferEncoding): string;
+  function readFileSync(path: PathLike, options: ReadFileOptions | BufferEncoding): Buffer | string;
 
-  function writeFileSync(path: string, data: string | Buffer, options?: WriteFileOptions | BufferEncoding): void;
-  function existsSync(path: string): boolean;
-  function mkdirSync(path: string, options?: MkdirOptions | number): void;
-  function readdirSync(path: string): string[];
-  function unlinkSync(path: string): void;
-  function statSync(path: string): Stats;
-  function rmdirSync(path: string): void;
-  function renameSync(oldPath: string, newPath: string): void;
-  function readlinkSync(path: string): string;
-  function symlinkSync(target: string, path: string): void;
-  function chmodSync(path: string, mode: number | string): void;
+  function writeFileSync(
+    path: PathLike,
+    data: string | Buffer | Uint8Array,
+    options?: WriteFileOptions | BufferEncoding,
+  ): void;
+  function existsSync(path: PathLike): boolean;
+  function mkdirSync(path: PathLike, options?: MkdirOptions | number): void;
+  function readdirSync(path: PathLike): string[];
+  function unlinkSync(path: PathLike): void;
+  function statSync(path: PathLike): Stats;
+  function rmdirSync(path: PathLike): void;
+  function renameSync(oldPath: PathLike, newPath: PathLike): void;
+  function readlinkSync(path: PathLike): string;
+  function symlinkSync(target: PathLike, path: PathLike): void;
+  function chmodSync(path: PathLike, mode: number | string): void;
 
-  /* Asynchronous (Promise-style in mini-tsc) */
-  function readFile(path: string): Promise<Buffer>;
-  function readFile(path: string, encoding: BufferEncoding): Promise<string>;
-  function readFile(path: string, options: ReadFileOptions): Promise<Buffer | string>;
+  /* Asynchronous (Promise-returning in mini-tsc runtime) */
+  function readFile(path: PathLike): Promise<Buffer>;
+  function readFile(path: PathLike, encoding: BufferEncoding): Promise<string>;
+  function readFile(path: PathLike, options: ReadFileOptions | BufferEncoding): Promise<Buffer | string>;
 
-  function writeFile(path: string, data: string | Buffer, options?: WriteFileOptions | BufferEncoding): Promise<void>;
-  function access(path: string, mode?: number): Promise<boolean>;
-  function mkdir(path: string, options?: MkdirOptions | number): Promise<void>;
-  function readdir(path: string): Promise<string[]>;
-  function unlink(path: string): Promise<void>;
-  function stat(path: string): Promise<Stats>;
-  function rmdir(path: string): Promise<void>;
-  function rename(oldPath: string, newPath: string): Promise<void>;
-  function readlink(path: string): Promise<string>;
-  function symlink(target: string, path: string): Promise<void>;
-  function chmod(path: string, mode: number | string): Promise<void>;
+  function writeFile(
+    path: PathLike,
+    data: string | Buffer | Uint8Array,
+    options?: WriteFileOptions | BufferEncoding,
+  ): Promise<void>;
+  function access(path: PathLike, mode?: number): Promise<boolean>;
+  function mkdir(path: PathLike, options?: MkdirOptions | number): Promise<void>;
+  function readdir(path: PathLike): Promise<string[]>;
+  function unlink(path: PathLike): Promise<void>;
+  function stat(path: PathLike): Promise<Stats>;
+  function rmdir(path: PathLike): Promise<void>;
+  function rename(oldPath: PathLike, newPath: PathLike): Promise<void>;
+  function readlink(path: PathLike): Promise<string>;
+  function symlink(target: PathLike, path: PathLike): Promise<void>;
+  function chmod(path: PathLike, mode: number | string): Promise<void>;
+
+  const promises: typeof import("fs/promises");
 
   export {
-    readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync,
-    unlinkSync, statSync, rmdirSync, renameSync, readlinkSync, symlinkSync, chmodSync,
-    readFile, writeFile, access, mkdir, readdir, unlink, stat, rmdir, rename, readlink, symlink, chmod,
-    Stats, WriteFileOptions, ReadFileOptions, MkdirOptions,
+    readFileSync,
+    writeFileSync,
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    unlinkSync,
+    statSync,
+    rmdirSync,
+    renameSync,
+    readlinkSync,
+    symlinkSync,
+    chmodSync,
+    readFile,
+    writeFile,
+    access,
+    mkdir,
+    readdir,
+    unlink,
+    stat,
+    rmdir,
+    rename,
+    readlink,
+    symlink,
+    chmod,
+    promises,
+    Stats,
+    WriteFileOptions,
+    ReadFileOptions,
+    MkdirOptions,
+    PathLike,
   };
 }
 
@@ -89,24 +127,45 @@ declare module "fs/promises" {
     mode?: number | string;
   }
 
-  function readFile(path: string): Promise<Buffer>;
-  function readFile(path: string, encoding: BufferEncoding): Promise<string>;
-  function readFile(path: string, options: ReadFileOptions): Promise<Buffer | string>;
+  type PathLike = string;
 
-  function writeFile(path: string, data: string | Buffer, options?: WriteFileOptions | BufferEncoding): Promise<void>;
-  function access(path: string, mode?: number): Promise<boolean>;
-  function mkdir(path: string, options?: MkdirOptions | number): Promise<void>;
-  function readdir(path: string): Promise<string[]>;
-  function unlink(path: string): Promise<void>;
-  function stat(path: string): Promise<Stats>;
-  function rmdir(path: string): Promise<void>;
-  function rename(oldPath: string, newPath: string): Promise<void>;
-  function readlink(path: string): Promise<string>;
-  function symlink(target: string, path: string): Promise<void>;
-  function chmod(path: string, mode: number | string): Promise<void>;
+  function readFile(path: PathLike): Promise<Buffer>;
+  function readFile(path: PathLike, encoding: BufferEncoding): Promise<string>;
+  function readFile(path: PathLike, options: ReadFileOptions | BufferEncoding): Promise<Buffer | string>;
+
+  function writeFile(
+    path: PathLike,
+    data: string | Buffer | Uint8Array,
+    options?: WriteFileOptions | BufferEncoding,
+  ): Promise<void>;
+  function access(path: PathLike, mode?: number): Promise<boolean>;
+  function mkdir(path: PathLike, options?: MkdirOptions | number): Promise<void>;
+  function readdir(path: PathLike): Promise<string[]>;
+  function unlink(path: PathLike): Promise<void>;
+  function stat(path: PathLike): Promise<Stats>;
+  function rmdir(path: PathLike): Promise<void>;
+  function rename(oldPath: PathLike, newPath: PathLike): Promise<void>;
+  function readlink(path: PathLike): Promise<string>;
+  function symlink(target: PathLike, path: PathLike): Promise<void>;
+  function chmod(path: PathLike, mode: number | string): Promise<void>;
 
   export {
-    readFile, writeFile, access, mkdir, readdir, unlink, stat, rmdir, rename, readlink, symlink, chmod,
-    Stats, WriteFileOptions, ReadFileOptions, MkdirOptions,
+    readFile,
+    writeFile,
+    access,
+    mkdir,
+    readdir,
+    unlink,
+    stat,
+    rmdir,
+    rename,
+    readlink,
+    symlink,
+    chmod,
+    Stats,
+    WriteFileOptions,
+    ReadFileOptions,
+    MkdirOptions,
+    PathLike,
   };
 }

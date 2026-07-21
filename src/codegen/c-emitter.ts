@@ -446,21 +446,34 @@ export class CEmitter {
       if (n.kind === "property_access") {
         checkType(n.propertyCType);
         if (n.checkerTypeName) checkType(n.checkerTypeName);
-        // Known class methods dispatched by name heuristics in the emitter
-        const prop = n.property || "";
-        if (["getName", "getDescription", "getVersion", "getAlias", "version",
-             "description", "parse", "parseAsync", "opts", "option", "argument",
-             "command", "action", "help", "outputHelp", "helpInformation",
-             "alias", "addOption", "addArgument", "addCommand"].includes(prop)) {
-          headers.add("src_cli_commander_command.h");
-        }
-        if (["makeOptionMandatory", "hideHelp", "attributeName", "isBoolean",
-             "parseFlags", "preset", "conflicts", "implies"].includes(prop)) {
-          headers.add("src_cli_commander_option.h");
-        }
-        if (["argRequired", "argOptional", "argParser"].includes(prop) ||
-            (prop === "name" && n.object?.kind === "identifier" && /arg/i.test(n.object.name || ""))) {
-          headers.add("src_cli_commander_argument.h");
+        // Only pull commander headers when the receiver is actually a commander type.
+        // Do NOT match bare method names like Date.parse / JSON.parse — that falsely
+        // includes src_cli_commander_*.h into unrelated programs (e.g. test/all.ts).
+        const recvType =
+          n.checkerTypeName ||
+          n.object?.checkerTypeName ||
+          n.object?.cType ||
+          n.object?.type ||
+          "";
+        const recvLooksCommander =
+          /\b(Command|Option|Argument|CommanderError|InvalidArgumentError)\b/.test(String(recvType)) ||
+          (n.object?.kind === "identifier" &&
+            /^(cmd|command|program|opt|option|arg|argument)/i.test(n.object.name || ""));
+        if (recvLooksCommander) {
+          const prop = n.property || "";
+          if (["getName", "getDescription", "getVersion", "getAlias", "version",
+               "description", "parse", "parseAsync", "opts", "option", "argument",
+               "command", "action", "help", "outputHelp", "helpInformation",
+               "alias", "addOption", "addArgument", "addCommand"].includes(prop)) {
+            headers.add("src_cli_commander_command.h");
+          }
+          if (["makeOptionMandatory", "hideHelp", "attributeName", "isBoolean",
+               "parseFlags", "preset", "conflicts", "implies"].includes(prop)) {
+            headers.add("src_cli_commander_option.h");
+          }
+          if (["argRequired", "argOptional", "argParser"].includes(prop) || prop === "name") {
+            headers.add("src_cli_commander_argument.h");
+          }
         }
       }
       // Check identifiers with type hints

@@ -3,7 +3,8 @@
 #define INITIAL_CAPACITY 16
 
 TSArray* ts_array_new(void) {
-  TSArray* arr = (TSArray*)malloc(sizeof(TSArray));
+  TSArray* arr = (TSArray*)ts_gc_alloc_kind(sizeof(TSArray), GC_KIND_ARRAY);
+  if (!arr) return NULL;
   arr->refcount = 1;
   arr->length = 0;
   arr->capacity = INITIAL_CAPACITY;
@@ -38,10 +39,10 @@ Value ts_array_get(TSArray* arr, int32_t index) {
 }
 
 void ts_array_free(TSArray* arr) {
+  if (!arr) return;
   arr->refcount--;
   if (arr->refcount <= 0) {
-    free(arr->items);
-    free(arr);
+    ts_gc_free_object(arr);
   }
 }
 
