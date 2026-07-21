@@ -675,6 +675,11 @@ export class AstVisitor {
         }
       }
 
+      // ts_await() always returns Value — force C type for await initializers
+      if (decl.initializer && ts.isAwaitExpression(decl.initializer)) {
+        cType = "Value";
+      }
+
       // Node builtin C return types come from the registry signature, not TS
       // (TS may say Promise<boolean>/string[] while C returns Value).
       {
@@ -705,6 +710,10 @@ export class AstVisitor {
             }
           } else {
             // Unknown builtin method — default to Value (async APIs)
+            cType = "Value";
+          }
+          // await of async builtin still yields Value (Promise payload boxed)
+          if (decl.initializer && ts.isAwaitExpression(decl.initializer)) {
             cType = "Value";
           }
         }
@@ -1513,7 +1522,10 @@ export class AstVisitor {
 
       case ts.SyntaxKind.AwaitExpression: {
         const awaitExpr = node as ts.AwaitExpression;
-        return this.visitExpression(awaitExpr.expression);
+        return {
+          kind: "await_expression",
+          expression: this.visitExpression(awaitExpr.expression),
+        };
       }
 
       case ts.SyntaxKind.VoidExpression: {

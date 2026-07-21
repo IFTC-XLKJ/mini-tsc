@@ -421,12 +421,7 @@ Value ts_error_new(TSString* message) {
   return ts_value_string(message ? message : ts_string_new(""));
 }
 
-/* Promise constructor (stub - executor is called synchronously for now) */
-Value Promise_constructor(Value executor) {
-  /* In a full implementation, this would create a Promise object and
-     handle async resolution. For now, we just return undefined. */
-  return ts_value_undefined();
-}
+/* Promise_constructor is implemented in promise.c */
 
 /* ================================================================
  * ts_inspect — pretty-print Value with indentation (like util.inspect)

@@ -33,6 +33,8 @@ export const RUNTIME_FEATURES = [
   "closure",
   /** Extra string helpers beyond new/concat/free (split/repeat/…). */
   "string_extra",
+  /** Promise + thread pool async I/O. */
+  "promise",
 ] as const;
 
 export type RuntimeFeature = (typeof RUNTIME_FEATURES)[number];
@@ -487,6 +489,17 @@ export function analyzeFeatureUsage(
         if (node.kind === "object_literal" || node.kind === "object_expression") {
           usage.features.add("hashmap");
         }
+
+        // await / Promise runtime
+        if (node.kind === "await_expression") {
+          usage.features.add("promise");
+        }
+        if (node.kind === "identifier" && typeof node.name === "string") {
+          if (node.name.startsWith("ts_promise_") || node.name === "ts_await" ||
+              node.name === "Promise_constructor") {
+            usage.features.add("promise");
+          }
+        }
       });
     }
   }
@@ -574,6 +587,19 @@ export function analyzeFeatureUsage(
           break;
         }
       }
+    }
+  }
+
+  // Async fs / child_process / etc. need Promise + thread pool
+  for (const m of usage.methods) {
+    if (
+      m === "node_fs_readFile" || m === "node_fs_writeFile" || m === "node_fs_access" ||
+      m === "node_fs_mkdir" || m === "node_fs_readdir" || m === "node_fs_unlink" ||
+      m === "node_fs_stat" || m === "node_fs_rmdir" || m === "node_fs_rename" ||
+      m === "node_fs_readlink" || m === "node_fs_symlink" || m === "node_fs_chmod"
+    ) {
+      usage.features.add("promise");
+      break;
     }
   }
 

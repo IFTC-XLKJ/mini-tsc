@@ -463,8 +463,52 @@ void ts_throw(Value val);
 /* Error */
 Value ts_error_new(TSString* message);
 
-/* Promise (stub - full implementation pending) */
+/* Promise + async I/O */
+#define PROMISE_TAG 0x50524F4D
+
+typedef enum {
+  PROMISE_PENDING = 0,
+  PROMISE_FULFILLED = 1,
+  PROMISE_REJECTED = 2
+} PromiseState;
+
+typedef struct TSPromise {
+  int32_t type_tag;
+  int32_t refcount;
+  PromiseState state;
+  Value result;
+  Value onFulfilled;
+  Value onRejected;
+  Value onFinally;
+  struct TSPromise* then_promise;
+} TSPromise;
+
+Value ts_promise_new(void);
+Value ts_promise_resolve(Value p, Value v);
+Value ts_promise_reject(Value p, Value err);
+Value ts_promise_then(Value p, Value onFulfilled, Value onRejected);
+Value ts_promise_catch(Value p, Value onRejected);
+Value ts_promise_finally(Value p, Value onFinally);
+Value ts_await(Value p);
+int ts_value_is_promise(Value v);
 Value Promise_constructor(Value executor);
+
+typedef void (*TsJobFn)(void* userdata);
+typedef struct TsJob {
+  TsJobFn work;
+  TsJobFn complete;
+  void* userdata;
+  struct TsJob* next;
+} TsJob;
+
+void ts_thread_pool_init(void);
+void ts_thread_pool_submit(TsJob* job);
+void ts_thread_pool_shutdown(void);
+int ts_jobs_pending(void);
+int ts_completion_poll(void);
+void ts_completion_wait(int timeout_ms);
+void ts_async_run(void);
+int ts_async_pending(void);
 
 /* Math builtins */
 Value ts_math_random(void);
@@ -888,10 +932,14 @@ extern TsErrorContext _ts_current_error;
       lines.push(`  ${entryBase}_entry();`);
     }
     lines.push('');
-    // Drain setTimeout / setInterval queue if the program uses timers
-    if (usage?.features.has("timers")) {
-      lines.push('  /* Event loop: run pending timers until idle */');
-      lines.push('  ts_timers_run();');
+    // Drain async work (promises / thread-pool jobs) and timers
+    if (usage?.features.has("promise") || usage?.features.has("timers")) {
+      lines.push('  /* Event loop: drain async I/O completions + timers */');
+      if (usage?.features.has("promise")) {
+        lines.push('  ts_async_run();');
+      } else {
+        lines.push('  ts_timers_run();');
+      }
       lines.push('');
     }
     lines.push('  return 0;');
@@ -972,6 +1020,7 @@ extern TsErrorContext _ts_current_error;
       needsStringOps ||
       [...(usage?.methods ?? [])].some(m => m !== "node_process_set_argv");
 
+    const needPromise = usage?.features.has("promise") ?? false;
     const coreRuntime: string[] = [];
     if (needsTsRuntime) {
       // string_ops holds core strings + indexOf/substring/replace/… (GC drops unused)
@@ -980,6 +1029,9 @@ extern TsErrorContext _ts_current_error;
       if (needArray) coreRuntime.push("array_ops.c");
       if (needHashmap) coreRuntime.push("hashmap.c");
       if (needClosure) coreRuntime.push("closure.c");
+      if (needPromise) {
+        coreRuntime.push("promise.c", "thread_pool.c");
+      }
     }
     for (const entry of coreRuntime) {
       const p = path.join(runtimeDir, entry);

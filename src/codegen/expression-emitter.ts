@@ -145,6 +145,8 @@ export class ExpressionEmitter {
         return `(${this.emit(node.expression)})`;
       case "assignment":
         return this.emitAssignment(node);
+      case "await_expression":
+        return `ts_await(${this.emit(node.expression)})`;
       default:
         return `/* unsupported expr: ${node.kind} */`;
     }
@@ -2577,18 +2579,27 @@ export class ExpressionEmitter {
         return `date_${methodName}_ts(${allArgs})`;
       }
 
-      // Promise.catch / .then stubs — ignore async chaining (MUST run before any class dispatch)
-      if (methodName === "catch" || methodName === "then" || methodName === "finally" ||
-          (callee.checkerTypeName && /Promise/i.test(String(callee.checkerTypeName)))) {
-        if (methodName === "catch" || methodName === "then" || methodName === "finally" ||
-            /Promise/i.test(String(callee.checkerTypeName || ""))) {
-          return `((void)(${this.emit(callee.object)}), ts_value_undefined())`;
-        }
-      }
-      if (/Promise/i.test(String(callee.checkerTypeName || "")) ||
+      // Promise.then / .catch / .finally
+      if (methodName === "then" || methodName === "catch" || methodName === "finally" ||
+          /Promise/i.test(String(callee.checkerTypeName || "")) ||
           /Promise/i.test(String(varType || ""))) {
-        // Any method on a Promise-typed receiver is a no-op stub
-        return `((void)(${this.emit(callee.object)}), ts_value_undefined())`;
+        const obj = this.emit(callee.object);
+        const args = (node.arguments || []).map((a: CNode) => this.emit(a));
+        if (methodName === "then") {
+          const a0 = args[0] || "ts_value_undefined()";
+          const a1 = args[1] || "ts_value_undefined()";
+          return `ts_promise_then(${obj}, ${a0}, ${a1})`;
+        }
+        if (methodName === "catch") {
+          const a0 = args[0] || "ts_value_undefined()";
+          return `ts_promise_catch(${obj}, ${a0})`;
+        }
+        if (methodName === "finally") {
+          const a0 = args[0] || "ts_value_undefined()";
+          return `ts_promise_finally(${obj}, ${a0})`;
+        }
+        // Other methods on Promise-typed receiver: no-op
+        return `((void)(${obj}), ts_value_undefined())`;
       }
 
       // Function-pointer fields: opt.parseArg(value, prev) → opt->parseArg(value, prev)

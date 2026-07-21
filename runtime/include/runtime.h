@@ -364,7 +364,55 @@ extern TsErrorContext _ts_current_error;
 #define TS_CATCH else
 #define TS_THROW(val) do { _ts_current_error.error_value = val; longjmp(_ts_current_error.jump_buffer, 1); } while(0)
 
-/* Promise (stub - full implementation pending) */
+/* ==================== Promise ==================== */
+#define PROMISE_TAG 0x50524F4D  /* 'PROM' */
+
+typedef enum {
+  PROMISE_PENDING = 0,
+  PROMISE_FULFILLED = 1,
+  PROMISE_REJECTED = 2
+} PromiseState;
+
+typedef struct TSPromise {
+  int32_t type_tag;
+  int32_t refcount;
+  PromiseState state;
+  Value result;
+  Value onFulfilled;
+  Value onRejected;
+  Value onFinally;
+  struct TSPromise* then_promise; /* promise returned by .then (optional) */
+} TSPromise;
+
+Value ts_promise_new(void);
+Value ts_promise_resolve(Value p, Value v);
+Value ts_promise_reject(Value p, Value err);
+Value ts_promise_then(Value p, Value onFulfilled, Value onRejected);
+Value ts_promise_catch(Value p, Value onRejected);
+Value ts_promise_finally(Value p, Value onFinally);
+Value ts_await(Value p);
+int ts_value_is_promise(Value v);
 Value Promise_constructor(Value executor);
+
+/* ==================== Thread pool / async I/O ==================== */
+typedef void (*TsJobFn)(void* userdata);
+
+typedef struct TsJob {
+  TsJobFn work;       /* runs on worker thread */
+  TsJobFn complete;   /* runs on main thread after work */
+  void* userdata;
+  struct TsJob* next;
+} TsJob;
+
+void ts_thread_pool_init(void);
+void ts_thread_pool_submit(TsJob* job);
+void ts_thread_pool_shutdown(void);
+int  ts_jobs_pending(void);
+int  ts_completion_poll(void);   /* process finished jobs on main; returns count */
+void ts_completion_wait(int timeout_ms);
+
+/* Unified event loop: timers + async jobs */
+void ts_async_run(void);
+int  ts_async_pending(void);
 
 #endif /* TS_RUNTIME_H */
