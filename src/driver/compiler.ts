@@ -674,6 +674,47 @@ Value ts_writable_stream_get_writer(Value stream);
 Value ts_writable_stream_write(Value writer, Value chunk);
 Value ts_writable_stream_close(Value writer);
 Value ts_value_call0(Value v);
+
+/* WebSocket / WebSocketServer */
+#define WEBSOCKET_TAG        0x57534F43
+#define WEBSOCKET_SERVER_TAG 0x57535356
+#define WS_CONNECTING 0
+#define WS_OPEN       1
+#define WS_CLOSING    2
+#define WS_CLOSED     3
+typedef struct WebSocket {
+  int32_t type_tag;
+  int fd;
+  int readyState;
+  int is_server;
+  Value onopen;
+  Value onmessage;
+  Value onerror;
+  Value onclose;
+  TSHashMap* listeners;
+  TSString* url;
+  char* recv_buf;
+  int recv_len;
+  int recv_cap;
+  int handshake_done;
+  struct WebSocket* next;
+} WebSocket;
+Value ts_websocket_new(TSString* url);
+Value ts_websocket_server_new(void);
+int  ts_websocket_is(Value v);
+int  ts_websocket_server_is(Value v);
+WebSocket* ts_websocket_from_value(Value v);
+Value ts_websocket_send(Value ws, Value data);
+Value ts_websocket_close(Value ws, Value code, Value reason);
+double ts_websocket_readyState(Value ws);
+Value ts_websocket_set_handler(Value ws, TSString* name, Value fn);
+Value ts_websocket_get_handler(Value ws, TSString* name);
+Value ts_websocket_add_event_listener(Value ws, TSString* type, Value fn);
+Value ts_websocket_remove_event_listener(Value ws, TSString* type, Value fn);
+void ts_websocket_http_upgrade(int client_fd, FetchResponse* fr,
+                               const char* initial_req, int initial_len);
+int  ts_websocket_pending(void);
+void ts_websocket_poll(void);
 #define BOUND_FN_TAG 0x42464E00
 typedef struct {
   int32_t type_tag;
@@ -890,6 +931,13 @@ extern TsErrorContext _ts_current_error;
   ): string {
     const lines: string[] = [];
     lines.push('#include "runtime.h"');
+    if (usage?.features.has("websocket")) {
+      lines.push('#ifdef _WIN32');
+      lines.push('#include <windows.h>');
+      lines.push('#else');
+      lines.push('#include <unistd.h>');
+      lines.push('#endif');
+    }
     lines.push('');
 
     // Include all module headers
@@ -989,10 +1037,35 @@ extern TsErrorContext _ts_current_error;
       lines.push(`  ${entryBase}_entry();`);
     }
     lines.push('');
-    // Drain async work (promises / thread-pool jobs) and timers
-    if (usage?.features.has("promise") || usage?.features.has("timers")) {
-      lines.push('  /* Event loop: drain async I/O completions + timers */');
-      if (usage?.features.has("promise")) {
+    // Drain async work (promises / thread-pool jobs), timers, and WebSockets
+    if (usage?.features.has("promise") || usage?.features.has("timers") ||
+        usage?.features.has("websocket")) {
+      lines.push('  /* Event loop: drain async I/O completions + timers + websockets */');
+      if (usage?.features.has("websocket")) {
+        // Keep process alive while WS connections are open (or timers/async pending)
+        lines.push('  while (ts_websocket_pending()');
+        if (usage?.features.has("timers")) {
+          lines.push('      || ts_timers_pending()');
+        }
+        if (usage?.features.has("promise")) {
+          lines.push('      || ts_async_pending()');
+        }
+        lines.push('  ) {');
+        lines.push('    ts_websocket_poll();');
+        if (usage?.features.has("timers")) {
+          lines.push('    if (ts_timers_pending()) ts_timers_poll();');
+        }
+        if (usage?.features.has("promise")) {
+          lines.push('    ts_completion_poll();');
+        }
+        lines.push('#ifdef _WIN32');
+        lines.push('    Sleep(10);');
+        lines.push('#else');
+        lines.push('    usleep(10000);');
+        lines.push('#endif');
+        lines.push('  }');
+        lines.push('  ts_gc_maybe_collect_idle();');
+      } else if (usage?.features.has("promise")) {
         lines.push('  ts_async_run();');
       } else {
         lines.push('  ts_timers_run();');
@@ -1083,6 +1156,9 @@ extern TsErrorContext _ts_current_error;
       [...(usage?.methods ?? [])].some(m => m !== "node_process_set_argv");
 
     const needPromise = usage?.features.has("promise") ?? false;
+    const needWebsocket =
+      (usage?.features.has("websocket") ?? false) ||
+      /\bts_websocket_/.test(allC);
     const coreRuntime: string[] = [];
     if (needsTsRuntime) {
       // string_ops holds core strings + indexOf/substring/replace/… (linker GC drops unused)
@@ -1093,6 +1169,9 @@ extern TsErrorContext _ts_current_error;
       if (needClosure) coreRuntime.push("closure.c");
       if (needPromise) {
         coreRuntime.push("promise.c", "thread_pool.c");
+      }
+      if (needWebsocket) {
+        coreRuntime.push("websocket.c");
       }
     }
     // Automatic GC is always linked: main() always calls ts_gc_init / set_stack_bottom
@@ -1116,7 +1195,7 @@ extern TsErrorContext _ts_current_error;
     const isUnix = !isWindows;
 
     const needFetch = usage?.features.has("fetch") ?? false;
-    const needNet = !!(usage?.modules.has("http") || usage?.modules.has("net") || needFetch);
+    const needNet = !!(usage?.modules.has("http") || usage?.modules.has("net") || needFetch || needWebsocket);
     // shell32 only for process.argv (CommandLineToArgvW) on Windows
     const needShell32 = !!(usage?.methods.has("node_process_argv"));
     const needOs = usage?.modules.has("os") ?? false;

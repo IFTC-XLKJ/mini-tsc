@@ -1774,6 +1774,8 @@ export class AstVisitor {
       "alert", "confirm", "prompt",
       "undefined", "null", "true", "false", "NaN", "Infinity",
       "process", "Buffer", "global", "globalThis", "fetch", "URL", "Blob",
+      "WebSocket", "WebSocketServer", "Headers", "Response", "Request",
+      "WritableStream", "ReadableStream", "TransformStream",
     ]);
     return [...free].filter(n => !skip.has(n) && !/^[A-Z]/.test(n));
   }

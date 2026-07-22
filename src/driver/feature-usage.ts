@@ -35,6 +35,8 @@ export const RUNTIME_FEATURES = [
   "string_extra",
   /** Promise + thread pool async I/O. */
   "promise",
+  /** WebSocket / WebSocketServer (runtime/src/websocket.c). */
+  "websocket",
 ] as const;
 
 export type RuntimeFeature = (typeof RUNTIME_FEATURES)[number];
@@ -58,6 +60,8 @@ const GLOBAL_CTOR_FEATURES: Record<string, RuntimeFeature> = {
   URL: "url",
   Buffer: "buffer",
   fetch: "fetch",
+  WebSocket: "websocket",
+  WebSocketServer: "websocket",
 };
 
 /** Map process property/method names → C symbols. */
@@ -163,6 +167,7 @@ function scanCText(usage: FeatureUsage, text: string): void {
   if (/\bts_fetch_|\bts_headers\b/.test(text)) usage.features.add("fetch");
   if (/\bts_blob_/.test(text)) usage.features.add("blob");
   if (/\bts_url_/.test(text)) usage.features.add("url");
+  if (/\bts_websocket_/.test(text)) usage.features.add("websocket");
   if (/\bts_math_|\bdate_/.test(text) || /\bts_date_now\b/.test(text)) {
     if (/\bts_math_/.test(text)) usage.features.add("math");
     if (/\bdate_/.test(text) || /\bts_date_now\b/.test(text)) usage.features.add("date");
@@ -460,6 +465,7 @@ export function analyzeFeatureUsage(
           }
           if (node.name.startsWith("ts_blob_")) usage.features.add("blob");
           if (node.name.startsWith("ts_url_")) usage.features.add("url");
+          if (node.name.startsWith("ts_websocket_")) usage.features.add("websocket");
           // Buffer only when Buffer APIs are actually used (not every ts_to_string call)
           if (node.name.startsWith("ts_buffer_")) usage.features.add("buffer");
           if (node.name.startsWith("ts_math_")) usage.features.add("math");
@@ -541,7 +547,13 @@ export function analyzeFeatureUsage(
     }
   }
   if (usage.features.has("json") || usage.features.has("fetch") ||
-      usage.features.has("url") || usage.features.has("blob")) {
+      usage.features.has("url") || usage.features.has("blob") ||
+      usage.features.has("websocket")) {
+    usage.features.add("hashmap");
+    usage.features.add("array");
+  }
+  // WebSocket needs hashmap for event objects + timers/poll loop for messages
+  if (usage.features.has("websocket")) {
     usage.features.add("hashmap");
     usage.features.add("array");
   }

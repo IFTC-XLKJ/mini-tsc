@@ -44,6 +44,27 @@ function main(): void {
                 },
             });
         }
+        if (url.pathname === "/test-websocket") { 
+            if (req.headers.get("upgrade") !== "websocket") { 
+                return new Response(null, { status: 426 });
+            }
+            const wss = new WebSocketServer();
+            wss.onmessage = (event) => {
+                console.log("Received message:", event.data);
+                wss.send("Echo: " + event.data);
+            };
+            wss.onclose = (event) => {
+                console.log("Closed:", event);
+            };
+            wss.onerror = (event) => {
+                console.error("Error:", event.type);
+            };
+            return new Response(wss, {
+                headers: {
+                    "Sec-WebSocket-Protocol": "chat, superchat",
+                },
+            });
+        }
         return new Response("Hello, World!");
     });
     server.listen(3000, () => {

@@ -1,5 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "node_http.h"
+#include "ts_features.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -329,6 +330,7 @@ static int extract_response(Value result, const char** out_body, size_t* out_len
   return 0;
 }
 
+#if defined(TS_NEED_node_http_createServer)
 Value node_http_createServer(Value callback) {
   HttpServer* server = (HttpServer*)malloc(sizeof(HttpServer));
   server->type_tag = HTTP_SERVER_TAG;
@@ -336,7 +338,9 @@ Value node_http_createServer(Value callback) {
   server->callback = callback;
   return ts_value_object(server);
 }
+#endif /* TS_NEED_node_http_createServer */
 
+#if defined(TS_NEED_node_http_server_listen)
 Value node_http_server_listen(Value serverVal, Value portVal, Value callback) {
   HttpServer* server = (HttpServer*)serverVal.as.object;
   if (!server || server->type_tag != HTTP_SERVER_TAG) {
@@ -549,7 +553,9 @@ Value node_http_server_listen(Value serverVal, Value portVal, Value callback) {
 
   return ts_value_undefined();
 }
+#endif /* TS_NEED_node_http_server_listen */
 
+#if defined(TS_NEED_node_http_request)
 Value node_http_request(Value options, Value callback) {
   if (options.tag != TAG_OBJECT) {
     TS_THROW(ts_value_string(ts_string_new("Options must be an object")));
@@ -592,7 +598,9 @@ Value node_http_request(Value options, Value callback) {
   (void)callback;
   return ts_value_undefined();
 }
+#endif /* TS_NEED_node_http_request */
 
+#if defined(TS_NEED_node_http_get)
 Value node_http_get(Value url, Value callback) {
   (void)url;
   TSHashMap* options = ts_hashmap_new();
@@ -600,3 +608,4 @@ Value node_http_get(Value url, Value callback) {
   ts_hashmap_set(options, ts_string_new("port"), ts_value_number(80));
   return node_http_request(ts_value_object(options), callback);
 }
+#endif /* TS_NEED_node_http_get */

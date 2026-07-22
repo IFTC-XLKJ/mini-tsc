@@ -234,6 +234,27 @@ export class ExpressionEmitter {
       // Don't rewrite struct field assigns (self->field)
       const isStructField =
         objName && objType && objType.endsWith("*") && !objType.startsWith("TS");
+      // WebSocket / WebSocketServer event handlers: ws.onmessage = fn
+      const wsHandlers = new Set(["onopen", "onmessage", "onerror", "onclose"]);
+      if (wsHandlers.has(tgt.property) && (objIsValue || /ws|socket|wss/i.test(objName || ""))) {
+        const object = this.emit(tgt.object);
+        let val = this.emit(node.value);
+        // ts_bind_function / ts_value_* already produce Value
+        if (!val.startsWith("ts_value_") && !val.startsWith("ts_null(") &&
+            !val.startsWith("ts_undefined(") && !val.startsWith("ts_bind_function(")) {
+          if (node.value?.kind === "identifier") {
+            const t = this.varTypes.get(node.value.name);
+            if (t === "Value") { /* keep */ }
+            else val = `ts_value_function((void*)${val})`;
+          } else if (node.value?.kind === "arrow_function" || node.value?.kind === "function_expression" ||
+                     node.value?.kind === "function_ref") {
+            val = `ts_value_function((void*)${val})`;
+          } else {
+            val = `ts_value_function((void*)${val})`;
+          }
+        }
+        return `ts_websocket_set_handler(${object}, ts_string_new("${tgt.property}"), ${val})`;
+      }
       if (objIsValue && !isStructField) {
         const object = this.emit(tgt.object);
         let val = this.emit(node.value);
@@ -504,7 +525,18 @@ export class ExpressionEmitter {
         return `${eq}(${ptr})`;
       }
       const eq = op === "===" ? "" : "!";
-      return `${eq}ts_string_equals(${left}, ${right})`;
+      // Headers.get / hashmap get return Value — coerce to TSString*
+      let leftStr = left;
+      let rightStr = right;
+      if (left.startsWith("ts_hashmap_get(") || left.startsWith("ts_value_") ||
+          left.startsWith("node_") || left.startsWith("ts_fetch_")) {
+        leftStr = `ts_to_string(${left})`;
+      }
+      if (right.startsWith("ts_hashmap_get(") || right.startsWith("ts_value_") ||
+          right.startsWith("node_") || right.startsWith("ts_fetch_")) {
+        rightStr = `ts_to_string(${right})`;
+      }
+      return `${eq}ts_string_equals(${leftStr}, ${rightStr})`;
     }
 
     // Nullish coalescing — Value-aware
@@ -1441,6 +1473,74 @@ export class ExpressionEmitter {
     if (callee.kind === "property_access" && callee.property === "getWriter") {
       const obj = this.emit(callee.object);
       return `ts_writable_stream_get_writer(${obj})`;
+    }
+
+    // WebSocket / WebSocketServer methods: send / close / addEventListener / removeEventListener
+    if (callee.kind === "property_access" &&
+        (callee.property === "send" || callee.property === "close" ||
+         callee.property === "addEventListener" || callee.property === "removeEventListener")) {
+      const typeName = String(callee.checkerTypeName || "");
+      const objName = callee.object.kind === "identifier" ? callee.object.name : "";
+      const isWs =
+        /WebSocket/i.test(typeName) ||
+        /ws|socket|wss/i.test(objName) ||
+        (callee.object.kind === "identifier" && this.varTypes.get(objName) === "Value" &&
+         /ws|socket/i.test(objName));
+      if (isWs || callee.property === "addEventListener" || callee.property === "removeEventListener") {
+        // Narrow add/removeEventListener: only when object looks like WS
+        if ((callee.property === "addEventListener" || callee.property === "removeEventListener") &&
+            !/WebSocket/i.test(typeName) && !/ws|socket|wss/i.test(objName)) {
+          // fall through — may be EventTarget elsewhere
+        } else {
+          const obj = this.emit(callee.object);
+          if (callee.property === "send") {
+            const data = node.arguments?.[0] ? this.emit(node.arguments[0]) : `ts_value_string(ts_string_new(""))`;
+            let dataVal = data;
+            if (!data.startsWith("ts_value_") && !data.startsWith("ts_null(") && !data.startsWith("ts_undefined(")) {
+              if (node.arguments?.[0]?.kind === "string_literal") dataVal = `ts_value_string(${data})`;
+              else if (data.startsWith("ts_string_new(") || data.startsWith("ts_string_concat(") ||
+                       data.startsWith("ts_to_string(") || data.includes("/*__ts_str*/")) {
+                dataVal = `ts_value_string(${data})`;
+              } else if (node.arguments?.[0]?.kind === "identifier") {
+                const t = this.varTypes.get(node.arguments[0].name);
+                if (t === "TSString*" || t === "string") dataVal = `ts_value_string(${data})`;
+                else if (t === "Value" || !t) dataVal = data;
+                else dataVal = `ts_value_string(ts_to_string(${data}))`;
+              } else {
+                dataVal = `ts_value_string(ts_to_string(${data}))`;
+              }
+            }
+            return `ts_websocket_send(${obj}, ${dataVal})`;
+          }
+          if (callee.property === "close") {
+            const code = node.arguments?.[0] ? this.emit(node.arguments[0]) : "ts_value_undefined()";
+            const reason = node.arguments?.[1] ? this.emit(node.arguments[1]) : "ts_value_undefined()";
+            let codeVal = code;
+            if (!code.startsWith("ts_value_") && !code.startsWith("ts_null(") && !code.startsWith("ts_undefined(")) {
+              if (node.arguments?.[0]?.kind === "number_literal") codeVal = `ts_value_number(${code})`;
+              else codeVal = `ts_value_number(${code})`;
+            }
+            let reasonVal = reason;
+            if (!reason.startsWith("ts_value_") && !reason.startsWith("ts_null(") && !reason.startsWith("ts_undefined(")) {
+              if (node.arguments?.[1]?.kind === "string_literal") reasonVal = `ts_value_string(${reason})`;
+              else if (reason.startsWith("ts_string_")) reasonVal = `ts_value_string(${reason})`;
+            }
+            return `ts_websocket_close(${obj}, ${codeVal}, ${reasonVal})`;
+          }
+          if (callee.property === "addEventListener" || callee.property === "removeEventListener") {
+            const typeArg = node.arguments?.[0] ? this.emit(node.arguments[0]) : `ts_string_new("")`;
+            let typeStr = typeArg;
+            if (node.arguments?.[0]?.kind === "string_literal") typeStr = typeArg;
+            else if (!typeArg.startsWith("ts_string_")) typeStr = `ts_to_string(${typeArg})`;
+            let fn = node.arguments?.[1] ? this.emit(node.arguments[1]) : "ts_value_undefined()";
+            if (!fn.startsWith("ts_value_")) fn = `ts_value_function((void*)${fn})`;
+            const api = callee.property === "addEventListener"
+              ? "ts_websocket_add_event_listener"
+              : "ts_websocket_remove_event_listener";
+            return `${api}(${obj}, ${typeStr}, ${fn})`;
+          }
+        }
+      }
     }
     if (callee.kind === "property_access" &&
         (callee.property === "write" || callee.property === "close")) {
@@ -2578,7 +2678,7 @@ export class ExpressionEmitter {
             !callee.checkerTypeName.startsWith("TS") && !callee.checkerTypeName.includes(" ") &&
             !callee.checkerTypeName.includes("{") &&
             // Runtime Value wrappers — not real C class structs
-            !/^(Server|IncomingMessage|ClientRequest|Socket|Agent|Buffer|URL|Url|Headers|Response|Request|WritableStream|ReadableStream|TransformStream)$/i.test(
+            !/^(Server|IncomingMessage|ClientRequest|Socket|Agent|Buffer|URL|Url|Headers|Response|Request|WritableStream|ReadableStream|TransformStream|WebSocket|WebSocketServer)$/i.test(
               callee.checkerTypeName.replace(/\*$/, "").replace(/<.*>/, ""))) {
           // Strip TypeScript generics: WritableStreamDefaultWriter<any> → invalid C
           const rawName = callee.checkerTypeName.replace(/\*$/, "").replace(/<.*>/, "");
@@ -3469,12 +3569,46 @@ export class ExpressionEmitter {
       }
     }
 
-    // Blob properties
+    // Blob properties (only when object looks like a Blob, not Event.type)
     if (node.property === "size") {
-      return `ts_blob_size(${object})`;
+      const on = node.object.kind === "identifier" ? node.object.name : "";
+      const ot = node.object.kind === "identifier" ? this.varTypes.get(on) : undefined;
+      if (/blob/i.test(on) || /Blob/i.test(String(node.objectType || "")) ||
+          (ot === "Value" && /blob/i.test(on))) {
+        return `ts_blob_size(${object})`;
+      }
     }
     if (node.property === "type") {
-      return `ts_blob_type(${object})`;
+      const on = node.object.kind === "identifier" ? node.object.name : "";
+      const ot = node.object.kind === "identifier" ? this.varTypes.get(on) : undefined;
+      // Prefer Blob only for clear blob receivers; Event/WebSocketEvent use hashmap "type"
+      if (/blob/i.test(on) || /Blob/i.test(String(node.objectType || ""))) {
+        return `ts_blob_type(${object})`;
+      }
+      // Value event objects: event.type → hashmap
+      if (ot === "Value" || /event|ev|err|error/i.test(on) ||
+          /WebSocketEvent|Event/i.test(String(node.objectType || ""))) {
+        // fall through to hashmap get below
+      } else if (ot && ot !== "Value") {
+        return `ts_blob_type(${object})`;
+      }
+    }
+
+    // WebSocket readyState / event handler getters
+    if (node.property === "readyState") {
+      const ot = node.object.kind === "identifier" ? this.varTypes.get(node.object.name) : undefined;
+      const on = node.object.kind === "identifier" ? node.object.name : "";
+      if (ot === "Value" || /ws|socket|wss/i.test(on) || /WebSocket/i.test(String(node.objectType || ""))) {
+        return `ts_websocket_readyState(${object})`;
+      }
+    }
+    if (node.property === "onopen" || node.property === "onmessage" ||
+        node.property === "onerror" || node.property === "onclose") {
+      const ot = node.object.kind === "identifier" ? this.varTypes.get(node.object.name) : undefined;
+      const on = node.object.kind === "identifier" ? node.object.name : "";
+      if (ot === "Value" || /ws|socket|wss/i.test(on) || /WebSocket/i.test(String(node.objectType || ""))) {
+        return `ts_websocket_get_handler(${object}, ts_string_new("${node.property}"))`;
+      }
     }
 
     // URL properties — helpers accept Value and check type_tag
@@ -3708,6 +3842,22 @@ export class ExpressionEmitter {
       return `ts_headers()`;
     }
 
+    // WebSocket client: new WebSocket(url)
+    if (className === "WebSocket") {
+      const raw = node.arguments?.[0] ? this.emit(node.arguments[0]) : 'ts_string_new("")';
+      let urlArg = this.asTSString(raw, node.arguments?.[0]);
+      if (urlArg.startsWith("ts_hashmap_get(") || urlArg.startsWith("ts_value_") ||
+          urlArg.startsWith("node_")) {
+        urlArg = `ts_to_string(${urlArg})`;
+      }
+      return `ts_websocket_new(${urlArg})`;
+    }
+
+    // WebSocketServer: new WebSocketServer() — attach via Response(wss) for HTTP upgrade
+    if (className === "WebSocketServer") {
+      return `ts_websocket_server_new()`;
+    }
+
     // WritableStream → StreamBody-backed chunk collector for Response streaming
     if (className === "WritableStream") {
       return `ts_writable_stream_new()`;
@@ -3749,6 +3899,7 @@ export class ExpressionEmitter {
             body.startsWith("ts_buffer_") ||
             body.startsWith("ts_response_new(") ||
             body.startsWith("ts_writable_stream_") ||
+            body.startsWith("ts_websocket_") ||
             body.startsWith("ts_array_")) {
           return body;
         }

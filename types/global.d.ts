@@ -207,6 +207,7 @@ type BodyInit =
     | ReadableStream
     | WritableStream
     | WritableStreamDefaultWriter<any>
+    | WebSocketServer
     | null;
 
 type RequestMode = "cors" | "no-cors" | "same-origin" | "navigate" | string;
@@ -423,3 +424,43 @@ declare var crypto: Crypto;
 
 /** Explicit GC when runtime exposes it (test / debug). */
 declare function gc(): void;
+
+interface WebSocketEvent extends Event {
+    data?: string | ArrayBuffer;
+}
+
+interface WebSocket {
+    onopen?: (ev: WebSocketEvent) => any;
+    onmessage?: (ev: WebSocketEvent) => any;
+    onerror?: (ev: WebSocketEvent) => any;
+    onclose?: (ev: WebSocketEvent) => any;
+    addEventListener(type: string, listener: (ev: WebSocketEvent) => void): void;
+    removeEventListener(type: string, listener: (ev: WebSocketEvent) => void): void;
+    close(code?: number, reason?: string): void;
+    send(data: string | ArrayBuffer): void;
+    readonly readyState: number;
+    static readonly CONNECTING: number;
+    static readonly OPEN: number;
+    static readonly CLOSING: number;
+    static readonly CLOSED: number;
+}
+
+declare var WebSocket: { new (url: string): WebSocket };
+declare var WebSocketEvent: { new (): WebSocketEvent };
+
+interface WebSocketServer {
+    onmessage?: (ev: WebSocketEvent) => any;
+    onclose?: (ev: WebSocketEvent) => any;
+    onerror?: (ev: WebSocketEvent) => any;
+    addEventListener(type: string, listener: (ev: WebSocketEvent) => void): void;
+    removeEventListener(type: string, listener: (ev: WebSocketEvent) => void): void;
+    close(code?: number, reason?: string): void;
+    send(data: string | ArrayBuffer): void;
+    readonly readyState: number;
+    static readonly CONNECTING: number;
+    static readonly OPEN: number;
+    static readonly CLOSING: number;
+    static readonly CLOSED: number;
+}
+
+declare var WebSocketServer: { new (): WebSocketServer };

@@ -2717,6 +2717,15 @@ Value ts_response_new(Value body, Value init) {
       resp->stream = body.as.object;
       resp->body_complete = 0;
       resp->body = ts_string_new("");
+    } else if (btag == WEBSOCKET_SERVER_TAG || btag == WEBSOCKET_TAG) {
+      /* WebSocketServer as Response body → HTTP upgrade */
+      resp->stream = body.as.object;
+      resp->body_complete = 0;
+      resp->body = ts_string_new("");
+      if (resp->status == 200) {
+        resp->status = 101;
+        resp->statusText = ts_string_new("Switching Protocols");
+      }
     } else {
       /* Generic object — stringify */
       resp->body = ts_to_string(body);

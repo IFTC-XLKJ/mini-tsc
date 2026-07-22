@@ -8,7 +8,7 @@
 #include <math.h>
 #include <setjmp.h>
 
-/* CommonJS module globals (set by generated main.c for the entry file) */
+/* CommonJS module globals (defined in generated main.c) */
 extern const char* __ts_dirname;
 extern const char* __ts_filename;
 
@@ -54,8 +54,6 @@ int ts_string_starts_with(TSString* s, TSString* prefix);
 int ts_string_ends_with(TSString* s, TSString* suffix);
 int ts_string_includes(TSString* haystack, TSString* needle);
 TSString* ts_string_replace(TSString* s, TSString* search, TSString* replacement);
-TSString* ts_string_repeat(TSString* s, int32_t count);
-TSArray* ts_string_split(TSString* s, TSString* separator);
 
 /* TSArray */
 typedef struct TSArray {
@@ -73,15 +71,14 @@ void ts_array_set(TSArray* arr, int32_t index, Value val);
 int32_t ts_array_index_of(TSArray* arr, Value val);
 void ts_array_free(TSArray* arr);
 TSArray* ts_array_filter(TSArray* arr, int (*predicate)(Value));
-TSArray* ts_array_map(TSArray* arr, Value (*transform)(Value));
+TSArray* ts_array_map(TSArray* arr, Value (*fn)(Value));
 TSString* ts_array_join(TSArray* arr, TSString* separator);
+Value ts_array_reduce(TSArray* arr, Value (*fn)(Value, Value), Value init);
+void ts_array_foreach(TSArray* arr, void (*callback)(Value));
 int ts_array_some(TSArray* arr, int (*predicate)(Value));
 int ts_array_every(TSArray* arr, int (*predicate)(Value));
 Value ts_array_find(TSArray* arr, int (*predicate)(Value));
-Value ts_array_reduce(TSArray* arr, Value (*reducer)(Value, Value), Value initialValue);
-void ts_array_foreach(TSArray* arr, void (*callback)(Value));
-void ts_array_splice(TSArray* arr, int32_t start, int32_t deleteCount, Value* items, int32_t itemCount);
-Value ts_array_pop(TSArray* arr);
+TSArray* ts_string_split(TSString* s, TSString* separator);
 
 /* TSHashMap */
 typedef struct HashEntry {
@@ -162,38 +159,22 @@ TSString* ts_inspect(Value val);
 
 /* Builtin functions */
 void ts_console_log(Value val);
-void ts_console_log_multi(Value* args, int argc);
 void ts_console_info(Value val);
-void ts_console_info_multi(Value* args, int argc);
 void ts_console_warn(Value val);
-void ts_console_warn_multi(Value* args, int argc);
 void ts_console_error(Value val);
-void ts_console_error_multi(Value* args, int argc);
-void ts_console_debug(Value val);
-void ts_console_debug_multi(Value* args, int argc);
-void ts_console_assert(Value condition, Value val);
-void ts_console_clear(void);
-void ts_console_count(TSString* label);
-void ts_console_count_reset(TSString* label);
-void ts_console_dir(Value val);
-void ts_console_group(void);
-void ts_console_group_end(void);
-void ts_console_table(Value val);
-void ts_console_trace(Value val);
 void ts_console_time(TSString* label);
 void ts_console_time_end(TSString* label);
 
-/* Timers: setTimeout / setInterval (event loop drained at process exit) */
+/* Timers */
 double ts_set_timeout(Value callback, Value delayMs, Value* args, int argc);
 double ts_set_interval(Value callback, Value delayMs, Value* args, int argc);
 void ts_clear_timeout(Value id);
 void ts_clear_interval(Value id);
 void ts_timers_run(void);
 int ts_timers_pending(void);
-/* Fire due timers once (or sleep briefly until next); returns 1 if any fired */
 int ts_timers_poll(void);
 
-/* Browser-like dialogs (stdin/stdout) */
+/* Browser-like dialogs */
 void ts_alert(Value message);
 int ts_confirm(Value message);
 Value ts_prompt(Value message);
@@ -203,6 +184,60 @@ void ts_throw(Value val);
 
 /* Error */
 Value ts_error_new(TSString* message);
+
+/* Promise + async I/O */
+#define PROMISE_TAG 0x50524F4D
+
+typedef enum {
+  PROMISE_PENDING = 0,
+  PROMISE_FULFILLED = 1,
+  PROMISE_REJECTED = 2
+} PromiseState;
+
+typedef struct TSPromise {
+  int32_t type_tag;
+  int32_t refcount;
+  PromiseState state;
+  Value result;
+  Value onFulfilled;
+  Value onRejected;
+  Value onFinally;
+  struct TSPromise* then_promise;
+} TSPromise;
+
+#define PROMISE_RESOLVE_TAG 0x50525356
+typedef struct {
+  int32_t type_tag;
+  TSPromise* promise;
+  int is_reject;
+} PromiseResolver;
+
+Value ts_promise_new(void);
+Value ts_promise_resolve(Value p, Value v);
+Value ts_promise_reject(Value p, Value err);
+Value ts_promise_then(Value p, Value onFulfilled, Value onRejected);
+Value ts_promise_catch(Value p, Value onRejected);
+Value ts_promise_finally(Value p, Value onFinally);
+Value ts_await(Value p);
+int ts_value_is_promise(Value v);
+Value Promise_constructor(Value executor);
+
+typedef void (*TsJobFn)(void* userdata);
+typedef struct TsJob {
+  TsJobFn work;
+  TsJobFn complete;
+  void* userdata;
+  struct TsJob* next;
+} TsJob;
+
+void ts_thread_pool_init(void);
+void ts_thread_pool_submit(TsJob* job);
+void ts_thread_pool_shutdown(void);
+int ts_jobs_pending(void);
+int ts_completion_poll(void);
+void ts_completion_wait(int timeout_ms);
+void ts_async_run(void);
+int ts_async_pending(void);
 
 /* Math builtins */
 double ts_math_random(void);
@@ -227,10 +262,35 @@ double ts_math_atan2(double y, double x);
 
 /* Date */
 typedef struct {
-  double timestamp; /* milliseconds since epoch */
+  double timestamp;
 } Date;
 
 double date_now_ts(void);
+
+/* Buffer */
+typedef struct {
+  int32_t type_tag;  /* 0x42554646 = 'BUFF' */
+  uint8_t* data;
+  int32_t length;
+  int32_t capacity;
+} Buffer;
+
+#define BUFFER_TAG 0x42554646
+
+Value ts_buffer_new(int32_t size);
+Value ts_buffer_from_string(TSString* str);
+Value ts_buffer_from_array(TSArray* arr);
+Value ts_buffer_alloc(int32_t size);
+Value ts_buffer_allocUnsafe(int32_t size);
+Value ts_buffer_concat(Value* buffers, int32_t count);
+int32_t ts_buffer_length(Value buf);
+uint8_t ts_buffer_readUInt8(Value buf, int32_t offset);
+void ts_buffer_writeUInt8(Value buf, int32_t offset, uint8_t value);
+Value ts_buffer_slice(Value buf, int32_t start, int32_t end);
+TSString* ts_buffer_toString_utf8(Value buf);
+TSString* ts_buffer_toString_hex(Value buf);
+TSString* ts_buffer_toString_base64(Value buf);
+int ts_buffer_isBuffer(Value val);
 double date_parse_ts(TSString* str);
 int32_t date_getFullYear_ts(double ts);
 int32_t date_getMonth_ts(double ts);
@@ -245,6 +305,7 @@ TSString* date_toISOString_ts(double ts);
 TSString* date_toDateString_ts(double ts);
 TSString* date_toTimeString_ts(double ts);
 TSString* date_toLocaleString_ts(double ts);
+double ts_date_now(void);
 
 /* Number parsing */
 double ts_parse_int(TSString* str, int radix);
@@ -253,11 +314,6 @@ double ts_parse_float(TSString* str);
 /* Utility */
 int ts_is_nan(double x);
 int ts_is_finite(double x);
-
-/* Type extraction helpers */
-#define TS_EXTRACT_STRING(val) ((val).tag == TAG_STRING ? (val).as.string : ts_to_string(val))
-#define TS_EXTRACT_NUMBER(val) ((val).tag == TAG_NUMBER ? (val).as.number : ts_to_number(val))
-#define TS_EXTRACT_BOOLEAN(val) ((val).tag == TAG_BOOLEAN ? (val).as.boolean : ts_to_boolean(val))
 
 /* JSON */
 Value ts_json_parse(TSString* json);
@@ -281,13 +337,13 @@ typedef struct {
   TSString* body;
   TSHashMap* headers;
   TSString* url;
-  void* stream;       /* live connection for streaming body, or NULL */
-  int body_complete;  /* 1 if body fully buffered in `body` */
+  void* stream;
+  int body_complete;
 } FetchResponse;
 
 #define FETCH_RESPONSE_TAG 0x46455443
-#define FETCH_STREAM_TAG   0x5354524D  /* 'STRM' */
-#define FETCH_READER_TAG   0x52445252  /* 'RDRR' */
+#define FETCH_STREAM_TAG   0x5354524D
+#define FETCH_READER_TAG   0x52445252
 
 /* Fetch functions */
 Value ts_fetch(TSString* url, Value options);
@@ -303,96 +359,70 @@ Value ts_fetch_response_body(Value response);
 Value ts_fetch_body_get_reader(Value body);
 Value ts_fetch_reader_read(Value reader);
 
-/* Web Response constructor (server + client): new Response(body[, init])
- * body: string | Buffer | string[] (array → chunked stream body)
- * init: { status?, statusText?, headers? }
- * Streaming: array body sets body_complete=0 and stream = StreamBody* */
-#define STREAM_BODY_TAG 0x53424F44  /* 'SBOD' */
-
+/* Web Response constructor + streaming body (server chunked responses) */
+#define STREAM_BODY_TAG 0x53424F44
 typedef struct StreamBody {
   int32_t type_tag;
-  TSArray* chunks;   /* Value array of string/buffer chunks */
-  int delay_ms;      /* pause between chunks when serving (0 = none) */
+  TSArray* chunks;
+  int delay_ms;
 } StreamBody;
-
 Value ts_response_new(Value body, Value init);
 int  ts_response_is_stream(Value response);
 StreamBody* ts_response_stream_body(Value response);
-
-/* WritableStream → StreamBody (server-side chunked response body) */
 Value ts_writable_stream_new(void);
 Value ts_writable_stream_get_writer(Value stream);
 Value ts_writable_stream_write(Value writer, Value chunk);
 Value ts_writable_stream_close(Value writer);
-/* Call Value as 0-arg function; StreamBody identity for bound getWriter */
 Value ts_value_call0(Value v);
 
-/* ==================== WebSocket / WebSocketServer ==================== */
-#define WEBSOCKET_TAG        0x57534F43  /* 'WSOC' */
-#define WEBSOCKET_SERVER_TAG 0x57535356  /* 'WSSV' */
-
-/* readyState constants (shared by client + server peer) */
+/* WebSocket / WebSocketServer */
+#define WEBSOCKET_TAG        0x57534F43
+#define WEBSOCKET_SERVER_TAG 0x57535356
 #define WS_CONNECTING 0
 #define WS_OPEN       1
 #define WS_CLOSING    2
 #define WS_CLOSED     3
-
 typedef struct WebSocket {
   int32_t type_tag;
-  int fd;                 /* socket fd (-1 if closed) */
-  int readyState;         /* WS_CONNECTING/OPEN/CLOSING/CLOSED */
-  int is_server;          /* 1 = server-side peer (WebSocketServer) */
+  int fd;
+  int readyState;
+  int is_server;
   Value onopen;
   Value onmessage;
   Value onerror;
   Value onclose;
-  TSHashMap* listeners;   /* event name → array of functions */
-  TSString* url;          /* client only */
+  TSHashMap* listeners;
+  TSString* url;
   char* recv_buf;
   int recv_len;
   int recv_cap;
   int handshake_done;
-  struct WebSocket* next; /* global linked-list chain */
+  struct WebSocket* next;
 } WebSocket;
-
-/* Client: new WebSocket(url) */
 Value ts_websocket_new(TSString* url);
-/* Server peer: new WebSocketServer() — attached to HTTP upgrade Response */
 Value ts_websocket_server_new(void);
 int  ts_websocket_is(Value v);
 int  ts_websocket_server_is(Value v);
 WebSocket* ts_websocket_from_value(Value v);
-
 Value ts_websocket_send(Value ws, Value data);
 Value ts_websocket_close(Value ws, Value code, Value reason);
 double ts_websocket_readyState(Value ws);
-
-/* Event handlers: onopen/onmessage/onerror/onclose property set */
 Value ts_websocket_set_handler(Value ws, TSString* name, Value fn);
 Value ts_websocket_get_handler(Value ws, TSString* name);
 Value ts_websocket_add_event_listener(Value ws, TSString* type, Value fn);
 Value ts_websocket_remove_event_listener(Value ws, TSString* type, Value fn);
-
-/* HTTP server: complete upgrade handshake + run message loop on client_fd.
- * fr may hold WebSocketServer in stream field (type_tag WEBSOCKET_SERVER_TAG).
- * initial_req is the raw HTTP request bytes already read (for Sec-WebSocket-Key). */
 void ts_websocket_http_upgrade(int client_fd, FetchResponse* fr,
                                const char* initial_req, int initial_len);
-
-/* Client connect + pump (also used by event loop hooks) */
 int  ts_websocket_pending(void);
 void ts_websocket_poll(void);
-
-/* Closure binding: snapshot free vars for setTimeout / Promise executors */
-#define BOUND_FN_TAG 0x42464E00  /* 'BFN\0' */
+#define BOUND_FN_TAG 0x42464E00
 typedef struct {
   int32_t type_tag;
-  void* fn;          /* Value (*)(Value, Value, Value, Value) */
+  void* fn;
   Value caps[4];
   int ncaps;
 } BoundFn;
 Value ts_bind_function(void* fn, Value* caps, int ncaps);
-/* Call bound or plain function with up to 4 Value args (missing = undefined) */
 Value ts_value_call(Value callee, Value* args, int argc);
 
 /* Headers constructor */
@@ -442,30 +472,10 @@ TSString* ts_url_search(Value url);
 TSString* ts_url_hash(Value url);
 TSString* ts_url_toString(Value url);
 
-/* Buffer */
-typedef struct {
-  int32_t type_tag;  /* 0x42554646 = 'BUFF' */
-  uint8_t* data;
-  int32_t length;
-  int32_t capacity;
-} Buffer;
-
-#define BUFFER_TAG 0x42554646
-
-Value ts_buffer_new(int32_t size);
-Value ts_buffer_from_string(TSString* str);
-Value ts_buffer_from_array(TSArray* arr);
-Value ts_buffer_alloc(int32_t size);
-Value ts_buffer_allocUnsafe(int32_t size);
-Value ts_buffer_concat(Value* buffers, int32_t count);
-int32_t ts_buffer_length(Value buf);
-uint8_t ts_buffer_readUInt8(Value buf, int32_t offset);
-void ts_buffer_writeUInt8(Value buf, int32_t offset, uint8_t value);
-Value ts_buffer_slice(Value buf, int32_t start, int32_t end);
-TSString* ts_buffer_toString_utf8(Value buf);
-TSString* ts_buffer_toString_hex(Value buf);
-TSString* ts_buffer_toString_base64(Value buf);
-int ts_buffer_isBuffer(Value val);
+/* Type extraction helpers */
+#define TS_EXTRACT_STRING(val) ((val).tag == TAG_STRING ? (val).as.string : ts_to_string(val))
+#define TS_EXTRACT_NUMBER(val) ((val).tag == TAG_NUMBER ? (val).as.number : ts_to_number(val))
+#define TS_EXTRACT_BOOLEAN(val) ((val).tag == TAG_BOOLEAN ? (val).as.boolean : ts_to_boolean(val))
 
 /* Error handling (setjmp/longjmp) */
 typedef struct {
@@ -478,64 +488,5 @@ extern TsErrorContext _ts_current_error;
 #define TS_TRY if (setjmp(_ts_current_error.jump_buffer) == 0)
 #define TS_CATCH else
 #define TS_THROW(val) do { _ts_current_error.error_value = val; longjmp(_ts_current_error.jump_buffer, 1); } while(0)
-
-/* ==================== Promise ==================== */
-#define PROMISE_TAG 0x50524F4D  /* 'PROM' */
-#define PROMISE_RESOLVE_TAG 0x50525356  /* 'PRSV' resolve/reject binder */
-
-typedef enum {
-  PROMISE_PENDING = 0,
-  PROMISE_FULFILLED = 1,
-  PROMISE_REJECTED = 2
-} PromiseState;
-
-typedef struct TSPromise {
-  int32_t type_tag;
-  int32_t refcount;
-  PromiseState state;
-  Value result;
-  Value onFulfilled;
-  Value onRejected;
-  Value onFinally;
-  struct TSPromise* then_promise; /* promise returned by .then (optional) */
-} TSPromise;
-
-/* Bound resolve/reject passed to Promise executor and usable as setTimeout callback */
-typedef struct {
-  int32_t type_tag;
-  TSPromise* promise;
-  int is_reject; /* 0 = resolve, 1 = reject */
-} PromiseResolver;
-
-Value ts_promise_new(void);
-Value ts_promise_resolve(Value p, Value v);
-Value ts_promise_reject(Value p, Value err);
-Value ts_promise_then(Value p, Value onFulfilled, Value onRejected);
-Value ts_promise_catch(Value p, Value onRejected);
-Value ts_promise_finally(Value p, Value onFinally);
-Value ts_await(Value p);
-int ts_value_is_promise(Value v);
-Value Promise_constructor(Value executor);
-
-/* ==================== Thread pool / async I/O ==================== */
-typedef void (*TsJobFn)(void* userdata);
-
-typedef struct TsJob {
-  TsJobFn work;       /* runs on worker thread */
-  TsJobFn complete;   /* runs on main thread after work */
-  void* userdata;
-  struct TsJob* next;
-} TsJob;
-
-void ts_thread_pool_init(void);
-void ts_thread_pool_submit(TsJob* job);
-void ts_thread_pool_shutdown(void);
-int  ts_jobs_pending(void);
-int  ts_completion_poll(void);   /* process finished jobs on main; returns count */
-void ts_completion_wait(int timeout_ms);
-
-/* Unified event loop: timers + async jobs */
-void ts_async_run(void);
-int  ts_async_pending(void);
 
 #endif /* TS_RUNTIME_H */
