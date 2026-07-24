@@ -27,7 +27,7 @@ const NODE_BUILTINS = new Set([
   "fs", "path", "http", "https", "net", "os", "process", "child_process",
   "crypto", "url", "util", "events", "stream", "buffer", "querystring",
   "assert", "constants", "module", "repl", "tty", "zlib", "readline",
-  "worker_threads",
+  "worker_threads", "chalk",
 ]);
 
 /** Scan a TS file for import specifiers that resolve to local source files */

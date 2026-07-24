@@ -13,7 +13,7 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "rootDir": "..",
-    "baseUrl": ".."
+    // "baseUrl": ".."
   },
   "include": [
     "./**/*.ts",
@@ -27,8 +27,6 @@
     "../dist",
     "../runtime",
     "../out",
-    "../out_*",
-    "./command.ts",
-    "./fixtures/**"
+    "../out_*"
   ]
 }

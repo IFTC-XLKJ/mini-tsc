@@ -603,9 +603,15 @@ export class AstVisitor {
       "fs", "path", "http", "https", "net", "os", "process", "child_process",
       "crypto", "url", "util", "events", "stream", "buffer", "querystring",
       "assert", "constants", "module", "repl", "tty", "zlib", "readline",
-      "worker_threads",
+      "worker_threads", "chalk",
     ]);
     if (NODE_BUILTINS.has(specifier)) {
+      // Default import: import chalk from "chalk"
+      if (node.importClause?.name) {
+        const defaultName = node.importClause.name.text;
+        this.ctx.scope.declare(defaultName, "Value");
+        this.namespaceModulePaths.set(defaultName, `node:${specifier}`);
+      }
       if (node.importClause?.namedBindings) {
         if (ts.isNamespaceImport(node.importClause.namedBindings)) {
           const namespaceName = node.importClause.namedBindings.name.text;

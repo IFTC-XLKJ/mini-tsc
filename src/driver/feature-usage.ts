@@ -4,7 +4,7 @@ import { BUILTIN_MODULES } from "../builtins/registry.js";
 /** Node built-in module names we can tree-shake. */
 export const BUILTIN_MODULE_NAMES = [
   "fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto",
-  "worker_threads",
+  "worker_threads", "chalk",
 ] as const;
 
 export type BuiltinModuleName = (typeof BUILTIN_MODULE_NAMES)[number];
@@ -319,6 +319,26 @@ export function analyzeFeatureUsage(
             if (cName) addMethod(usage, cName);
           }
 
+          // Chalk chaining: chalk.red.bold("text") — detect the inner style
+          if (cal.kind === "property_access" &&
+              cal.object?.kind === "property_access" &&
+              cal.object.object?.kind === "identifier" &&
+              cal.object.object.name === "chalk") {
+            usage.modules.add("chalk");
+            const cName = resolveBuiltinMethod("chalk", cal.property);
+            if (cName) addMethod(usage, cName);
+          }
+
+          // Chalk factory calls: chalk.hex(color, text), chalk.rgb(r, g, b, text)
+          if (cal.kind === "property_access" &&
+              cal.object?.kind === "identifier" &&
+              cal.object.name === "chalk" &&
+              ["hex", "rgb", "bgHex", "bgRgb", "ansi256"].includes(cal.property)) {
+            usage.modules.add("chalk");
+            const cName = resolveBuiltinMethod("chalk", cal.property);
+            if (cName) addMethod(usage, cName);
+          }
+
           // process.stdout.write / process.stdin.on
           if (cal.kind === "property_access" &&
               cal.object?.kind === "property_access" &&
@@ -482,6 +502,16 @@ export function analyzeFeatureUsage(
           usage.modules.add("events");
           const prop = node.property as string;
           const cName = resolveBuiltinMethod("events", prop);
+          if (cName) addMethod(usage, cName);
+        }
+
+        // chalk.level / chalk.enabled property access
+        if (node.kind === "property_access" &&
+            node.object?.kind === "identifier" &&
+            node.object.name === "chalk") {
+          usage.modules.add("chalk");
+          const prop = node.property as string;
+          const cName = resolveBuiltinMethod("chalk", prop);
           if (cName) addMethod(usage, cName);
         }
 

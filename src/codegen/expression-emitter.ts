@@ -1660,10 +1660,121 @@ export class ExpressionEmitter {
 
     // Special handling for Node built-in module calls
     // e.g., fs.readFileSync("file.txt", "utf-8") → node_fs_readFileSync(ts_value_string(ts_string_new("file.txt")), ts_value_string(ts_string_new("utf-8")))
+
+    // Chalk chaining in calls: chalk.red.bold("text") → node_chalk_bold(ts_value_string(ts_string_new("text")))
+    if (callee.kind === "property_access" &&
+        callee.object.kind === "property_access" &&
+        callee.object.object.kind === "identifier") {
+      const chalkStyles = new Set([
+        "red","green","blue","yellow","magenta","cyan","white","gray","grey","black",
+        "redBright","greenBright","blueBright","yellowBright","magentaBright","cyanBright","whiteBright",
+        "bgRed","bgGreen","bgBlue","bgYellow","bgMagenta","bgCyan","bgWhite","bgBlack",
+        "bold","dim","italic","underline","strikethrough","visible","reset",
+      ]);
+      if (chalkStyles.has(callee.property) && chalkStyles.has(callee.object.property)) {
+        const funcName = `node_chalk_${callee.property}`;
+        let args = (node.arguments || []).map((a: CNode) => {
+          const emitted = this.emit(a);
+          if (emitted.startsWith("ts_value_") || emitted.startsWith("ts_null(") || emitted.startsWith("ts_undefined(")) return emitted;
+          if (a.kind === "function_ref" || a.kind === "arrow_function" || a.kind === "function_expression") return emitted;
+          if (a.kind === "string_literal") return `ts_value_string(${emitted})`;
+          if (a.kind === "number_literal") return `ts_value_number(${emitted})`;
+          if (a.kind === "boolean_literal") return `ts_value_boolean(${emitted})`;
+          if (a.kind === "identifier") {
+            const varType = this.varTypes.get(a.name);
+            if (varType === "double" || varType === "number") return `ts_value_number(${emitted})`;
+            if (varType === "TSString*" || varType === "string") return `ts_value_string(${emitted})`;
+            if (varType === "int" || varType === "boolean") return `ts_value_boolean(${emitted})`;
+            if (varType === "Value") return emitted;
+          }
+          if (a.kind === "call_expression" || emitted.startsWith("node_") || emitted.startsWith("ts_value_")) return emitted;
+          if (a.kind === "object_literal" || a.kind === "array_literal") return emitted.startsWith("ts_value_") ? emitted : `ts_value_object(${emitted})`;
+          return `ts_value_string(ts_to_string(${emitted}))`;
+        });
+        return `${funcName}(${args.join(", ")})`;
+      }
+    }
+
+    // Chalk factory calls: chalk.hex("#FF0000", "text") or chalk.rgb(255, 0, 0, "text")
     if (callee.kind === "property_access" &&
         callee.object.kind === "identifier") {
       const moduleName = callee.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads"];
+      if (moduleName === "chalk" && (callee.property === "hex" || callee.property === "bgHex")) {
+        // chalk.hex(color, text) → node_chalk_hex(ts_value_string(...), ts_value_string(...))
+        let args = (node.arguments || []).map((a: CNode) => {
+          const emitted = this.emit(a);
+          if (emitted.startsWith("ts_value_") || emitted.startsWith("ts_null(") || emitted.startsWith("ts_undefined(")) return emitted;
+          if (a.kind === "string_literal") return `ts_value_string(${emitted})`;
+          if (a.kind === "number_literal") return `ts_value_number(${emitted})`;
+          if (a.kind === "identifier") {
+            const varType = this.varTypes.get(a.name);
+            if (varType === "TSString*" || varType === "string") return `ts_value_string(${emitted})`;
+            if (varType === "double" || varType === "number") return `ts_value_number(${emitted})`;
+            if (varType === "Value") return emitted;
+          }
+          if (emitted.startsWith("node_") || emitted.startsWith("ts_value_")) return emitted;
+          return `ts_value_string(ts_to_string(${emitted}))`;
+        });
+        const funcName = callee.property === "hex" ? "node_chalk_hex" : "node_chalk_bgHex";
+        return `${funcName}(${args.join(", ")})`;
+      }
+      if (moduleName === "chalk" && callee.property === "rgb") {
+        let args = (node.arguments || []).map((a: CNode) => {
+          const emitted = this.emit(a);
+          if (emitted.startsWith("ts_value_") || emitted.startsWith("ts_null(") || emitted.startsWith("ts_undefined(")) return emitted;
+          if (a.kind === "string_literal") return `ts_value_string(${emitted})`;
+          if (a.kind === "number_literal") return `ts_value_number(${emitted})`;
+          if (a.kind === "identifier") {
+            const varType = this.varTypes.get(a.name);
+            if (varType === "TSString*" || varType === "string") return `ts_value_string(${emitted})`;
+            if (varType === "double" || varType === "number") return `ts_value_number(${emitted})`;
+            if (varType === "Value") return emitted;
+          }
+          if (emitted.startsWith("node_") || emitted.startsWith("ts_value_")) return emitted;
+          return `ts_value_string(ts_to_string(${emitted}))`;
+        });
+        return `node_chalk_rgb(${args.join(", ")})`;
+      }
+      if (moduleName === "chalk" && callee.property === "bgRgb") {
+        let args = (node.arguments || []).map((a: CNode) => {
+          const emitted = this.emit(a);
+          if (emitted.startsWith("ts_value_") || emitted.startsWith("ts_null(") || emitted.startsWith("ts_undefined(")) return emitted;
+          if (a.kind === "string_literal") return `ts_value_string(${emitted})`;
+          if (a.kind === "number_literal") return `ts_value_number(${emitted})`;
+          if (a.kind === "identifier") {
+            const varType = this.varTypes.get(a.name);
+            if (varType === "TSString*" || varType === "string") return `ts_value_string(${emitted})`;
+            if (varType === "double" || varType === "number") return `ts_value_number(${emitted})`;
+            if (varType === "Value") return emitted;
+          }
+          if (emitted.startsWith("node_") || emitted.startsWith("ts_value_")) return emitted;
+          return `ts_value_string(ts_to_string(${emitted}))`;
+        });
+        return `node_chalk_bgRgb(${args.join(", ")})`;
+      }
+      if (moduleName === "chalk" && callee.property === "ansi256") {
+        let args = (node.arguments || []).map((a: CNode) => {
+          const emitted = this.emit(a);
+          if (emitted.startsWith("ts_value_") || emitted.startsWith("ts_null(") || emitted.startsWith("ts_undefined(")) return emitted;
+          if (a.kind === "string_literal") return `ts_value_string(${emitted})`;
+          if (a.kind === "number_literal") return `ts_value_number(${emitted})`;
+          if (a.kind === "identifier") {
+            const varType = this.varTypes.get(a.name);
+            if (varType === "TSString*" || varType === "string") return `ts_value_string(${emitted})`;
+            if (varType === "double" || varType === "number") return `ts_value_number(${emitted})`;
+            if (varType === "Value") return emitted;
+          }
+          if (emitted.startsWith("node_") || emitted.startsWith("ts_value_")) return emitted;
+          return `ts_value_string(ts_to_string(${emitted}))`;
+        });
+        return `node_chalk_ansi256(${args.join(", ")})`;
+      }
+    }
+
+    if (callee.kind === "property_access" &&
+        callee.object.kind === "identifier") {
+      const moduleName = callee.object.name;
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk"];
       if (builtinModules.includes(moduleName)) {
         const funcName = `node_${moduleName}_${callee.property}`;
         // Wrap each argument in Value constructors
@@ -3526,6 +3637,7 @@ export class ExpressionEmitter {
             "defaultMaxListeners",
             "isMainThread", "parentPort", "workerData", "threadId", "threadName",
             "isInternalThread", "SHARE_ENV", "resourceLimits", "locks",
+            "level", "enabled",
           ]);
           if (zeroArgGetters.has(node.property)) {
             return `${funcName}()`;
@@ -3551,7 +3663,7 @@ export class ExpressionEmitter {
     // must emit as function calls: node_process_argv()
     if (node.object.kind === "identifier") {
       const moduleName = node.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk"];
       if (builtinModules.includes(moduleName)) {
         const funcName = `node_${moduleName}_${node.property}`;
         this._lastBuiltinCall = funcName;
@@ -3564,6 +3676,7 @@ export class ExpressionEmitter {
           "defaultMaxListeners",
           "isMainThread", "parentPort", "workerData", "threadId", "threadName",
           "isInternalThread", "SHARE_ENV", "resourceLimits", "locks",
+          "level", "enabled",
         ]);
         if (zeroArgGetters.has(node.property)) {
           return `${funcName}()`;
@@ -3579,6 +3692,24 @@ export class ExpressionEmitter {
           return funcName;
         }
         return funcName;
+      }
+    }
+
+    // Chalk chaining: chalk.red.bold → node_chalk_bold
+    // When the object is itself a property_access on a chalk builtin (e.g. chalk.red),
+    // and the property is a known chalk style, return the chained C function name.
+    if (node.object.kind === "property_access" &&
+        node.object.object.kind === "identifier") {
+      const chalkStyles = new Set([
+        "red","green","blue","yellow","magenta","cyan","white","gray","grey","black",
+        "redBright","greenBright","blueBright","yellowBright","magentaBright","cyanBright","whiteBright",
+        "bgRed","bgGreen","bgBlue","bgYellow","bgMagenta","bgCyan","bgWhite","bgBlack",
+        "bold","dim","italic","underline","strikethrough","visible","reset",
+      ]);
+      const innerObjName = node.object.object.name;
+      if (chalkStyles.has(node.property) && chalkStyles.has(node.object.property)) {
+        // chalk.red.bold → node_chalk_bold (last style wins for simplicity)
+        return `node_chalk_${node.property}`;
       }
     }
 

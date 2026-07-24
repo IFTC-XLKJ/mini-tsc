@@ -132,7 +132,7 @@ export class CompilerDriver {
           usedBuiltins.add(builtin);
         }
       }
-      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads"];
+      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk"];
       for (const builtin of globalBuiltins) {
         if (cEmitter.unitUsesBuiltin(unit, builtin)) {
           usedBuiltins.add(builtin);
@@ -1169,6 +1169,9 @@ extern TsErrorContext _ts_current_error;
     if (needsTsRuntime) {
       // string_ops holds core strings + indexOf/substring/replace/… (linker GC drops unused)
       coreRuntime.push("runtime.c", "string_ops.c");
+      // runtime.c internally references hashmap/array symbols; always link them
+      if (!needArray) coreRuntime.push("array_ops.c");
+      if (!needHashmap) coreRuntime.push("hashmap.c");
       if (needBuiltins) coreRuntime.push("builtins.c");
       if (needArray) coreRuntime.push("array_ops.c");
       if (needHashmap) coreRuntime.push("hashmap.c");

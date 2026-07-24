@@ -1,42 +1,57 @@
-﻿#ifndef NODE_CHALK_H
+#ifndef NODE_CHALK_H
 #define NODE_CHALK_H
 
 #include "runtime.h"
 
-/* Chalk instance is a TAG_OBJECT Value wrapping ChalkCtx*. */
+/* Basic color functions */
+Value node_chalk_red(Value text);
+Value node_chalk_green(Value text);
+Value node_chalk_blue(Value text);
+Value node_chalk_yellow(Value text);
+Value node_chalk_magenta(Value text);
+Value node_chalk_cyan(Value text);
+Value node_chalk_white(Value text);
+Value node_chalk_gray(Value text);
+Value node_chalk_grey(Value text);
+Value node_chalk_black(Value text);
 
-/* Default singleton (like npm chalk default export). */
-Value node_chalk_default(void);
+/* Bright color functions */
+Value node_chalk_redBright(Value text);
+Value node_chalk_greenBright(Value text);
+Value node_chalk_blueBright(Value text);
+Value node_chalk_yellowBright(Value text);
+Value node_chalk_magentaBright(Value text);
+Value node_chalk_cyanBright(Value text);
+Value node_chalk_whiteBright(Value text);
 
-/* Apply styles: chalk(...) / builder(...) */
-Value node_chalk_apply(Value self, Value* args, int argc);
+/* Background color functions */
+Value node_chalk_bgRed(Value text);
+Value node_chalk_bgGreen(Value text);
+Value node_chalk_bgBlue(Value text);
+Value node_chalk_bgYellow(Value text);
+Value node_chalk_bgMagenta(Value text);
+Value node_chalk_bgCyan(Value text);
+Value node_chalk_bgWhite(Value text);
+Value node_chalk_bgBlack(Value text);
 
-/* Style property getters: chalk.red / chalk.bold → new builder */
-Value node_chalk_style(Value self, Value styleName);
+/* Modifier functions */
+Value node_chalk_bold(Value text);
+Value node_chalk_dim(Value text);
+Value node_chalk_italic(Value text);
+Value node_chalk_underline(Value text);
+Value node_chalk_strikethrough(Value text);
+Value node_chalk_visible(Value text);
+Value node_chalk_reset(Value text);
 
-/* Color model methods: chalk.rgb(r,g,b) / chalk.hex("#ff0000") */
-Value node_chalk_rgb(Value self, Value r, Value g, Value b);
-Value node_chalk_bgRgb(Value self, Value r, Value g, Value b);
-Value node_chalk_hex(Value self, Value color);
-Value node_chalk_bgHex(Value self, Value color);
-Value node_chalk_ansi(Value self, Value code);
-Value node_chalk_bgAnsi(Value self, Value code);
-Value node_chalk_ansi256(Value self, Value index);
-Value node_chalk_bgAnsi256(Value self, Value index);
-Value node_chalk_keyword(Value self, Value name);
-Value node_chalk_bgKeyword(Value self, Value name);
-Value node_chalk_hsl(Value self, Value h, Value s, Value l);
-Value node_chalk_bgHsl(Value self, Value h, Value s, Value l);
-Value node_chalk_hsv(Value self, Value h, Value s, Value v);
-Value node_chalk_bgHsv(Value self, Value h, Value s, Value v);
-Value node_chalk_hwb(Value self, Value h, Value w, Value b);
-Value node_chalk_bgHwb(Value self, Value h, Value w, Value b);
+/* Extended color functions */
+Value node_chalk_hex(Value color, Value text);
+Value node_chalk_rgb(Value r, Value g, Value b, Value text);
+Value node_chalk_ansi256(Value code, Value text);
+Value node_chalk_bgHex(Value color, Value text);
+Value node_chalk_bgRgb(Value r, Value g, Value b, Value text);
 
-/* Instance / level / supportsColor */
-Value node_chalk_Instance(Value options);
-Value node_chalk_level(Value self);
-Value node_chalk_setLevel(Value self, Value level);
-Value node_chalk_supportsColor(void);
-Value node_chalk_stderr(void);
+/* Properties */
+Value node_chalk_level(void);
+Value node_chalk_enabled(void);
 
 #endif /* NODE_CHALK_H */
