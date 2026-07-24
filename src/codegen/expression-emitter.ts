@@ -1663,7 +1663,7 @@ export class ExpressionEmitter {
     if (callee.kind === "property_access" &&
         callee.object.kind === "identifier") {
       const moduleName = callee.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads"];
       if (builtinModules.includes(moduleName)) {
         const funcName = `node_${moduleName}_${callee.property}`;
         // Wrap each argument in Value constructors
@@ -1889,6 +1889,27 @@ export class ExpressionEmitter {
                 ? 'ts_value_string(ts_string_new("sha256"))'
                 : "ts_value_null()");
             }
+          }
+        }
+
+        // worker_threads module-level helpers
+        if (moduleName === "worker_threads") {
+          if (callee.property === "Worker") {
+            while (args.length < 2) args.push("ts_value_null()");
+          } else if (callee.property === "BroadcastChannel") {
+            while (args.length < 1) args.push('ts_value_string(ts_string_new(""))');
+          } else if (callee.property === "setEnvironmentData") {
+            while (args.length < 2) args.push("ts_value_null()");
+          } else if (callee.property === "getEnvironmentData" ||
+                     callee.property === "receiveMessageOnPort" ||
+                     callee.property === "markAsUntransferable" ||
+                     callee.property === "isMarkedAsUntransferable" ||
+                     callee.property === "markAsUncloneable") {
+            while (args.length < 1) args.push("ts_value_null()");
+          } else if (callee.property === "postMessageToThread") {
+            while (args.length < 3) args.push("ts_value_null()");
+          } else if (callee.property === "moveMessagePortToContext") {
+            while (args.length < 2) args.push("ts_value_null()");
           }
         }
 
@@ -2443,7 +2464,7 @@ export class ExpressionEmitter {
       const looksLikeEmitter =
         !!objectName &&
         (/ee|emitter|event/i.test(objectName) ||
-          this.varTypes.get(objectName) === "Value" && !/child|spawn|fork|dir|proc|cp|server|req|res|rl|readline/i.test(objectName));
+          this.varTypes.get(objectName) === "Value" && !/child|spawn|fork|dir|proc|cp|server|req|res|rl|readline|worker|port|parent|channel|bc/i.test(objectName));
       if (eeMethods.has(methodName) && callee.object?.kind === "identifier" && looksLikeEmitter) {
         const self = this.emit(callee.object);
         const wrap = (a: CNode): string => {
@@ -2493,6 +2514,75 @@ export class ExpressionEmitter {
         // on / once / off / addListener / removeListener / prepend*
         while (callArgs.length < 2) callArgs.push("ts_value_null()");
         return `node_events_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]})`;
+      }
+
+      // worker_threads: worker/port.postMessage, worker.on, worker.terminate, port.close/start
+      // Also handle chained property access: channel.port1.on(...), channel.port2.postMessage(...)
+      {
+        // Detect property_access chains like channel.port1.on(...) where root looks like worker
+        const isPropertyAccessWorker =
+          callee.object?.kind === "property_access" &&
+          callee.object.object?.kind === "identifier" &&
+          (/worker|port|parent|channel|bc|w\d*$/i.test(callee.object.object.name || "") ||
+           callee.object.object.name === "parentPort" ||
+           this.importedSymbols.has(callee.object.object.name));
+        const looksLikeWorker =
+          varType === "Value" ||
+          /worker|port|parent|channel|bc|w\d*$/i.test(objectName || "") ||
+          objectName === "parentPort" ||
+          isPropertyAccessWorker ||
+          (callee.object?.kind === "identifier" &&
+            (callee.object.name === "parentPort" ||
+             this.importedSymbols.has(callee.object.name)));
+        if (looksLikeWorker && (callee.object?.kind === "identifier" || isPropertyAccessWorker)) {
+          const self = this.emit(callee.object);
+          const wrapArg = (a: CNode): string => {
+            const emitted = this.emit(a);
+            if (emitted.startsWith("ts_value_") || a.kind === "function_ref" ||
+                a.kind === "arrow_function" || a.kind === "function_expression" ||
+                a.kind === "object_literal" || a.kind === "array_literal") return emitted;
+            if (a.kind === "string_literal") return `ts_value_string(${emitted})`;
+            if (a.kind === "number_literal") return `ts_value_number(${emitted})`;
+            if (a.kind === "boolean_literal") return `ts_value_boolean(${emitted})`;
+            return emitted;
+          };
+          if (methodName === "postMessage") {
+            const v = node.arguments?.[0] ? wrapArg(node.arguments[0]) : "ts_value_null()";
+            const t = node.arguments?.[1] ? wrapArg(node.arguments[1]) : "ts_value_null()";
+            return `node_worker_threads_postMessage(${self}, ${v}, ${t})`;
+          }
+          if (methodName === "on" || methodName === "once" || methodName === "off" ||
+              methodName === "addListener" || methodName === "removeListener") {
+            // Prefer worker_threads when name looks like worker/port; leave child_process for child/spawn/fork
+            if (!/child|spawn|fork|dir|proc|cp/i.test(objectName || "") ||
+                /worker|port|parent/i.test(objectName || "") ||
+                objectName === "parentPort") {
+              const callArgs = (node.arguments || []).map(wrapArg);
+              while (callArgs.length < 2) callArgs.push("ts_value_null()");
+              return `node_worker_threads_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]})`;
+            }
+          }
+          if (methodName === "terminate") {
+            return `node_worker_threads_terminate(${self})`;
+          }
+          if (methodName === "close") {
+            return `node_worker_threads_close(${self})`;
+          }
+          if (methodName === "start") {
+            return `node_worker_threads_start(${self})`;
+          }
+          if (methodName === "ref" || methodName === "unref") {
+            return `node_worker_threads_${methodName}(${self})`;
+          }
+        }
+        // parentPort may be a property access result stored as Value — also handle
+        // worker_threads.parentPort.postMessage via module getter already returning Value.
+        if (methodName === "postMessage" && callee.object?.kind === "call_expression") {
+          const self = this.emit(callee.object);
+          const v = node.arguments?.[0] ? this.emit(node.arguments[0]) : "ts_value_null()";
+          const vv = v.startsWith("ts_value_") ? v : v;
+          return `node_worker_threads_postMessage(${self}, ${vv}, ts_value_null())`;
+        }
       }
 
       // child.stdout.on / child.stderr.on / child.stdin.on / child.send
@@ -3422,9 +3512,33 @@ export class ExpressionEmitter {
 
     // Namespace import property access: `import * as X from "..."` → X.prop resolves to mangled name
     // e.g., commander.program → src_cli_commander_index_program
+    // Node builtin: `import * as wt from "worker_threads"` → node:worker_threads → node_worker_threads_X
     if (node.object.kind === "identifier") {
       const nsModulePath = this.namespaceModulePaths.get(node.object.name);
       if (nsModulePath) {
+        if (nsModulePath.startsWith("node:")) {
+          const mod = nsModulePath.slice("node:".length);
+          const funcName = `node_${mod}_${node.property}`;
+          this._lastBuiltinCall = funcName;
+          const zeroArgGetters = new Set([
+            "argv", "env", "pid", "platform", "hostname", "totalmem", "freemem", "arch",
+            "EOL", "devNull", "stdin", "stdout", "stderr",
+            "defaultMaxListeners",
+            "isMainThread", "parentPort", "workerData", "threadId", "threadName",
+            "isInternalThread", "SHARE_ENV", "resourceLimits", "locks",
+          ]);
+          if (zeroArgGetters.has(node.property)) {
+            return `${funcName}()`;
+          }
+          if ((node.property === "EventEmitter" && mod === "events") ||
+              (node.property === "Worker" && mod === "worker_threads") ||
+              (node.property === "MessageChannel" && mod === "worker_threads") ||
+              (node.property === "MessagePort" && mod === "worker_threads") ||
+              (node.property === "BroadcastChannel" && mod === "worker_threads")) {
+            return funcName;
+          }
+          return funcName;
+        }
         const prefix = filePathToMangledPrefix(nsModulePath);
         const mangledName = `${prefix}_${node.property}`;
         return mangledName;
@@ -3437,7 +3551,7 @@ export class ExpressionEmitter {
     // must emit as function calls: node_process_argv()
     if (node.object.kind === "identifier") {
       const moduleName = node.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads"];
       if (builtinModules.includes(moduleName)) {
         const funcName = `node_${moduleName}_${node.property}`;
         this._lastBuiltinCall = funcName;
@@ -3448,6 +3562,8 @@ export class ExpressionEmitter {
           "argv", "env", "pid", "platform", "hostname", "totalmem", "freemem", "arch",
           "EOL", "devNull", "stdin", "stdout", "stderr",
           "defaultMaxListeners",
+          "isMainThread", "parentPort", "workerData", "threadId", "threadName",
+          "isInternalThread", "SHARE_ENV", "resourceLimits", "locks",
         ]);
         if (zeroArgGetters.has(node.property)) {
           return `${funcName}()`;
@@ -3456,6 +3572,11 @@ export class ExpressionEmitter {
         // new events.EventEmitter() is handled in emitNew.
         if (node.property === "EventEmitter" && moduleName === "events") {
           return `node_events_EventEmitter`;
+        }
+        if (moduleName === "worker_threads" &&
+            (node.property === "Worker" || node.property === "MessageChannel" ||
+             node.property === "MessagePort" || node.property === "BroadcastChannel")) {
+          return funcName;
         }
         return funcName;
       }
@@ -3709,6 +3830,21 @@ export class ExpressionEmitter {
       return `({ Value __em = ${object}; (__em.tag == TAG_STRING) ? __em : ((__em.tag == TAG_OBJECT && __em.as.object) ? ts_hashmap_get((TSHashMap*)__em.as.object, ts_string_new("message")) : ts_value_string(ts_string_new(""))); })`;
     }
 
+    // Worker/MessagePort/Worker are C structs wrapped in Value, not hashmaps
+    // Must come before the generic Value hashmap handler below
+    // Only match variables whose names suggest they are Worker instances (not MessageChannel hashmaps)
+    if (node.object.kind === "identifier" && this.varTypes.get(node.object.name) === "Value" &&
+        /worker|parentPort/i.test(node.object.name || "")) {
+      const getterMap: Record<string, string> = {
+        threadId: "node_worker_threads_get_threadId",
+        threadName: "node_worker_threads_get_threadName",
+      };
+      const getter = getterMap[node.property];
+      if (getter) {
+        return `${getter}(${object})`;
+      }
+    }
+
     // Value / object hashmap property access: req.url → ts_hashmap_get(...)
     // Only for actual Value types (tagged union wrapping hashmap objects)
     if ((isValueObject || node.objectType === "any" || node.objectType === "map") && node.objectType !== "class") {
@@ -3808,6 +3944,47 @@ export class ExpressionEmitter {
         className === "events.EventEmitter" ||
         className.endsWith(".EventEmitter")) {
       return `node_events_EventEmitter()`;
+    }
+
+    // worker_threads: Worker / MessageChannel / BroadcastChannel / MessagePort
+    if (className === "Worker" || className === "worker_threads.Worker" ||
+        className.endsWith(".Worker")) {
+      const a0 = node.arguments?.[0]
+        ? (() => {
+            const e = this.emit(node.arguments![0]);
+            if (e.startsWith("ts_value_")) return e;
+            if (node.arguments![0].kind === "string_literal") return `ts_value_string(${e})`;
+            return e;
+          })()
+        : 'ts_value_string(ts_string_new(""))';
+      const a1 = node.arguments?.[1]
+        ? (() => {
+            const e = this.emit(node.arguments![1]);
+            return e.startsWith("ts_value_") || node.arguments![1].kind === "object_literal"
+              ? e : e;
+          })()
+        : "ts_value_null()";
+      return `node_worker_threads_Worker(${a0}, ${a1})`;
+    }
+    if (className === "MessageChannel" || className === "worker_threads.MessageChannel" ||
+        className.endsWith(".MessageChannel")) {
+      return `node_worker_threads_MessageChannel()`;
+    }
+    if (className === "MessagePort" || className === "worker_threads.MessagePort" ||
+        className.endsWith(".MessagePort")) {
+      return `node_worker_threads_MessagePort()`;
+    }
+    if (className === "BroadcastChannel" || className === "worker_threads.BroadcastChannel" ||
+        className.endsWith(".BroadcastChannel")) {
+      const a0 = node.arguments?.[0]
+        ? (() => {
+            const e = this.emit(node.arguments![0]);
+            if (e.startsWith("ts_value_")) return e;
+            if (node.arguments![0].kind === "string_literal") return `ts_value_string(${e})`;
+            return `ts_value_string(ts_to_string(${e}))`;
+          })()
+        : 'ts_value_string(ts_string_new(""))';
+      return `node_worker_threads_BroadcastChannel(${a0})`;
     }
 
     // Handle Date constructor - return timestamp as double

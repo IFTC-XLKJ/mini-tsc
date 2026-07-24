@@ -135,7 +135,7 @@ export class CEmitter {
     // Include only used Node built-in module headers (tree-shaken)
     const builtinModules = this.usedBuiltinModules
       ? [...this.usedBuiltinModules]
-      : ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto"];
+      : ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads"];
     for (const builtin of builtinModules) {
       lines.push(`#include "node_${builtin}.h"`);
     }

@@ -132,7 +132,7 @@ export class CompilerDriver {
           usedBuiltins.add(builtin);
         }
       }
-      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert"];
+      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads"];
       for (const builtin of globalBuiltins) {
         if (cEmitter.unitUsesBuiltin(unit, builtin)) {
           usedBuiltins.add(builtin);
@@ -984,6 +984,12 @@ extern TsErrorContext _ts_current_error;
 
     lines.push('/* process.argv capture (Unix/Android); no-op storage on Windows */');
     lines.push('extern void node_process_set_argv(int argc, char** argv);');
+    const needWorkers = usage?.modules.has("worker_threads") ?? false;
+    if (needWorkers) {
+      lines.push('extern void node_worker_threads_set_entry(void (*fn)(void));');
+      lines.push('extern int ts_worker_pending(void);');
+      lines.push('extern int ts_worker_poll(void);');
+    }
     lines.push('');
     // CommonJS __dirname / __filename — absolute path of the entry source file
     const entryAbs = path.isAbsolute(entryFile)
@@ -1001,6 +1007,9 @@ extern TsErrorContext _ts_current_error;
     lines.push('  /* GC: stack bottom for conservative mark + init */');
     lines.push('  ts_gc_init();');
     lines.push('  ts_gc_set_stack_bottom((void*)&argc);');
+    if (needWorkers) {
+      lines.push(`  node_worker_threads_set_entry(${entryBase}_entry);`);
+    }
     lines.push('  /* Initialize modules */');
     for (const filePath of graph.sortedOrder) {
       const moduleName = this.filePathToModuleName(filePath);
@@ -1037,27 +1046,23 @@ extern TsErrorContext _ts_current_error;
       lines.push(`  ${entryBase}_entry();`);
     }
     lines.push('');
-    // Drain async work (promises / thread-pool jobs), timers, and WebSockets
-    if (usage?.features.has("promise") || usage?.features.has("timers") ||
-        usage?.features.has("websocket")) {
-      lines.push('  /* Event loop: drain async I/O completions + timers + websockets */');
-      if (usage?.features.has("websocket")) {
-        // Keep process alive while WS connections are open (or timers/async pending)
-        lines.push('  while (ts_websocket_pending()');
-        if (usage?.features.has("timers")) {
-          lines.push('      || ts_timers_pending()');
-        }
-        if (usage?.features.has("promise")) {
-          lines.push('      || ts_async_pending()');
-        }
+    // Drain async work (promises / thread-pool jobs), timers, WebSockets, workers
+    const needPromise = usage?.features.has("promise") ?? false;
+    const needTimers = usage?.features.has("timers") ?? false;
+    const needWebsocket = usage?.features.has("websocket") ?? false;
+    if (needPromise || needTimers || needWebsocket || needWorkers) {
+      lines.push('  /* Event loop: drain async I/O + timers + websockets + workers */');
+      if (needWebsocket || needWorkers) {
+        lines.push('  while (0');
+        if (needWebsocket) lines.push('      || ts_websocket_pending()');
+        if (needWorkers) lines.push('      || ts_worker_pending()');
+        if (needTimers) lines.push('      || ts_timers_pending()');
+        if (needPromise) lines.push('      || ts_async_pending()');
         lines.push('  ) {');
-        lines.push('    ts_websocket_poll();');
-        if (usage?.features.has("timers")) {
-          lines.push('    if (ts_timers_pending()) ts_timers_poll();');
-        }
-        if (usage?.features.has("promise")) {
-          lines.push('    ts_completion_poll();');
-        }
+        if (needWebsocket) lines.push('    ts_websocket_poll();');
+        if (needWorkers) lines.push('    ts_worker_poll();');
+        if (needTimers) lines.push('    if (ts_timers_pending()) ts_timers_poll();');
+        if (needPromise) lines.push('    ts_completion_poll();');
         lines.push('#ifdef _WIN32');
         lines.push('    Sleep(10);');
         lines.push('#else');
@@ -1065,7 +1070,7 @@ extern TsErrorContext _ts_current_error;
         lines.push('#endif');
         lines.push('  }');
         lines.push('  ts_gc_maybe_collect_idle();');
-      } else if (usage?.features.has("promise")) {
+      } else if (needPromise) {
         lines.push('  ts_async_run();');
       } else {
         lines.push('  ts_timers_run();');
@@ -1159,6 +1164,7 @@ extern TsErrorContext _ts_current_error;
     const needWebsocket =
       (usage?.features.has("websocket") ?? false) ||
       /\bts_websocket_/.test(allC);
+    const needWorkerThreads = usage?.modules.has("worker_threads") ?? false;
     const coreRuntime: string[] = [];
     if (needsTsRuntime) {
       // string_ops holds core strings + indexOf/substring/replace/… (linker GC drops unused)
@@ -1172,6 +1178,9 @@ extern TsErrorContext _ts_current_error;
       }
       if (needWebsocket) {
         coreRuntime.push("websocket.c");
+      }
+      if (needWorkerThreads) {
+        coreRuntime.push("node_worker_threads.c");
       }
     }
     // Automatic GC is always linked: main() always calls ts_gc_init / set_stack_bottom

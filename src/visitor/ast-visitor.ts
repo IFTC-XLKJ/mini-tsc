@@ -5,7 +5,7 @@ import type { TypeMapper } from "../types/type-mapper.js";
 import type { ModuleGraph } from "../modules/module-resolver.js";
 import type { SymbolMangler } from "../modules/symbol-mangler.js";
 import type { CNode, TranspilationUnit } from "../codegen/c-emitter.js";
-import { getBuiltinModule } from "../builtins/registry.js";
+import { getBuiltinModule, BUILTIN_MODULES } from "../builtins/registry.js";
 
 export interface VisitorContext {
   checker: ts.TypeChecker;
@@ -31,6 +31,8 @@ export class AstVisitor {
   private hoistedClosures: CNode[] = [];
   /** Namespace import name → module file path (for `import * as X from "..."`) */
   private namespaceModulePaths: Map<string, string> = new Map();
+  /** Named imports from Node builtins: localName → C symbol (e.g. isMainThread → node_worker_threads_isMainThread) */
+  private nodeBuiltinNamedImports: Map<string, string> = new Map();
   /** True when visiting inside a constructor (return self should NOT wrap in Value) */
   private inConstructor = false;
   /** Current function's return type — used to decide if `return this` needs Value wrapping */
@@ -47,6 +49,7 @@ export class AstVisitor {
     this.hoistedClosures = [];
     this.closureCounter = 0;
     this.namespaceModulePaths = new Map();
+    this.nodeBuiltinNamedImports = new Map();
     const typeDefinitions: CNode[] = [];
     const imports: { filePath: string; symbols: string[] }[] = [];
     const importedSymbols = new Map<string, { mangledName: string; returnType: string; paramTypes: string[]; isConstant?: boolean }>();
@@ -59,6 +62,70 @@ export class AstVisitor {
     // Prepend hoisted file-scope closures so they appear before use
     if (this.hoistedClosures.length > 0) {
       this.ctx.output = [...this.hoistedClosures, ...this.ctx.output];
+    }
+
+    // Named Node builtin imports: local → node_<mod>_<export>
+    // Use registry to get correct function signatures
+    for (const [local, cName] of this.nodeBuiltinNamedImports) {
+      // Extract module name and function name from cName (e.g., "node_worker_threads_Worker")
+      const parts = cName.split("_");
+      let moduleName = "";
+      let funcName = "";
+      if (parts.length >= 3) {
+        // Find module name by checking against known modules
+        for (const modName of BUILTIN_MODULES.keys()) {
+          if (cName.startsWith(`node_${modName}_`)) {
+            moduleName = modName;
+            funcName = cName.substring(`node_${modName}_`.length);
+            break;
+          }
+        }
+      }
+
+      // Look up the function signature from the registry
+      let returnType = "Value";
+      let paramTypes: string[] = [];
+      let isConstant = false;
+
+      if (moduleName && funcName) {
+        const mod = BUILTIN_MODULES.get(moduleName);
+        if (mod) {
+          const func = mod.functions.find(f => f.cName === cName);
+          if (func) {
+            // Parse the signature to extract parameter types
+            const sigMatch = func.signature.match(/^(\S+)\s+\S+\((.+)\)$/);
+            if (sigMatch) {
+              returnType = sigMatch[1];
+              const paramStr = sigMatch[2].trim();
+              if (paramStr && paramStr !== "void") {
+                paramTypes = paramStr.split(",").map(p => {
+                  const parts = p.trim().split(/\s+/);
+                  return parts.length >= 2 ? parts.slice(0, -1).join(" ") : "Value";
+                });
+              }
+            }
+            // Check if it's a getter (no params)
+            if (paramTypes.length === 0 && func.signature.includes("(void)")) {
+              isConstant = true;
+            }
+          }
+        }
+      }
+
+      // Fallback to original logic if registry lookup failed
+      if (paramTypes.length === 0 && !isConstant) {
+        isConstant = /^(isMainThread|parentPort|workerData|threadId|threadName|isInternalThread|SHARE_ENV|resourceLimits|locks|defaultMaxListeners|argv|env|pid|platform|EOL|devNull|stdin|stdout|stderr)$/.test(local) ||
+          cName.includes("_isMainThread") || cName.includes("_parentPort") || cName.includes("_workerData") ||
+          cName.includes("_threadId") || cName.includes("_threadName") || cName.includes("_SHARE_ENV") ||
+          cName.includes("_resourceLimits") || cName.includes("_locks") || cName.includes("_isInternalThread");
+      }
+
+      importedSymbols.set(local, {
+        mangledName: isConstant ? `${cName}()` : cName,
+        returnType,
+        paramTypes,
+        isConstant,
+      });
     }
 
     // Build imported symbols map from imports
@@ -531,6 +598,32 @@ export class AstVisitor {
     if (!node.moduleSpecifier) return;
     const specifier = node.moduleSpecifier.getText().replace(/['"]/g, "");
 
+    // Node built-in modules: register namespace / named imports without local file resolution
+    const NODE_BUILTINS = new Set([
+      "fs", "path", "http", "https", "net", "os", "process", "child_process",
+      "crypto", "url", "util", "events", "stream", "buffer", "querystring",
+      "assert", "constants", "module", "repl", "tty", "zlib", "readline",
+      "worker_threads",
+    ]);
+    if (NODE_BUILTINS.has(specifier)) {
+      if (node.importClause?.namedBindings) {
+        if (ts.isNamespaceImport(node.importClause.namedBindings)) {
+          const namespaceName = node.importClause.namedBindings.name.text;
+          this.ctx.scope.declare(namespaceName, "Value");
+          // Special marker so codegen maps wt.Worker → node_worker_threads_Worker
+          this.namespaceModulePaths.set(namespaceName, `node:${specifier}`);
+        } else if (ts.isNamedImports(node.importClause.namedBindings)) {
+          for (const el of node.importClause.namedBindings.elements) {
+            const local = el.name.text;
+            const imported = el.propertyName?.text || local;
+            this.ctx.scope.declare(local, "Value");
+            this.nodeBuiltinNamedImports.set(local, `node_${specifier}_${imported}`);
+          }
+        }
+      }
+      return;
+    }
+
     // Resolve the import path (handles both relative and npm package imports)
     let resolvedPath: string | null = null;
     if (specifier.startsWith(".") || specifier.startsWith("/")) {
@@ -687,7 +780,7 @@ export class AstVisitor {
       {
         const builtinModules = [
           "fs", "path", "process", "os", "http", "net", "child_process",
-          "events", "readline", "assert", "crypto",
+          "events", "readline", "assert", "crypto", "worker_threads",
         ];
         let initExpr: ts.Expression | undefined = decl.initializer;
         if (initExpr && ts.isAwaitExpression(initExpr)) {
@@ -996,6 +1089,8 @@ export class AstVisitor {
     }
 
     const iterable = this.visitExpression(node.expression);
+    const iterableTsType = this.ctx.checker.getTypeAtLocation(node.expression);
+    const iterableMapped = this.ctx.typeMapper.mapType(iterableTsType);
     const body: CNode[] = [];
     this.visitStatementOrBlockTo(node.statement, body);
 
@@ -1005,6 +1100,8 @@ export class AstVisitor {
       kind: "for_of_statement",
       iterVar,
       iterable,
+      iterableType: iterableMapped.kind,
+      iterableCType: iterableMapped.cType,
       body: { kind: "block", statements: body },
     });
   }

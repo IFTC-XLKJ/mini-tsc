@@ -17,7 +17,9 @@
   },
   "include": [
     "./**/*.ts",
-    "../types/**/*.d.ts"
+    "./*.ts",
+    "../types/**/*.d.ts",
+    "../printer.ts"
   ],
   "exclude": [
     "../src",

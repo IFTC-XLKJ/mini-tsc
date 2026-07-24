@@ -442,13 +442,6 @@ export class StatementEmitter {
   private emitForOfStatement(node: CNode): string {
     // for...of → simplified to index-based for loop
     let iterable = this.exprEmitter.emit(node.iterable);
-    // Coerce Value-typed iterables (hashmap get / method results) to TSArray*
-    if (iterable.startsWith("ts_hashmap_get(") || iterable.startsWith("ts_value_") ||
-        (node.iterable?.kind === "identifier" && this.exprEmitter.getVarType(node.iterable.name) === "Value")) {
-      iterable = `((TSArray*)${iterable}.as.object)`;
-    } else if (iterable.startsWith("ts_value_array(")) {
-      iterable = iterable.replace(/^ts_value_array\((.+)\)$/, "$1");
-    }
     const iterVar = node.iterVar;
     const varName = iterVar?.name || "i";
     let varType = iterVar?.type || "Value";
@@ -460,9 +453,54 @@ export class StatementEmitter {
     if (varType.includes("(*)") || varType.includes("ActionHandler")) {
       varType = "Value";
     }
+
+    // Detect string iteration: for (const ch of someString)
+    const iterableIsString =
+      node.iterableType === "string" ||
+      node.iterableCType === "TSString*" ||
+      (node.iterable?.kind === "identifier" && this.exprEmitter.getVarType(node.iterable.name) === "TSString*") ||
+      iterable.startsWith("ts_string_") ||
+      iterable.startsWith("ts_to_string(") ||
+      iterable.includes("/*__ts_str*/");
+
     // Register so method calls inside the body (e.g. token.startsWith) dispatch correctly
     this.exprEmitter.declareVar(varName, varType);
     const body = this.emitBlock(node.body);
+
+    if (iterableIsString) {
+      // Coerce Value → TSString* when needed
+      let strIter = iterable;
+      if (iterable.startsWith("ts_hashmap_get(") || iterable.startsWith("ts_value_") ||
+          iterable.startsWith("ts_array_get(") ||
+          (node.iterable?.kind === "identifier" && this.exprEmitter.getVarType(node.iterable.name) === "Value")) {
+        strIter = `ts_to_string(${iterable})`;
+      } else if (iterable.startsWith("ts_value_string(")) {
+        strIter = iterable.replace(/^ts_value_string\((.+)\)$/, "$1");
+      }
+      // Character as single-char TSString* (matches JS for-of on strings)
+      const charInit =
+        varType === "TSString*" || varType === "string"
+          ? `ts_string_new_len((char[]){ts_string_char_at(__iter, __i), 0}, 1)`
+          : varType === "Value"
+            ? `ts_value_string(ts_string_new_len((char[]){ts_string_char_at(__iter, __i), 0}, 1))`
+            : `ts_string_char_at(__iter, __i)`;
+      return `{
+  TSString* __iter = ${strIter};
+  for (int32_t __i = 0; __i < __iter->length; __i++) {
+    ${varType} ${varName} = ${charInit};
+${body}
+  }
+}`;
+    }
+
+    // Coerce Value-typed iterables (hashmap get / method results) to TSArray*
+    if (iterable.startsWith("ts_hashmap_get(") || iterable.startsWith("ts_value_") ||
+        iterable.startsWith("ts_array_get(") ||
+        (node.iterable?.kind === "identifier" && this.exprEmitter.getVarType(node.iterable.name) === "Value")) {
+      iterable = `((TSArray*)${iterable}.as.object)`;
+    } else if (iterable.startsWith("ts_value_array(")) {
+      iterable = iterable.replace(/^ts_value_array\((.+)\)$/, "$1");
+    }
 
     // ts_array_get returns Value; coerce to the target type if needed
     const rawGet = this.exprEmitter.emit({ kind: "element_access", object: { kind: "identifier", name: "__iter" }, index: { kind: "identifier", name: "__i" }, objectType: "array" });

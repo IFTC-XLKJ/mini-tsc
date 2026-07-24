@@ -93,6 +93,12 @@ export class TypeMapper {
           return { kind: "any", cType: "Value", cHeader: "ts_runtime.h" };
         }
 
+        // Worker threads types - all map to Value (runtime hashmap/object)
+        if (name === "Worker" || name === "MessageChannel" || name === "MessagePort" ||
+            name === "BroadcastChannel") {
+          return { kind: "any", cType: "Value", cHeader: "ts_runtime.h" };
+        }
+
         // Class types - return ClassName*
         // Check if this is a class (not a built-in type)
         if (objectType.symbol?.declarations) {

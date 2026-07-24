@@ -4,6 +4,7 @@ import { BUILTIN_MODULES } from "../builtins/registry.js";
 /** Node built-in module names we can tree-shake. */
 export const BUILTIN_MODULE_NAMES = [
   "fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto",
+  "worker_threads",
 ] as const;
 
 export type BuiltinModuleName = (typeof BUILTIN_MODULE_NAMES)[number];
@@ -387,6 +388,36 @@ export function analyzeFeatureUsage(
             usage.modules.add("events");
             addMethod(usage, "node_events_EventEmitter");
           }
+          if (name === "Worker" ||
+              (typeof className === "string" &&
+               (className === "Worker" || className.includes(".Worker")))) {
+            usage.modules.add("worker_threads");
+            addMethod(usage, "node_worker_threads_Worker");
+            addMethod(usage, "node_worker_threads_postMessage");
+            addMethod(usage, "node_worker_threads_on");
+            addMethod(usage, "node_worker_threads_terminate");
+            addMethod(usage, "node_worker_threads_start");
+          }
+          if (name === "MessageChannel" ||
+              (typeof className === "string" && className.includes("MessageChannel"))) {
+            usage.modules.add("worker_threads");
+            addMethod(usage, "node_worker_threads_MessageChannel");
+            addMethod(usage, "node_worker_threads_postMessage");
+            addMethod(usage, "node_worker_threads_on");
+          }
+          if (name === "MessagePort" ||
+              (typeof className === "string" && className.includes("MessagePort"))) {
+            usage.modules.add("worker_threads");
+            addMethod(usage, "node_worker_threads_MessagePort");
+          }
+          if (name === "BroadcastChannel" ||
+              (typeof className === "string" && className.includes("BroadcastChannel"))) {
+            usage.modules.add("worker_threads");
+            addMethod(usage, "node_worker_threads_BroadcastChannel");
+            addMethod(usage, "node_worker_threads_postMessage");
+            addMethod(usage, "node_worker_threads_on");
+            addMethod(usage, "node_worker_threads_close");
+          }
         }
 
         // ee.on / ee.emit / … instance methods (when events module in use or name matches)
@@ -452,6 +483,20 @@ export function analyzeFeatureUsage(
           const prop = node.property as string;
           const cName = resolveBuiltinMethod("events", prop);
           if (cName) addMethod(usage, cName);
+        }
+
+        // worker.threadId / worker.threadName property access on Worker instances
+        if (node.kind === "property_access" &&
+            node.object?.kind === "identifier" &&
+            /worker|parentPort/i.test(node.object.name || "")) {
+          const prop = node.property as string;
+          if (prop === "threadId") {
+            usage.modules.add("worker_threads");
+            addMethod(usage, "node_worker_threads_get_threadId");
+          } else if (prop === "threadName") {
+            usage.modules.add("worker_threads");
+            addMethod(usage, "node_worker_threads_get_threadName");
+          }
         }
 
         // date_* helpers may appear after emission; also mark date feature on date_ methods in identifiers
@@ -537,7 +582,7 @@ export function analyzeFeatureUsage(
   }
   const modulesNeedingHashArray = [
     "fs", "path", "http", "net", "events", "child_process",
-    "crypto", "assert", "readline", "os",
+    "crypto", "assert", "readline", "os", "worker_threads",
   ];
   for (const m of modulesNeedingHashArray) {
     if (usage.modules.has(m)) {
@@ -597,6 +642,21 @@ export function analyzeFeatureUsage(
   // readline: if module used, always keep createInterface
   if (usage.modules.has("readline")) {
     addMethod(usage, "node_readline_createInterface");
+  }
+
+  // worker_threads: keep core getters + constructors when module is used
+  if (usage.modules.has("worker_threads")) {
+    addMethod(usage, "node_worker_threads_isMainThread");
+    addMethod(usage, "node_worker_threads_parentPort");
+    addMethod(usage, "node_worker_threads_workerData");
+    addMethod(usage, "node_worker_threads_threadId");
+    addMethod(usage, "node_worker_threads_Worker");
+    addMethod(usage, "node_worker_threads_postMessage");
+    addMethod(usage, "node_worker_threads_on");
+    addMethod(usage, "node_worker_threads_terminate");
+    usage.features.add("hashmap");
+    usage.features.add("array");
+    usage.features.add("json"); // deep-clone via JSON for cross-thread messages
   }
 
   // Keep sync counterparts when async wrappers are used (async calls sync internally)
