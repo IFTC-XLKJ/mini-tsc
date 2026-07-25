@@ -2041,17 +2041,24 @@ export class ExpressionEmitter {
     // Special handling for crypto hash method calls
     // e.g., hash.update(data) → node_crypto_hashUpdate(hash, data)
     //       hash.digest('hex') → node_crypto_hashDigest(hash, ts_value_string(ts_string_new("hex")))
+    // Must NOT steal db.update(...) from sqlite CRUD.
     if (callee.kind === "property_access" &&
         callee.object.kind === "identifier" &&
         (callee.property === "update" || callee.property === "digest")) {
       const objName = callee.object.name;
       const objType = this.varTypes.get(objName);
+      const looksLikeSqliteDb =
+        /db|database|sqlite|conn/i.test(objName) ||
+        (callee.property === "update" && (node.arguments?.length || 0) >= 2);
       // Check if this looks like a crypto hash object:
       // - named hash/hmac, OR typed as Value (crypto.createHash returns Value)
       // - OR the variable was assigned from a node_crypto_createHash/createHmac call (heuristic: starts with h + digit)
-      const looksLikeHash = objType === "Value" || /hash|hmac/i.test(objName) ||
+      const looksLikeHash = !looksLikeSqliteDb && (
+        /hash|hmac/i.test(objName) ||
         (objType === undefined && /^h\d*$/.test(objName)) ||
-        (objType === "Value" && !/server|socket|req|res|child|proc|readline|rl|emitter|ee/i.test(objName));
+        (objType === "Value" && !/server|socket|req|res|child|proc|readline|rl|emitter|ee|db|database|sqlite|conn|worker|port/i.test(objName) &&
+          /hash|hmac|^h\d*$/i.test(objName))
+      );
       if (looksLikeHash) {
         const self = this.emit(callee.object);
         const wrapArg = (a: CNode): string => {
@@ -2083,19 +2090,26 @@ export class ExpressionEmitter {
     }
 
     // sqlite Database / Statement instance methods
-    // db.exec / db.prepare / db.close / db.pragma
+    // db.exec / prepare / close / pragma + CRUD: createTable/insert/find/findAll/update/remove/count/dropTable
     // stmt.run / stmt.get / stmt.all / stmt.iterate / stmt.finalize
     if (callee.kind === "property_access" && callee.object.kind === "identifier") {
       const objName = callee.object.name;
       const methodName = callee.property;
       const objType = this.varTypes.get(objName);
+      const dbCrudMethods = new Set([
+        "createTable", "dropTable", "insert", "find", "findAll", "update", "remove", "count",
+      ]);
+      const dbSqlMethods = new Set(["exec", "prepare", "close", "pragma"]);
       const looksLikeDb =
         /^(db|database|conn|sqlite)$/i.test(objName) ||
         /db|database|sqlite|conn/i.test(objName) ||
         (objType === "Value" && !/stmt|statement|hash|hmac|server|socket|req|res|child|proc|readline|rl|emitter|ee|worker|port/i.test(objName) &&
-          (methodName === "exec" || methodName === "prepare" || methodName === "pragma"));
+          (dbSqlMethods.has(methodName) || dbCrudMethods.has(methodName)));
       const looksLikeStmt =
-        /stmt|statement|query|insert|select|update|delete|prepared|q\d*/i.test(objName) ||
+        /stmt|statement|query|select|prepared|q\d*/i.test(objName) ||
+        (/insert|update|delete/i.test(objName) && !/db|database|sqlite|conn/i.test(objName) &&
+          (methodName === "run" || methodName === "get" || methodName === "all" ||
+           methodName === "iterate" || methodName === "finalize")) ||
         (objType === "Value" &&
           (methodName === "run" || methodName === "get" || methodName === "all" ||
            methodName === "iterate" || methodName === "finalize") &&
@@ -2125,13 +2139,30 @@ export class ExpressionEmitter {
         const parts = raw.map(wrapArg);
         return `ts_value_array(ts_array_from_values((Value[]){${parts.join(", ")}}, ${parts.length}))`;
       };
-      if (looksLikeDb && (methodName === "exec" || methodName === "prepare" ||
-          methodName === "close" || methodName === "pragma")) {
+      if (looksLikeDb && (dbSqlMethods.has(methodName) || dbCrudMethods.has(methodName))) {
         const self = this.emit(callee.object);
-        if (methodName === "close") return `node_sqlite_close(${self})`;
         const callArgs = (node.arguments || []).map(wrapArg);
-        while (callArgs.length < 1) callArgs.push('ts_value_string(ts_string_new(""))');
-        return `node_sqlite_${methodName}(${self}, ${callArgs[0]})`;
+        if (methodName === "close") return `node_sqlite_close(${self})`;
+        if (methodName === "exec" || methodName === "prepare" || methodName === "pragma" ||
+            methodName === "dropTable") {
+          while (callArgs.length < 1) callArgs.push('ts_value_string(ts_string_new(""))');
+          return `node_sqlite_${methodName}(${self}, ${callArgs[0]})`;
+        }
+        if (methodName === "createTable" || methodName === "insert") {
+          while (callArgs.length < 2) callArgs.push("ts_value_null()");
+          return `node_sqlite_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]})`;
+        }
+        if (methodName === "find" || methodName === "findAll" || methodName === "remove" ||
+            methodName === "count") {
+          while (callArgs.length < 1) callArgs.push('ts_value_string(ts_string_new(""))');
+          if (callArgs.length < 2) callArgs.push("ts_value_null()");
+          return `node_sqlite_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]})`;
+        }
+        if (methodName === "update") {
+          while (callArgs.length < 2) callArgs.push("ts_value_null()");
+          if (callArgs.length < 3) callArgs.push("ts_value_null()");
+          return `node_sqlite_update(${self}, ${callArgs[0]}, ${callArgs[1]}, ${callArgs[2]})`;
+        }
       }
       if (looksLikeStmt && (methodName === "run" || methodName === "get" ||
           methodName === "all" || methodName === "iterate" || methodName === "finalize")) {
@@ -3852,9 +3883,11 @@ export class ExpressionEmitter {
       (node.object.kind === "property_access"); // nested access like req.headers.host
 
     // res.body → stream-like Value wrapping the response body
+    // Only for fetch Response-like names — not sqlite rows (note.body, row.body).
     if (node.property === "body" && node.object.kind === "identifier") {
       const objType = this.varTypes.get(node.object.name);
-      if (objType === "Value" || /res|response/i.test(node.object.name)) {
+      if (/res|response/i.test(node.object.name) ||
+          (objType === "Value" && /res|response|fetch/i.test(node.object.name))) {
         return `ts_fetch_response_body(${object})`;
       }
     }

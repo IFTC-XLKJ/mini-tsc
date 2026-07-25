@@ -481,9 +481,13 @@ export function analyzeFeatureUsage(
             addMethod(usage, "node_crypto_hashUpdate");
             addMethod(usage, "node_crypto_hashDigest");
           }
-          // sqlite Database / Statement methods
-          if ((m === "exec" || m === "prepare" || m === "close" || m === "pragma") &&
-              /db|database|sqlite|conn/i.test(obj)) {
+          // sqlite Database / Statement methods (SQL + simple CRUD)
+          const sqliteDbMethods = [
+            "exec", "prepare", "close", "pragma",
+            "createTable", "dropTable", "insert", "find", "findAll",
+            "update", "remove", "count",
+          ];
+          if (sqliteDbMethods.includes(m) && /db|database|sqlite|conn/i.test(obj)) {
             usage.modules.add("sqlite");
             addMethod(usage, "node_sqlite_open");
             addMethod(usage, "node_sqlite_Database");
@@ -710,7 +714,7 @@ export function analyzeFeatureUsage(
     usage.features.add("json"); // deep-clone via JSON for cross-thread messages
   }
 
-  // sqlite: keep open/Database + core statement ops when module is used
+  // sqlite: keep open/Database + SQL/CRUD ops when module is used
   if (usage.modules.has("sqlite")) {
     addMethod(usage, "node_sqlite_open");
     addMethod(usage, "node_sqlite_Database");
@@ -720,6 +724,14 @@ export function analyzeFeatureUsage(
     addMethod(usage, "node_sqlite_run");
     addMethod(usage, "node_sqlite_get");
     addMethod(usage, "node_sqlite_all");
+    addMethod(usage, "node_sqlite_createTable");
+    addMethod(usage, "node_sqlite_dropTable");
+    addMethod(usage, "node_sqlite_insert");
+    addMethod(usage, "node_sqlite_find");
+    addMethod(usage, "node_sqlite_findAll");
+    addMethod(usage, "node_sqlite_update");
+    addMethod(usage, "node_sqlite_remove");
+    addMethod(usage, "node_sqlite_count");
     usage.features.add("hashmap");
     usage.features.add("array");
   }

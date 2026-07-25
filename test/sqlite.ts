@@ -1,32 +1,58 @@
 import * as sqlite from "sqlite";
 
 function main(): void {
-  const db = sqlite.open("test.db");
-  db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)");
+  // --- Simple CRUD (no SQL) ---
+  const db = sqlite.open(":memory:");
 
-  const insert = db.prepare("INSERT INTO users (name, age) VALUES (?, ?)");
-  const r1 = insert.run("Alice", 30);
-  console.log("changes:", r1.changes);
-  console.log("lastInsertRowid:", r1.lastInsertRowid);
+  db.createTable("users", {
+    id: "integer primary key",
+    name: "text",
+    age: "int",
+  });
 
-  insert.run("Bob", 25);
-  insert.finalize();
+  const r1 = db.insert("users", { name: "Alice", age: 30 });
+  console.log("insert changes:", r1.changes);
+  console.log("insert rowid:", r1.lastInsertRowid);
 
-  const getStmt = db.prepare("SELECT name, age FROM users WHERE name = ?");
-  const row = getStmt.get("Alice");
-  console.log("Alice age:", row.age);
+  db.insert("users", { name: "Bob", age: 25 });
+  db.insert("users", { name: "Carol", age: 30 });
+
+  const alice = db.find("users", { name: "Alice" });
+  console.log("find Alice age:", alice.age);
+
+  const age30: any = db.findAll("users", { age: 30 });
+  console.log("findAll age=30 count:", age30.length);
+
+  const all: any = db.findAll("users");
+  console.log("findAll all count:", all.length);
+
+  const up = db.update("users", { age: 31 }, { name: "Alice" });
+  console.log("update changes:", up.changes);
+
+  const alice2 = db.find("users", { name: "Alice" });
+  console.log("Alice new age:", alice2.age);
+
+  const cnt: any = db.count("users");
+  console.log("count all:", cnt);
+  const cnt30: any = db.count("users", { age: 30 });
+  console.log("count age=30:", cnt30);
+
+  const del = db.remove("users", { name: "Bob" });
+  console.log("remove changes:", del.changes);
+  console.log("count after remove:", db.count("users"));
+
+  // --- Low-level SQL still works ---
+  db.exec("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)");
+  const ins = db.prepare("INSERT INTO notes (body) VALUES (?)");
+  ins.run("hello");
+  ins.finalize();
+  const getStmt = db.prepare("SELECT body FROM notes WHERE id = ?");
+  const note = getStmt.get(1);
+  console.log("note body:", note.body);
   getStmt.finalize();
 
-  const allStmt = db.prepare("SELECT name, age FROM users ORDER BY age DESC");
-  const rows: any = allStmt.all();
-  console.log("count:", rows.length);
-  console.log("first name:", rows[0].name);
-  allStmt.finalize();
-
-  const ver = db.pragma("user_version");
-  console.log("pragma user_version:", ver);
-
+  db.dropTable("notes");
   db.close();
-  console.log("sqlite tests passed!");
+  console.log("sqlite crud tests passed!");
 }
 main();
