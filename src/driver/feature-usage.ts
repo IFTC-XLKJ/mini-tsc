@@ -4,7 +4,7 @@ import { BUILTIN_MODULES } from "../builtins/registry.js";
 /** Node built-in module names we can tree-shake. */
 export const BUILTIN_MODULE_NAMES = [
   "fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto",
-  "worker_threads", "chalk",
+  "worker_threads", "chalk", "sqlite",
 ] as const;
 
 export type BuiltinModuleName = (typeof BUILTIN_MODULE_NAMES)[number];
@@ -438,6 +438,13 @@ export function analyzeFeatureUsage(
             addMethod(usage, "node_worker_threads_on");
             addMethod(usage, "node_worker_threads_close");
           }
+          if (name === "Database" ||
+              (typeof className === "string" &&
+               (className === "Database" || className.includes(".Database")))) {
+            usage.modules.add("sqlite");
+            addMethod(usage, "node_sqlite_Database");
+            addMethod(usage, "node_sqlite_open");
+          }
         }
 
         // ee.on / ee.emit / … instance methods (when events module in use or name matches)
@@ -473,6 +480,20 @@ export function analyzeFeatureUsage(
             usage.modules.add("crypto");
             addMethod(usage, "node_crypto_hashUpdate");
             addMethod(usage, "node_crypto_hashDigest");
+          }
+          // sqlite Database / Statement methods
+          if ((m === "exec" || m === "prepare" || m === "close" || m === "pragma") &&
+              /db|database|sqlite|conn/i.test(obj)) {
+            usage.modules.add("sqlite");
+            addMethod(usage, "node_sqlite_open");
+            addMethod(usage, "node_sqlite_Database");
+            addMethod(usage, `node_sqlite_${m}`);
+          }
+          if ((m === "run" || m === "get" || m === "all" || m === "iterate" || m === "finalize") &&
+              /stmt|statement|query|insert|select|update|delete|prepared|q\d*/i.test(obj)) {
+            usage.modules.add("sqlite");
+            addMethod(usage, "node_sqlite_prepare");
+            addMethod(usage, `node_sqlite_${m}`);
           }
         }
 
@@ -612,7 +633,7 @@ export function analyzeFeatureUsage(
   }
   const modulesNeedingHashArray = [
     "fs", "path", "http", "net", "events", "child_process",
-    "crypto", "assert", "readline", "os", "worker_threads",
+    "crypto", "assert", "readline", "os", "worker_threads", "sqlite",
   ];
   for (const m of modulesNeedingHashArray) {
     if (usage.modules.has(m)) {
@@ -687,6 +708,20 @@ export function analyzeFeatureUsage(
     usage.features.add("hashmap");
     usage.features.add("array");
     usage.features.add("json"); // deep-clone via JSON for cross-thread messages
+  }
+
+  // sqlite: keep open/Database + core statement ops when module is used
+  if (usage.modules.has("sqlite")) {
+    addMethod(usage, "node_sqlite_open");
+    addMethod(usage, "node_sqlite_Database");
+    addMethod(usage, "node_sqlite_exec");
+    addMethod(usage, "node_sqlite_prepare");
+    addMethod(usage, "node_sqlite_close");
+    addMethod(usage, "node_sqlite_run");
+    addMethod(usage, "node_sqlite_get");
+    addMethod(usage, "node_sqlite_all");
+    usage.features.add("hashmap");
+    usage.features.add("array");
   }
 
   // Keep sync counterparts when async wrappers are used (async calls sync internally)

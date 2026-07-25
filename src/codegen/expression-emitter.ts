@@ -1774,7 +1774,7 @@ export class ExpressionEmitter {
     if (callee.kind === "property_access" &&
         callee.object.kind === "identifier") {
       const moduleName = callee.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite"];
       if (builtinModules.includes(moduleName)) {
         const funcName = `node_${moduleName}_${callee.property}`;
         // Wrap each argument in Value constructors
@@ -2024,6 +2024,13 @@ export class ExpressionEmitter {
           }
         }
 
+        // sqlite: open/Database(filename?)
+        if (moduleName === "sqlite") {
+          if (callee.property === "open" || callee.property === "Database") {
+            while (args.length < 1) args.push('ts_value_string(ts_string_new(":memory:"))');
+          }
+        }
+
         // For functions that return Value, we need to wrap in type conversion
         // if the caller expects a specific type (like TSString*)
         // For now, return the Value directly and let the caller handle conversion
@@ -2072,6 +2079,65 @@ export class ExpressionEmitter {
           while (callArgs.length < 1) callArgs.push('ts_value_string(ts_string_new("hex"))');
           return `node_crypto_hashDigest(${self}, ${callArgs.join(", ")})`;
         }
+      }
+    }
+
+    // sqlite Database / Statement instance methods
+    // db.exec / db.prepare / db.close / db.pragma
+    // stmt.run / stmt.get / stmt.all / stmt.iterate / stmt.finalize
+    if (callee.kind === "property_access" && callee.object.kind === "identifier") {
+      const objName = callee.object.name;
+      const methodName = callee.property;
+      const objType = this.varTypes.get(objName);
+      const looksLikeDb =
+        /^(db|database|conn|sqlite)$/i.test(objName) ||
+        /db|database|sqlite|conn/i.test(objName) ||
+        (objType === "Value" && !/stmt|statement|hash|hmac|server|socket|req|res|child|proc|readline|rl|emitter|ee|worker|port/i.test(objName) &&
+          (methodName === "exec" || methodName === "prepare" || methodName === "pragma"));
+      const looksLikeStmt =
+        /stmt|statement|query|insert|select|update|delete|prepared|q\d*/i.test(objName) ||
+        (objType === "Value" &&
+          (methodName === "run" || methodName === "get" || methodName === "all" ||
+           methodName === "iterate" || methodName === "finalize") &&
+          !/hash|hmac|server|socket|req|res|child|proc|readline|rl|emitter|ee|worker|port|db$|database/i.test(objName));
+      const wrapArg = (a: CNode): string => {
+        const emitted = this.emit(a);
+        if (emitted.startsWith("ts_value_") || a.kind === "function_ref" ||
+            a.kind === "arrow_function" || a.kind === "function_expression" ||
+            a.kind === "object_literal" || a.kind === "array_literal") return emitted;
+        if (a.kind === "string_literal") return `ts_value_string(${emitted})`;
+        if (a.kind === "number_literal") return `ts_value_number(${emitted})`;
+        if (a.kind === "boolean_literal") return `ts_value_boolean(${emitted})`;
+        if (a.kind === "identifier") {
+          const t = this.varTypes.get(a.name);
+          if (t === "double" || t === "number") return `ts_value_number(${emitted})`;
+          if (t === "TSString*" || t === "string") return `ts_value_string(${emitted})`;
+          if (t === "int" || t === "boolean") return `ts_value_boolean(${emitted})`;
+          if (t === "Value" || t === "TSArray*") return emitted;
+        }
+        if (emitted.startsWith("node_") || emitted.startsWith("ts_")) return emitted;
+        return `ts_value_string(ts_to_string(${emitted}))`;
+      };
+      const packParams = (): string => {
+        const raw = node.arguments || [];
+        if (raw.length === 0) return "ts_value_null()";
+        if (raw.length === 1) return wrapArg(raw[0]);
+        const parts = raw.map(wrapArg);
+        return `ts_value_array(ts_array_from_values((Value[]){${parts.join(", ")}}, ${parts.length}))`;
+      };
+      if (looksLikeDb && (methodName === "exec" || methodName === "prepare" ||
+          methodName === "close" || methodName === "pragma")) {
+        const self = this.emit(callee.object);
+        if (methodName === "close") return `node_sqlite_close(${self})`;
+        const callArgs = (node.arguments || []).map(wrapArg);
+        while (callArgs.length < 1) callArgs.push('ts_value_string(ts_string_new(""))');
+        return `node_sqlite_${methodName}(${self}, ${callArgs[0]})`;
+      }
+      if (looksLikeStmt && (methodName === "run" || methodName === "get" ||
+          methodName === "all" || methodName === "iterate" || methodName === "finalize")) {
+        const self = this.emit(callee.object);
+        if (methodName === "finalize") return `node_sqlite_finalize(${self})`;
+        return `node_sqlite_${methodName}(${self}, ${packParams()})`;
       }
     }
 
@@ -3646,7 +3712,8 @@ export class ExpressionEmitter {
               (node.property === "Worker" && mod === "worker_threads") ||
               (node.property === "MessageChannel" && mod === "worker_threads") ||
               (node.property === "MessagePort" && mod === "worker_threads") ||
-              (node.property === "BroadcastChannel" && mod === "worker_threads")) {
+              (node.property === "BroadcastChannel" && mod === "worker_threads") ||
+              (node.property === "Database" && mod === "sqlite")) {
             return funcName;
           }
           return funcName;
@@ -3663,7 +3730,7 @@ export class ExpressionEmitter {
     // must emit as function calls: node_process_argv()
     if (node.object.kind === "identifier") {
       const moduleName = node.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite"];
       if (builtinModules.includes(moduleName)) {
         const funcName = `node_${moduleName}_${node.property}`;
         this._lastBuiltinCall = funcName;
@@ -4075,6 +4142,21 @@ export class ExpressionEmitter {
         className === "events.EventEmitter" ||
         className.endsWith(".EventEmitter")) {
       return `node_events_EventEmitter()`;
+    }
+
+    // sqlite.Database / Database
+    if (className === "Database" ||
+        className === "sqlite.Database" ||
+        className.endsWith(".Database")) {
+      const a0 = node.arguments?.[0]
+        ? (() => {
+            const e = this.emit(node.arguments![0]);
+            if (e.startsWith("ts_value_")) return e;
+            if (node.arguments![0].kind === "string_literal") return `ts_value_string(${e})`;
+            return e;
+          })()
+        : 'ts_value_string(ts_string_new(":memory:"))';
+      return `node_sqlite_Database(${a0})`;
     }
 
     // worker_threads: Worker / MessageChannel / BroadcastChannel / MessagePort

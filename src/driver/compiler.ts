@@ -132,7 +132,7 @@ export class CompilerDriver {
           usedBuiltins.add(builtin);
         }
       }
-      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk"];
+      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite"];
       for (const builtin of globalBuiltins) {
         if (cEmitter.unitUsesBuiltin(unit, builtin)) {
           usedBuiltins.add(builtin);
@@ -1165,6 +1165,7 @@ extern TsErrorContext _ts_current_error;
       (usage?.features.has("websocket") ?? false) ||
       /\bts_websocket_/.test(allC);
     const needWorkerThreads = usage?.modules.has("worker_threads") ?? false;
+    const needSqlite = usage?.modules.has("sqlite") ?? false;
     const coreRuntime: string[] = [];
     if (needsTsRuntime) {
       // string_ops holds core strings + indexOf/substring/replace/… (linker GC drops unused)
@@ -1185,6 +1186,11 @@ extern TsErrorContext _ts_current_error;
       if (needWorkerThreads) {
         coreRuntime.push("node_worker_threads.c");
       }
+      if (needSqlite) {
+        // Amalgamation lives under runtime/src/sqlite/ (not builtins/)
+        const sqliteAmalg = path.join(runtimeDir, "sqlite", "sqlite3.c");
+        if (fs.existsSync(sqliteAmalg)) runtimeSrcFiles.push(sqliteAmalg);
+      }
     }
     // Automatic GC is always linked: main() always calls ts_gc_init / set_stack_bottom
     coreRuntime.push("gc.c");
@@ -1201,6 +1207,7 @@ extern TsErrorContext _ts_current_error;
     const includeDir = path.resolve(outDir);
     const runtimeInclude = path.join(projectRoot, "runtime/include");
     const builtinInclude = path.join(projectRoot, "runtime/src/builtins");
+    const sqliteInclude = path.join(projectRoot, "runtime/src/sqlite");
 
     const isWindows = (options.target || process.platform) === "win32" || options.target === "windows";
     // Android/Termux reports process.platform === "android" (or linux) — not win32
@@ -1261,6 +1268,7 @@ extern TsErrorContext _ts_current_error;
       `-I${includeDir}`,
       `-I${runtimeInclude}`,
       `-I${builtinInclude}`,
+      ...(needSqlite ? [`-I${sqliteInclude}`] : []),
       `-o${outExe}`,
       // Math/pthread only when needed on Unix
       ...(isUnix && needMathLib ? ["-lm"] : []),
@@ -1270,6 +1278,8 @@ extern TsErrorContext _ts_current_error;
       ...(isWindows && needShell32 ? ["-lshell32"] : []),
       ...(isWindows && needOs ? ["-ladvapi32"] : []),
       ...(isWindows && needFetch ? ["-lwinhttp"] : []),
+      // sqlite amalgamation needs math on some platforms
+      ...(needSqlite && isUnix ? ["-lm"] : []),
       ...gcFlags,
       "-Wno-implicit-function-declaration",
       "-Wno-deprecated-non-prototype",

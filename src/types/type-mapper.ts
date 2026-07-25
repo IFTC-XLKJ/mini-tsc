@@ -99,6 +99,11 @@ export class TypeMapper {
           return { kind: "any", cType: "Value", cHeader: "ts_runtime.h" };
         }
 
+        // sqlite Database / Statement / RunResult → Value
+        if (name === "Database" || name === "Statement" || name === "RunResult") {
+          return { kind: "any", cType: "Value", cHeader: "ts_runtime.h" };
+        }
+
         // Class types - return ClassName*
         // Check if this is a class (not a built-in type)
         if (objectType.symbol?.declarations) {
