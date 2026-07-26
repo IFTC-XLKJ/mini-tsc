@@ -794,7 +794,233 @@ Value node_sqlite_insert(Value dbVal, Value table, Value row) {
   return make_run_result(h->db);
 }
 
-static Value crud_select(SqliteDb* h, const char* tableName, CrudWhere* where, int firstOnly) {
+/* Query options: orderBy / limit / offset */
+#define SQLITE_CRUD_MAX_ORDER 16
+
+typedef struct {
+  char col[SQLITE_CRUD_IDENT_CAP];
+  int desc; /* 0=ASC, 1=DESC */
+} CrudOrder;
+
+typedef struct {
+  CrudOrder order[SQLITE_CRUD_MAX_ORDER];
+  int order_count;
+  int has_limit;
+  int limit;
+  int has_offset;
+  int offset;
+} CrudOptions;
+
+static int order_dir_from_value(Value v, int* out_desc) {
+  if (v.tag == TAG_NUMBER) {
+    *out_desc = (v.as.number < 0) ? 1 : 0;
+    return 1;
+  }
+  if (v.tag == TAG_BOOLEAN) {
+    *out_desc = v.as.boolean ? 1 : 0; /* true → DESC */
+    return 1;
+  }
+  char numBuf[64];
+  const char* s = value_cstr(v, numBuf, sizeof(numBuf));
+  if (!s) return 0;
+  if (strcmp(s, "desc") == 0 || strcmp(s, "DESC") == 0 ||
+      strcmp(s, "descending") == 0 || strcmp(s, "-1") == 0) {
+    *out_desc = 1;
+    return 1;
+  }
+  if (strcmp(s, "asc") == 0 || strcmp(s, "ASC") == 0 ||
+      strcmp(s, "ascending") == 0 || strcmp(s, "1") == 0 || s[0] == '\0') {
+    *out_desc = 0;
+    return 1;
+  }
+  return 0;
+}
+
+static int options_add_order(CrudOptions* opt, const char* colSpec, int desc) {
+  if (!opt || opt->order_count >= SQLITE_CRUD_MAX_ORDER) return 0;
+  char col[SQLITE_CRUD_IDENT_CAP];
+  const char* src = colSpec ? colSpec : "";
+  int d = desc;
+  if (src[0] == '-') {
+    d = 1;
+    src++;
+  } else if (src[0] == '+') {
+    d = 0;
+    src++;
+  }
+  if (!sanitize_ident(src, col, sizeof(col))) return 0;
+  snprintf(opt->order[opt->order_count].col, SQLITE_CRUD_IDENT_CAP, "%s", col);
+  opt->order[opt->order_count].desc = d;
+  opt->order_count++;
+  return 1;
+}
+
+typedef struct {
+  CrudOptions* opt;
+  int ok;
+} OrderMapCtx;
+
+static void collect_order_map_kv(TSString* key, Value value, void* ctx) {
+  OrderMapCtx* c = (OrderMapCtx*)ctx;
+  if (!c || !c->ok || !key || !key->data) return;
+  int desc = 0;
+  if (!order_dir_from_value(value, &desc)) {
+    c->ok = 0;
+    return;
+  }
+  if (!options_add_order(c->opt, key->data, desc))
+    c->ok = 0;
+}
+
+static int parse_order_by(Value orderBy, CrudOptions* opt) {
+  if (orderBy.tag == TAG_NULL) return 1;
+
+  /* string: "age" | "-age" | "+name" */
+  if (orderBy.tag == TAG_STRING) {
+    char numBuf[64];
+    const char* s = value_cstr(orderBy, numBuf, sizeof(numBuf));
+    return options_add_order(opt, s ? s : "", 0);
+  }
+
+  /* array: ["age", "-name"] or [{ age: "desc" }, ...] */
+  if (orderBy.tag == TAG_ARRAY && orderBy.as.array) {
+    TSArray* arr = orderBy.as.array;
+    for (int i = 0; i < arr->length; i++) {
+      Value item = arr->items[i];
+      if (item.tag == TAG_STRING) {
+        char numBuf[64];
+        const char* s = value_cstr(item, numBuf, sizeof(numBuf));
+        if (!options_add_order(opt, s ? s : "", 0)) return 0;
+      } else if (as_map(item)) {
+        OrderMapCtx c;
+        c.opt = opt;
+        c.ok = 1;
+        ts_hashmap_for_each(as_map(item), collect_order_map_kv, &c);
+        if (!c.ok) return 0;
+      } else {
+        return 0;
+      }
+    }
+    return 1;
+  }
+
+  /* object: { age: "desc", name: "asc" } */
+  if (as_map(orderBy)) {
+    OrderMapCtx c;
+    c.opt = opt;
+    c.ok = 1;
+    ts_hashmap_for_each(as_map(orderBy), collect_order_map_kv, &c);
+    return c.ok;
+  }
+  return 0;
+}
+
+static int crud_options_from_value(Value options, CrudOptions* out) {
+  out->order_count = 0;
+  out->has_limit = 0;
+  out->limit = 0;
+  out->has_offset = 0;
+  out->offset = 0;
+  if (options.tag == TAG_NULL) return 1;
+  TSHashMap* map = as_map(options);
+  if (!map) return 1; /* ignore non-object */
+
+  Value orderBy = ts_hashmap_get(map, ts_string_new("orderBy"));
+  if (orderBy.tag == TAG_NULL)
+    orderBy = ts_hashmap_get(map, ts_string_new("order"));
+  if (orderBy.tag == TAG_NULL)
+    orderBy = ts_hashmap_get(map, ts_string_new("sort"));
+  if (orderBy.tag != TAG_NULL) {
+    if (!parse_order_by(orderBy, out)) return 0;
+  }
+
+  Value lim = ts_hashmap_get(map, ts_string_new("limit"));
+  if (lim.tag == TAG_NULL) lim = ts_hashmap_get(map, ts_string_new("$limit"));
+  if (lim.tag == TAG_NUMBER) {
+    out->has_limit = 1;
+    out->limit = (int)lim.as.number;
+    if (out->limit < 0) out->limit = 0;
+  }
+
+  Value off = ts_hashmap_get(map, ts_string_new("offset"));
+  if (off.tag == TAG_NULL) off = ts_hashmap_get(map, ts_string_new("skip"));
+  if (off.tag == TAG_NULL) off = ts_hashmap_get(map, ts_string_new("$offset"));
+  if (off.tag == TAG_NUMBER) {
+    out->has_offset = 1;
+    out->offset = (int)off.as.number;
+    if (out->offset < 0) out->offset = 0;
+  }
+
+  /* page (1-based) + pageSize → limit/offset */
+  Value page = ts_hashmap_get(map, ts_string_new("page"));
+  Value pageSize = ts_hashmap_get(map, ts_string_new("pageSize"));
+  if (pageSize.tag == TAG_NULL) pageSize = ts_hashmap_get(map, ts_string_new("page_size"));
+  if (page.tag == TAG_NUMBER && pageSize.tag == TAG_NUMBER) {
+    int ps = (int)pageSize.as.number;
+    int pg = (int)page.as.number;
+    if (ps < 0) ps = 0;
+    if (pg < 1) pg = 1;
+    out->has_limit = 1;
+    out->limit = ps;
+    out->has_offset = 1;
+    out->offset = (pg - 1) * ps;
+  }
+
+  return 1;
+}
+
+/* Append ORDER BY / LIMIT / OFFSET. Returns 0 on overflow. */
+static int append_order_limit(char* sql, size_t cap, size_t* pos,
+                              CrudOptions* opt, int firstOnly) {
+  int n;
+  if (opt && opt->order_count > 0) {
+    n = snprintf(sql + *pos, cap - *pos, " ORDER BY ");
+    if (n < 0 || (size_t)n >= cap - *pos) return 0;
+    *pos += (size_t)n;
+    for (int i = 0; i < opt->order_count; i++) {
+      n = snprintf(sql + *pos, cap - *pos, "%s\"%s\" %s",
+                   i ? ", " : "",
+                   opt->order[i].col,
+                   opt->order[i].desc ? "DESC" : "ASC");
+      if (n < 0 || (size_t)n >= cap - *pos) return 0;
+      *pos += (size_t)n;
+    }
+  }
+
+  if (firstOnly) {
+    /* find(): LIMIT 1 unless caller set a larger limit (still cap at 1) */
+    n = snprintf(sql + *pos, cap - *pos, " LIMIT 1");
+    if (n < 0 || (size_t)n >= cap - *pos) return 0;
+    *pos += (size_t)n;
+    if (opt && opt->has_offset && opt->offset > 0) {
+      n = snprintf(sql + *pos, cap - *pos, " OFFSET %d", opt->offset);
+      if (n < 0 || (size_t)n >= cap - *pos) return 0;
+      *pos += (size_t)n;
+    }
+    return 1;
+  }
+
+  if (opt && opt->has_limit) {
+    n = snprintf(sql + *pos, cap - *pos, " LIMIT %d", opt->limit);
+    if (n < 0 || (size_t)n >= cap - *pos) return 0;
+    *pos += (size_t)n;
+  }
+  if (opt && opt->has_offset && opt->offset > 0) {
+    /* SQLite allows OFFSET without LIMIT via LIMIT -1 OFFSET n */
+    if (!(opt->has_limit)) {
+      n = snprintf(sql + *pos, cap - *pos, " LIMIT -1");
+      if (n < 0 || (size_t)n >= cap - *pos) return 0;
+      *pos += (size_t)n;
+    }
+    n = snprintf(sql + *pos, cap - *pos, " OFFSET %d", opt->offset);
+    if (n < 0 || (size_t)n >= cap - *pos) return 0;
+    *pos += (size_t)n;
+  }
+  return 1;
+}
+
+static Value crud_select(SqliteDb* h, const char* tableName, CrudWhere* where,
+                         CrudOptions* opt, int firstOnly) {
   char sql[SQLITE_CRUD_SQL_CAP];
   size_t pos = 0;
   int n = snprintf(sql, sizeof(sql), "SELECT * FROM \"%s\"", tableName);
@@ -802,10 +1028,8 @@ static Value crud_select(SqliteDb* h, const char* tableName, CrudWhere* where, i
   pos = (size_t)n;
   int wcount = append_where(sql, sizeof(sql), &pos, where);
   if (wcount < 0) return sqlite_throw("sql too long");
-  if (firstOnly) {
-    n = snprintf(sql + pos, sizeof(sql) - pos, " LIMIT 1");
-    if (n < 0 || (size_t)n >= sizeof(sql) - pos) return sqlite_throw("sql too long");
-  }
+  if (!append_order_limit(sql, sizeof(sql), &pos, opt, firstOnly))
+    return sqlite_throw("sql too long");
 
   sqlite3_stmt* stmt = NULL;
   int rc = sqlite3_prepare_v2(h->db, sql, -1, &stmt, NULL);
@@ -844,7 +1068,7 @@ static Value crud_select(SqliteDb* h, const char* tableName, CrudWhere* where, i
   return ts_value_array(rows);
 }
 
-Value node_sqlite_find(Value dbVal, Value table, Value where) {
+Value node_sqlite_find(Value dbVal, Value table, Value where, Value options) {
   SqliteDb* h = as_db(dbVal);
   if (!h || h->closed || !h->db) return sqlite_throw("database is not open");
 
@@ -856,10 +1080,14 @@ Value node_sqlite_find(Value dbVal, Value table, Value where) {
   if (!crud_where_from_value(where, &w))
     return sqlite_throw("invalid where clause");
 
-  return crud_select(h, tableName, &w, 1);
+  CrudOptions opt;
+  if (!crud_options_from_value(options, &opt))
+    return sqlite_throw("invalid query options");
+
+  return crud_select(h, tableName, &w, &opt, 1);
 }
 
-Value node_sqlite_findAll(Value dbVal, Value table, Value where) {
+Value node_sqlite_findAll(Value dbVal, Value table, Value where, Value options) {
   SqliteDb* h = as_db(dbVal);
   if (!h || h->closed || !h->db) return sqlite_throw("database is not open");
 
@@ -871,7 +1099,11 @@ Value node_sqlite_findAll(Value dbVal, Value table, Value where) {
   if (!crud_where_from_value(where, &w))
     return sqlite_throw("invalid where clause");
 
-  return crud_select(h, tableName, &w, 0);
+  CrudOptions opt;
+  if (!crud_options_from_value(options, &opt))
+    return sqlite_throw("invalid query options");
+
+  return crud_select(h, tableName, &w, &opt, 0);
 }
 
 Value node_sqlite_update(Value dbVal, Value table, Value setVals, Value where) {
@@ -970,32 +1202,22 @@ Value node_sqlite_remove(Value dbVal, Value table, Value where) {
   return make_run_result(h->db);
 }
 
-Value node_sqlite_count(Value dbVal, Value table, Value where) {
-  SqliteDb* h = as_db(dbVal);
-  if (!h || h->closed || !h->db) return sqlite_throw("database is not open");
-
-  char tableName[SQLITE_CRUD_IDENT_CAP];
-  if (!value_as_ident(table, tableName, sizeof(tableName)))
-    return sqlite_throw("invalid table name");
-
-  CrudWhere w;
-  if (!crud_where_from_value(where, &w))
-    return sqlite_throw("invalid where clause");
-
+/* COUNT(*) with same where as find; no LIMIT/OFFSET. Returns number Value. */
+static Value crud_count_only(SqliteDb* h, const char* tableName, CrudWhere* where) {
   char sql[SQLITE_CRUD_SQL_CAP];
   size_t pos = 0;
   int n = snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM \"%s\"", tableName);
   if (n < 0 || (size_t)n >= sizeof(sql)) return sqlite_throw("sql too long");
   pos = (size_t)n;
-  int wcount = append_where(sql, sizeof(sql), &pos, &w);
+  int wcount = append_where(sql, sizeof(sql), &pos, where);
   if (wcount < 0) return sqlite_throw("sql too long");
 
   sqlite3_stmt* stmt = NULL;
   int rc = sqlite3_prepare_v2(h->db, sql, -1, &stmt, NULL);
   if (rc != SQLITE_OK || !stmt) return sqlite_throw_db(h->db, "count prepare failed");
 
-  if (w.bind_count > 0) {
-    rc = bind_crud_values(stmt, w.binds, w.bind_count, 1);
+  if (where && where->bind_count > 0) {
+    rc = bind_crud_values(stmt, where->binds, where->bind_count, 1);
     if (rc != SQLITE_OK) {
       sqlite3_finalize(stmt);
       return sqlite_throw_db(h->db, "count bind failed");
@@ -1012,4 +1234,65 @@ Value node_sqlite_count(Value dbVal, Value table, Value where) {
   }
   sqlite3_finalize(stmt);
   return ts_value_number(cnt);
+}
+
+Value node_sqlite_count(Value dbVal, Value table, Value where) {
+  SqliteDb* h = as_db(dbVal);
+  if (!h || h->closed || !h->db) return sqlite_throw("database is not open");
+
+  char tableName[SQLITE_CRUD_IDENT_CAP];
+  if (!value_as_ident(table, tableName, sizeof(tableName)))
+    return sqlite_throw("invalid table name");
+
+  CrudWhere w;
+  if (!crud_where_from_value(where, &w))
+    return sqlite_throw("invalid where clause");
+
+  return crud_count_only(h, tableName, &w);
+}
+
+/*
+ * findAndCount(table, where?, options?) → { rows, total, page?, pageSize?, totalPages? }
+ * total is COUNT matching where (limit/offset/order do not affect total).
+ */
+Value node_sqlite_findAndCount(Value dbVal, Value table, Value where, Value options) {
+  SqliteDb* h = as_db(dbVal);
+  if (!h || h->closed || !h->db) return sqlite_throw("database is not open");
+
+  char tableName[SQLITE_CRUD_IDENT_CAP];
+  if (!value_as_ident(table, tableName, sizeof(tableName)))
+    return sqlite_throw("invalid table name");
+
+  CrudWhere w;
+  if (!crud_where_from_value(where, &w))
+    return sqlite_throw("invalid where clause");
+
+  CrudOptions opt;
+  if (!crud_options_from_value(options, &opt))
+    return sqlite_throw("invalid query options");
+
+  Value totalVal = crud_count_only(h, tableName, &w);
+  /* crud_count_only throws on error via TS_THROW; if we get here total is a number */
+  Value rowsVal = crud_select(h, tableName, &w, &opt, 0);
+
+  TSHashMap* map = ts_hashmap_new();
+  ts_hashmap_set(map, ts_string_new("rows"), rowsVal);
+  ts_hashmap_set(map, ts_string_new("total"), totalVal);
+
+  /* Convenience fields when pageSize/limit known */
+  double total = (totalVal.tag == TAG_NUMBER) ? totalVal.as.number : 0;
+  int pageSize = 0;
+  if (opt.has_limit && opt.limit > 0) pageSize = opt.limit;
+  if (pageSize > 0) {
+    int page = 1;
+    if (opt.has_offset && opt.offset >= 0)
+      page = (opt.offset / pageSize) + 1;
+    int totalPages = (int)((total + pageSize - 1) / pageSize);
+    if (totalPages < 1) totalPages = (total > 0) ? 1 : 0;
+    ts_hashmap_set(map, ts_string_new("page"), ts_value_number((double)page));
+    ts_hashmap_set(map, ts_string_new("pageSize"), ts_value_number((double)pageSize));
+    ts_hashmap_set(map, ts_string_new("totalPages"), ts_value_number((double)totalPages));
+  }
+
+  return ts_value_object(map);
 }

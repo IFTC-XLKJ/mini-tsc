@@ -2097,7 +2097,8 @@ export class ExpressionEmitter {
       const methodName = callee.property;
       const objType = this.varTypes.get(objName);
       const dbCrudMethods = new Set([
-        "createTable", "dropTable", "insert", "find", "findAll", "update", "remove", "count",
+        "createTable", "dropTable", "insert", "find", "findAll", "findAndCount",
+        "update", "remove", "count",
       ]);
       const dbSqlMethods = new Set(["exec", "prepare", "close", "pragma"]);
       const looksLikeDb =
@@ -2152,8 +2153,13 @@ export class ExpressionEmitter {
           while (callArgs.length < 2) callArgs.push("ts_value_null()");
           return `node_sqlite_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]})`;
         }
-        if (methodName === "find" || methodName === "findAll" || methodName === "remove" ||
-            methodName === "count") {
+        if (methodName === "find" || methodName === "findAll" || methodName === "findAndCount") {
+          while (callArgs.length < 1) callArgs.push('ts_value_string(ts_string_new(""))');
+          if (callArgs.length < 2) callArgs.push("ts_value_null()");
+          if (callArgs.length < 3) callArgs.push("ts_value_null()");
+          return `node_sqlite_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]}, ${callArgs[2]})`;
+        }
+        if (methodName === "remove" || methodName === "count") {
           while (callArgs.length < 1) callArgs.push('ts_value_string(ts_string_new(""))');
           if (callArgs.length < 2) callArgs.push("ts_value_null()");
           return `node_sqlite_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]})`;

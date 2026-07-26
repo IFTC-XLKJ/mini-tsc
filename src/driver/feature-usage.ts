@@ -484,7 +484,7 @@ export function analyzeFeatureUsage(
           // sqlite Database / Statement methods (SQL + simple CRUD)
           const sqliteDbMethods = [
             "exec", "prepare", "close", "pragma",
-            "createTable", "dropTable", "insert", "find", "findAll",
+            "createTable", "dropTable", "insert", "find", "findAll", "findAndCount",
             "update", "remove", "count",
           ];
           if (sqliteDbMethods.includes(m) && /db|database|sqlite|conn/i.test(obj)) {
@@ -729,6 +729,7 @@ export function analyzeFeatureUsage(
     addMethod(usage, "node_sqlite_insert");
     addMethod(usage, "node_sqlite_find");
     addMethod(usage, "node_sqlite_findAll");
+    addMethod(usage, "node_sqlite_findAndCount");
     addMethod(usage, "node_sqlite_update");
     addMethod(usage, "node_sqlite_remove");
     addMethod(usage, "node_sqlite_count");
