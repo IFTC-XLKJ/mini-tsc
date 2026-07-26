@@ -191,6 +191,38 @@ typedef struct {
   int count;
 } CrudCols;
 
+/* WHERE predicates: col OP value(s). Multiple ops per column allowed. */
+typedef enum {
+  CRUD_OP_EQ = 0,
+  CRUD_OP_NE,
+  CRUD_OP_GT,
+  CRUD_OP_GTE,
+  CRUD_OP_LT,
+  CRUD_OP_LTE,
+  CRUD_OP_LIKE,
+  CRUD_OP_IN,
+  CRUD_OP_NIN,
+  CRUD_OP_IS_NULL,
+  CRUD_OP_IS_NOT_NULL
+} CrudOp;
+
+#define SQLITE_CRUD_MAX_PREDS 128
+#define SQLITE_CRUD_MAX_BINDS 256
+
+typedef struct {
+  char col[SQLITE_CRUD_IDENT_CAP];
+  CrudOp op;
+  Value value; /* scalar, or TAG_ARRAY for $in/$nin */
+} CrudPred;
+
+typedef struct {
+  CrudPred preds[SQLITE_CRUD_MAX_PREDS];
+  int count;
+  /* Flattened bind values in SQL order (IS NULL has none) */
+  Value binds[SQLITE_CRUD_MAX_BINDS];
+  int bind_count;
+} CrudWhere;
+
 static void crud_collect_kv(TSString* key, Value value, void* ctx) {
   CrudCols* c = (CrudCols*)ctx;
   if (!c || c->count >= SQLITE_CRUD_MAX_COLS) return;
@@ -232,19 +264,187 @@ static int bind_crud_values(sqlite3_stmt* stmt, Value* vals, int n, int startIdx
   return SQLITE_OK;
 }
 
-/* Append WHERE col1 = ? AND col2 = ? … ; returns bind count or -1. */
-static int append_where(char* sql, size_t cap, size_t* pos, CrudCols* where) {
-  if (!where || where->count == 0) return 0;
+/* Returns CrudOp, or -1 if unknown. */
+static int parse_op_name(const char* op) {
+  if (!op) return CRUD_OP_EQ;
+  if (strcmp(op, "$eq") == 0 || strcmp(op, "eq") == 0) return CRUD_OP_EQ;
+  if (strcmp(op, "$ne") == 0 || strcmp(op, "ne") == 0 || strcmp(op, "$neq") == 0) return CRUD_OP_NE;
+  if (strcmp(op, "$gt") == 0 || strcmp(op, "gt") == 0) return CRUD_OP_GT;
+  if (strcmp(op, "$gte") == 0 || strcmp(op, "gte") == 0 || strcmp(op, "$ge") == 0) return CRUD_OP_GTE;
+  if (strcmp(op, "$lt") == 0 || strcmp(op, "lt") == 0) return CRUD_OP_LT;
+  if (strcmp(op, "$lte") == 0 || strcmp(op, "lte") == 0 || strcmp(op, "$le") == 0) return CRUD_OP_LTE;
+  if (strcmp(op, "$like") == 0 || strcmp(op, "like") == 0) return CRUD_OP_LIKE;
+  if (strcmp(op, "$in") == 0 || strcmp(op, "in") == 0) return CRUD_OP_IN;
+  if (strcmp(op, "$nin") == 0 || strcmp(op, "nin") == 0 || strcmp(op, "$notin") == 0) return CRUD_OP_NIN;
+  if (strcmp(op, "$null") == 0 || strcmp(op, "null") == 0 ||
+      strcmp(op, "$isNull") == 0 || strcmp(op, "isNull") == 0) return CRUD_OP_IS_NULL;
+  return -1;
+}
+
+static int where_add_pred(CrudWhere* w, const char* col, CrudOp op, Value val) {
+  if (!w || w->count >= SQLITE_CRUD_MAX_PREDS) return 0;
+  if (!sanitize_ident(col, w->preds[w->count].col, SQLITE_CRUD_IDENT_CAP)) return 0;
+  /* $null: true → IS NULL, false → IS NOT NULL */
+  if (op == CRUD_OP_IS_NULL) {
+    int isNull = 1;
+    if (val.tag == TAG_BOOLEAN) isNull = val.as.boolean ? 1 : 0;
+    else if (val.tag == TAG_NUMBER) isNull = (val.as.number != 0.0) ? 1 : 0;
+    else if (val.tag == TAG_NULL) isNull = 1;
+    w->preds[w->count].op = isNull ? CRUD_OP_IS_NULL : CRUD_OP_IS_NOT_NULL;
+    w->preds[w->count].value = ts_value_null();
+    w->count++;
+    return 1;
+  }
+  if (op == CRUD_OP_IN || op == CRUD_OP_NIN) {
+    if (val.tag != TAG_ARRAY || !val.as.array) return 0;
+  }
+  w->preds[w->count].op = op;
+  w->preds[w->count].value = val;
+  w->count++;
+  return 1;
+}
+
+typedef struct {
+  CrudWhere* where;
+  char col[SQLITE_CRUD_IDENT_CAP];
+  int ok;
+} OpCollectCtx;
+
+static void collect_op_kv(TSString* key, Value value, void* ctx) {
+  OpCollectCtx* c = (OpCollectCtx*)ctx;
+  if (!c || !c->ok || !key || !key->data) return;
+  int op = parse_op_name(key->data);
+  if (op < 0) {
+    c->ok = 0;
+    return;
+  }
+  if (!where_add_pred(c->where, c->col, (CrudOp)op, value))
+    c->ok = 0;
+}
+
+typedef struct {
+  CrudWhere* where;
+  int ok;
+} WhereCollectCtx;
+
+static void collect_where_kv(TSString* key, Value value, void* ctx) {
+  WhereCollectCtx* c = (WhereCollectCtx*)ctx;
+  if (!c || !c->ok || !key || !key->data) return;
+  char col[SQLITE_CRUD_IDENT_CAP];
+  if (!sanitize_ident(key->data, col, sizeof(col))) {
+    c->ok = 0;
+    return;
+  }
+  /* Nested object → operator map: { age: { $gt: 25, $lt: 40 } } */
+  TSHashMap* opMap = as_map(value);
+  if (opMap) {
+    OpCollectCtx oc;
+    oc.where = c->where;
+    snprintf(oc.col, sizeof(oc.col), "%s", col);
+    oc.ok = 1;
+    ts_hashmap_for_each(opMap, collect_op_kv, &oc);
+    if (!oc.ok) c->ok = 0;
+    return;
+  }
+  /* Plain value → equality */
+  if (!where_add_pred(c->where, col, CRUD_OP_EQ, value))
+    c->ok = 0;
+}
+
+/* Parse where object into predicates. Empty/null where → count 0, ok. */
+static int crud_where_from_value(Value where, CrudWhere* out) {
+  out->count = 0;
+  out->bind_count = 0;
+  if (where.tag == TAG_NULL) return 1;
+  TSHashMap* map = as_map(where);
+  if (!map) return 1; /* treat non-object as no filter */
+  WhereCollectCtx c;
+  c.where = out;
+  c.ok = 1;
+  ts_hashmap_for_each(map, collect_where_kv, &c);
+  return c.ok;
+}
+
+static const char* op_sql(CrudOp op) {
+  switch (op) {
+    case CRUD_OP_EQ: return "=";
+    case CRUD_OP_NE: return "!=";
+    case CRUD_OP_GT: return ">";
+    case CRUD_OP_GTE: return ">=";
+    case CRUD_OP_LT: return "<";
+    case CRUD_OP_LTE: return "<=";
+    case CRUD_OP_LIKE: return "LIKE";
+    default: return "=";
+  }
+}
+
+/* Append WHERE … ; fill binds. Returns bind count, or -1 on error. */
+static int append_where(char* sql, size_t cap, size_t* pos, CrudWhere* where) {
+  if (!where || where->count == 0) {
+    if (where) where->bind_count = 0;
+    return 0;
+  }
+  where->bind_count = 0;
   int n = snprintf(sql + *pos, cap - *pos, " WHERE ");
   if (n < 0 || (size_t)n >= cap - *pos) return -1;
   *pos += (size_t)n;
+
   for (int i = 0; i < where->count; i++) {
-    n = snprintf(sql + *pos, cap - *pos, "%s\"%s\" = ?%s",
-                 i ? " AND " : "", where->names[i], "");
+    CrudPred* p = &where->preds[i];
+    if (i > 0) {
+      n = snprintf(sql + *pos, cap - *pos, " AND ");
+      if (n < 0 || (size_t)n >= cap - *pos) return -1;
+      *pos += (size_t)n;
+    }
+
+    if (p->op == CRUD_OP_IS_NULL) {
+      n = snprintf(sql + *pos, cap - *pos, "\"%s\" IS NULL", p->col);
+      if (n < 0 || (size_t)n >= cap - *pos) return -1;
+      *pos += (size_t)n;
+      continue;
+    }
+    if (p->op == CRUD_OP_IS_NOT_NULL) {
+      n = snprintf(sql + *pos, cap - *pos, "\"%s\" IS NOT NULL", p->col);
+      if (n < 0 || (size_t)n >= cap - *pos) return -1;
+      *pos += (size_t)n;
+      continue;
+    }
+    if (p->op == CRUD_OP_IN || p->op == CRUD_OP_NIN) {
+      TSArray* arr = (p->value.tag == TAG_ARRAY) ? p->value.as.array : NULL;
+      int len = arr ? arr->length : 0;
+      if (len <= 0) {
+        /* empty IN → always false; empty NOT IN → always true */
+        n = snprintf(sql + *pos, cap - *pos, "%s",
+                     p->op == CRUD_OP_IN ? "0" : "1");
+        if (n < 0 || (size_t)n >= cap - *pos) return -1;
+        *pos += (size_t)n;
+        continue;
+      }
+      n = snprintf(sql + *pos, cap - *pos, "\"%s\" %s (",
+                   p->col, p->op == CRUD_OP_IN ? "IN" : "NOT IN");
+      if (n < 0 || (size_t)n >= cap - *pos) return -1;
+      *pos += (size_t)n;
+      for (int j = 0; j < len; j++) {
+        n = snprintf(sql + *pos, cap - *pos, "%s?", j ? ", " : "");
+        if (n < 0 || (size_t)n >= cap - *pos) return -1;
+        *pos += (size_t)n;
+        if (where->bind_count >= SQLITE_CRUD_MAX_BINDS) return -1;
+        where->binds[where->bind_count++] = arr->items[j];
+      }
+      n = snprintf(sql + *pos, cap - *pos, ")");
+      if (n < 0 || (size_t)n >= cap - *pos) return -1;
+      *pos += (size_t)n;
+      continue;
+    }
+
+    /* Scalar comparison */
+    n = snprintf(sql + *pos, cap - *pos, "\"%s\" %s ?", p->col, op_sql(p->op));
     if (n < 0 || (size_t)n >= cap - *pos) return -1;
     *pos += (size_t)n;
+    if (where->bind_count >= SQLITE_CRUD_MAX_BINDS) return -1;
+    where->binds[where->bind_count++] = p->value;
   }
-  return where->count;
+  return where->bind_count;
 }
 
 /* Map column type strings → SQLite type affinity */
@@ -594,7 +794,7 @@ Value node_sqlite_insert(Value dbVal, Value table, Value row) {
   return make_run_result(h->db);
 }
 
-static Value crud_select(SqliteDb* h, const char* tableName, CrudCols* where, int firstOnly) {
+static Value crud_select(SqliteDb* h, const char* tableName, CrudWhere* where, int firstOnly) {
   char sql[SQLITE_CRUD_SQL_CAP];
   size_t pos = 0;
   int n = snprintf(sql, sizeof(sql), "SELECT * FROM \"%s\"", tableName);
@@ -611,8 +811,8 @@ static Value crud_select(SqliteDb* h, const char* tableName, CrudCols* where, in
   int rc = sqlite3_prepare_v2(h->db, sql, -1, &stmt, NULL);
   if (rc != SQLITE_OK || !stmt) return sqlite_throw_db(h->db, "select prepare failed");
 
-  if (where && where->count > 0) {
-    rc = bind_crud_values(stmt, where->values, where->count, 1);
+  if (where && where->bind_count > 0) {
+    rc = bind_crud_values(stmt, where->binds, where->bind_count, 1);
     if (rc != SQLITE_OK) {
       sqlite3_finalize(stmt);
       return sqlite_throw_db(h->db, "select bind failed");
@@ -652,12 +852,11 @@ Value node_sqlite_find(Value dbVal, Value table, Value where) {
   if (!value_as_ident(table, tableName, sizeof(tableName)))
     return sqlite_throw("invalid table name");
 
-  CrudCols wcols;
-  wcols.count = 0;
-  if (where.tag != TAG_NULL && as_map(where))
-    crud_from_map(where, &wcols);
+  CrudWhere w;
+  if (!crud_where_from_value(where, &w))
+    return sqlite_throw("invalid where clause");
 
-  return crud_select(h, tableName, &wcols, 1);
+  return crud_select(h, tableName, &w, 1);
 }
 
 Value node_sqlite_findAll(Value dbVal, Value table, Value where) {
@@ -668,12 +867,11 @@ Value node_sqlite_findAll(Value dbVal, Value table, Value where) {
   if (!value_as_ident(table, tableName, sizeof(tableName)))
     return sqlite_throw("invalid table name");
 
-  CrudCols wcols;
-  wcols.count = 0;
-  if (where.tag != TAG_NULL && as_map(where))
-    crud_from_map(where, &wcols);
+  CrudWhere w;
+  if (!crud_where_from_value(where, &w))
+    return sqlite_throw("invalid where clause");
 
-  return crud_select(h, tableName, &wcols, 0);
+  return crud_select(h, tableName, &w, 0);
 }
 
 Value node_sqlite_update(Value dbVal, Value table, Value setVals, Value where) {
@@ -688,10 +886,9 @@ Value node_sqlite_update(Value dbVal, Value table, Value setVals, Value where) {
   if (!crud_from_map(setVals, &sets))
     return sqlite_throw("update requires a set object");
 
-  CrudCols wcols;
-  wcols.count = 0;
-  if (where.tag != TAG_NULL && as_map(where))
-    crud_from_map(where, &wcols);
+  CrudWhere w;
+  if (!crud_where_from_value(where, &w))
+    return sqlite_throw("invalid where clause");
 
   char sql[SQLITE_CRUD_SQL_CAP];
   size_t pos = 0;
@@ -703,7 +900,7 @@ Value node_sqlite_update(Value dbVal, Value table, Value setVals, Value where) {
     if (n < 0 || (size_t)n >= sizeof(sql) - pos) return sqlite_throw("sql too long");
     pos += (size_t)n;
   }
-  int wcount = append_where(sql, sizeof(sql), &pos, &wcols);
+  int wcount = append_where(sql, sizeof(sql), &pos, &w);
   if (wcount < 0) return sqlite_throw("sql too long");
 
   sqlite3_stmt* stmt = NULL;
@@ -715,8 +912,8 @@ Value node_sqlite_update(Value dbVal, Value table, Value setVals, Value where) {
     sqlite3_finalize(stmt);
     return sqlite_throw_db(h->db, "update bind failed");
   }
-  if (wcols.count > 0) {
-    rc = bind_crud_values(stmt, wcols.values, wcols.count, sets.count + 1);
+  if (w.bind_count > 0) {
+    rc = bind_crud_values(stmt, w.binds, w.bind_count, sets.count + 1);
     if (rc != SQLITE_OK) {
       sqlite3_finalize(stmt);
       return sqlite_throw_db(h->db, "update where bind failed");
@@ -740,25 +937,24 @@ Value node_sqlite_remove(Value dbVal, Value table, Value where) {
   if (!value_as_ident(table, tableName, sizeof(tableName)))
     return sqlite_throw("invalid table name");
 
-  CrudCols wcols;
-  wcols.count = 0;
-  if (where.tag != TAG_NULL && as_map(where))
-    crud_from_map(where, &wcols);
+  CrudWhere w;
+  if (!crud_where_from_value(where, &w))
+    return sqlite_throw("invalid where clause");
 
   char sql[SQLITE_CRUD_SQL_CAP];
   size_t pos = 0;
   int n = snprintf(sql, sizeof(sql), "DELETE FROM \"%s\"", tableName);
   if (n < 0 || (size_t)n >= sizeof(sql)) return sqlite_throw("sql too long");
   pos = (size_t)n;
-  int wcount = append_where(sql, sizeof(sql), &pos, &wcols);
+  int wcount = append_where(sql, sizeof(sql), &pos, &w);
   if (wcount < 0) return sqlite_throw("sql too long");
 
   sqlite3_stmt* stmt = NULL;
   int rc = sqlite3_prepare_v2(h->db, sql, -1, &stmt, NULL);
   if (rc != SQLITE_OK || !stmt) return sqlite_throw_db(h->db, "remove prepare failed");
 
-  if (wcols.count > 0) {
-    rc = bind_crud_values(stmt, wcols.values, wcols.count, 1);
+  if (w.bind_count > 0) {
+    rc = bind_crud_values(stmt, w.binds, w.bind_count, 1);
     if (rc != SQLITE_OK) {
       sqlite3_finalize(stmt);
       return sqlite_throw_db(h->db, "remove bind failed");
@@ -782,25 +978,24 @@ Value node_sqlite_count(Value dbVal, Value table, Value where) {
   if (!value_as_ident(table, tableName, sizeof(tableName)))
     return sqlite_throw("invalid table name");
 
-  CrudCols wcols;
-  wcols.count = 0;
-  if (where.tag != TAG_NULL && as_map(where))
-    crud_from_map(where, &wcols);
+  CrudWhere w;
+  if (!crud_where_from_value(where, &w))
+    return sqlite_throw("invalid where clause");
 
   char sql[SQLITE_CRUD_SQL_CAP];
   size_t pos = 0;
   int n = snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM \"%s\"", tableName);
   if (n < 0 || (size_t)n >= sizeof(sql)) return sqlite_throw("sql too long");
   pos = (size_t)n;
-  int wcount = append_where(sql, sizeof(sql), &pos, &wcols);
+  int wcount = append_where(sql, sizeof(sql), &pos, &w);
   if (wcount < 0) return sqlite_throw("sql too long");
 
   sqlite3_stmt* stmt = NULL;
   int rc = sqlite3_prepare_v2(h->db, sql, -1, &stmt, NULL);
   if (rc != SQLITE_OK || !stmt) return sqlite_throw_db(h->db, "count prepare failed");
 
-  if (wcols.count > 0) {
-    rc = bind_crud_values(stmt, wcols.values, wcols.count, 1);
+  if (w.bind_count > 0) {
+    rc = bind_crud_values(stmt, w.binds, w.bind_count, 1);
     if (rc != SQLITE_OK) {
       sqlite3_finalize(stmt);
       return sqlite_throw_db(h->db, "count bind failed");

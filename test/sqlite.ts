@@ -1,58 +1,68 @@
 import * as sqlite from "sqlite";
 
 function main(): void {
-  // --- Simple CRUD (no SQL) ---
   const db = sqlite.open(":memory:");
 
   db.createTable("users", {
     id: "integer primary key",
     name: "text",
     age: "int",
+    email: "text",
   });
 
-  const r1 = db.insert("users", { name: "Alice", age: 30 });
-  console.log("insert changes:", r1.changes);
-  console.log("insert rowid:", r1.lastInsertRowid);
+  db.insert("users", { name: "Alice", age: 30, email: "a@x.com" });
+  db.insert("users", { name: "Bob", age: 25, email: "b@x.com" });
+  db.insert("users", { name: "Carol", age: 35 });
+  db.insert("users", { name: "Dave", age: 18, email: "d@x.com" });
 
-  db.insert("users", { name: "Bob", age: 25 });
-  db.insert("users", { name: "Carol", age: 30 });
-
+  // equality (unchanged)
   const alice = db.find("users", { name: "Alice" });
-  console.log("find Alice age:", alice.age);
+  console.log("eq Alice age:", alice.age);
 
-  const age30: any = db.findAll("users", { age: 30 });
-  console.log("findAll age=30 count:", age30.length);
+  // $gt / $lte
+  const adults: any = db.findAll("users", { age: { $gt: 18, $lte: 30 } });
+  console.log("age 19..30 count:", adults.length);
 
-  const all: any = db.findAll("users");
-  console.log("findAll all count:", all.length);
+  // $ne
+  const notBob: any = db.findAll("users", { name: { $ne: "Bob" } });
+  console.log("not Bob count:", notBob.length);
 
-  const up = db.update("users", { age: 31 }, { name: "Alice" });
-  console.log("update changes:", up.changes);
+  // $like
+  const aNames: any = db.findAll("users", { name: { $like: "A%" } });
+  console.log("name like A% count:", aNames.length);
 
-  const alice2 = db.find("users", { name: "Alice" });
-  console.log("Alice new age:", alice2.age);
+  // $in
+  const inNames: any = db.findAll("users", { name: { $in: ["Alice", "Carol"] } });
+  console.log("name in Alice|Carol count:", inNames.length);
 
-  const cnt: any = db.count("users");
-  console.log("count all:", cnt);
-  const cnt30: any = db.count("users", { age: 30 });
-  console.log("count age=30:", cnt30);
+  // $nin
+  const ninNames: any = db.findAll("users", { name: { $nin: ["Bob", "Dave"] } });
+  console.log("name nin Bob|Dave count:", ninNames.length);
 
-  const del = db.remove("users", { name: "Bob" });
-  console.log("remove changes:", del.changes);
-  console.log("count after remove:", db.count("users"));
+  // $null true / false
+  const noEmail: any = db.findAll("users", { email: { $null: true } });
+  console.log("email IS NULL count:", noEmail.length);
+  const hasEmail: any = db.findAll("users", { email: { $null: false } });
+  console.log("email IS NOT NULL count:", hasEmail.length);
 
-  // --- Low-level SQL still works ---
-  db.exec("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)");
-  const ins = db.prepare("INSERT INTO notes (body) VALUES (?)");
-  ins.run("hello");
-  ins.finalize();
-  const getStmt = db.prepare("SELECT body FROM notes WHERE id = ?");
-  const note = getStmt.get(1);
-  console.log("note body:", note.body);
-  getStmt.finalize();
+  // combined columns AND operators
+  const filtered: any = db.findAll("users", {
+    age: { $gte: 25 },
+    name: { $ne: "Bob" },
+  });
+  console.log("age>=25 and not Bob count:", filtered.length);
 
-  db.dropTable("notes");
+  // update / remove with operators
+  const up = db.update("users", { age: 31 }, { age: { $lt: 20 } });
+  console.log("update age<20 changes:", up.changes);
+  const dave = db.find("users", { name: "Dave" });
+  console.log("Dave new age:", dave.age);
+
+  const del = db.remove("users", { age: { $gt: 30 } });
+  console.log("remove age>30 changes:", del.changes);
+  console.log("count left:", db.count("users"));
+
   db.close();
-  console.log("sqlite crud tests passed!");
+  console.log("sqlite where-ops tests passed!");
 }
 main();
