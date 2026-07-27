@@ -1,0 +1,10 @@
+{
+  "name": "my_app",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.ts",
+  "scripts": {
+    "build": "mini-tsc compile main.ts",
+    "transpile": "mini-tsc transpile main.ts"
+  }
+}

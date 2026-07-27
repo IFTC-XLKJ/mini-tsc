@@ -3,6 +3,8 @@ import { Command } from "./commander/index.js";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { CompilerDriver, type CompilerOptions } from "../driver/compiler.js";
+import { init } from "./init.js";
+import { run, listScripts } from "./run.js";
 
 // Determine project root from the CLI script location
 const __filename = fileURLToPath(import.meta.url);
@@ -124,6 +126,29 @@ program
     } else {
       console.log(`\n✗ Transpilation failed`);
       process.exit(1);
+    }
+  });
+
+program
+  .command("init")
+  .description("Initialize a new mini-tsc project")
+  .argument("<project-name>", "Project name (letters, underscores, and numbers only)")
+  .action(async (projectName: string) => {
+    await init(projectName, { projectRoot: process.cwd() });
+  });
+
+program
+  .command("run")
+  .description("Run a script defined in app.json")
+  .argument("[script]", "Script name to run (omit to list all scripts)")
+  .action(async (...args: any[]) => {
+    // args: [script?, opts, command] when script is provided
+    // args: [opts, command] when script is omitted
+    const script = args.length >= 3 ? args[0] : undefined;
+    if (script) {
+      await run(script, { cwd: process.cwd() });
+    } else {
+      await listScripts({ cwd: process.cwd() });
     }
   });
 

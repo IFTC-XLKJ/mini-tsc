@@ -111,8 +111,8 @@ declare module "sqlite" {
     createTable(table: string, columns: { [name: string]: ColumnType }): void;
     dropTable(table: string): void;
     insert(table: string, row: { [key: string]: any }): RunResult;
-    find(table: string, where?: Where, options?: QueryOptions): any;
-    findAll(table: string, where?: Where, options?: QueryOptions): any;
+    find(table: string, where?: Where | null, options?: QueryOptions | null): any;
+    findAll(table: string, where?: Where | null, options?: QueryOptions | null): any;
     /**
      * Paginated list + total count for the same where.
      * ```ts
@@ -120,10 +120,10 @@ declare module "sqlite" {
      * // r.rows, r.total, r.page, r.pageSize, r.totalPages
      * ```
      */
-    findAndCount(table: string, where?: Where, options?: QueryOptions): PageResult;
-    update(table: string, set: { [key: string]: any }, where?: Where): RunResult;
-    remove(table: string, where?: Where): RunResult;
-    count(table: string, where?: Where): any;
+    findAndCount(table: string, where?: Where | null, options?: QueryOptions | null): PageResult;
+    update(table: string, set: { [key: string]: any }, where?: Where | null): RunResult;
+    remove(table: string, where?: Where | null): RunResult;
+    count(table: string, where?: Where | null): any;
   }
 
   function open(filename?: string): Database;
