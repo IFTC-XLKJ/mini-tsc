@@ -23,6 +23,7 @@ export interface CompilerOptions {
   output?: string;
   outDir?: string;
   target?: "windows" | "linux";
+  shared?: boolean;
   runtime?: boolean;
   verbose?: boolean;
   keepC?: boolean;
@@ -132,7 +133,7 @@ export class CompilerDriver {
           usedBuiltins.add(builtin);
         }
       }
-      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite"];
+      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi"];
       for (const builtin of globalBuiltins) {
         if (cEmitter.unitUsesBuiltin(unit, builtin)) {
           usedBuiltins.add(builtin);
@@ -269,7 +270,12 @@ export class CompilerDriver {
     if (options.output) {
       const outDir = options.outDir || "./out";
       const isWindows = (options.target || process.platform) === "win32" || options.target === "windows";
-      const ext = isWindows ? ".exe" : "";
+      let ext: string;
+      if (options.shared) {
+        ext = isWindows ? ".dll" : ".so";
+      } else {
+        ext = isWindows ? ".exe" : "";
+      }
       if (path.isAbsolute(options.output)) {
         outputPath = options.output + ext;
       } else {
@@ -1002,6 +1008,59 @@ extern TsErrorContext _ts_current_error;
     lines.push(`const char* __ts_dirname = "${escC(entryDir)}";`);
     lines.push(`const char* __ts_filename = "${escC(entryAbs)}";`);
     lines.push('');
+
+    // Shared library mode: export init + entry functions, no main()
+    if (options.shared) {
+      const isWin = (options.target || process.platform) === "win32" || options.target === "windows";
+      const dllexport = isWin ? '__declspec(dllexport) ' : '__attribute__((visibility("default"))) ';
+      lines.push(`/* Shared library mode: exported init function */`);
+      lines.push(`${dllexport}void ${entryBase}_init_library(int argc, char** argv) {`);
+      lines.push('  node_process_set_argv(argc, argv);');
+      lines.push('  ts_gc_init();');
+      lines.push('  ts_gc_set_stack_bottom((void*)&argc);');
+      if (needWorkers) {
+        lines.push(`  node_worker_threads_set_entry(${entryBase}_entry);`);
+      }
+      lines.push('  /* Initialize modules */');
+      for (const filePath of graph.sortedOrder) {
+        const moduleName = this.filePathToModuleName(filePath);
+        const initFn = this.mangler.mangleInit(moduleName);
+        lines.push(`  ${initFn}();`);
+      }
+      lines.push('}');
+      lines.push('');
+      lines.push(`/* Shared library mode: exported entry function */`);
+      lines.push(`${dllexport}void ${entryBase}_call_entry(void) {`);
+      if (topLevelTry) {
+        const errorVar = topLevelTry.catchClause?.errorVar || "error";
+        let catchBodyC = "";
+        if (topLevelTry.catchClause?.body && topLevelTry.catchClause.body.length > 0) {
+          const se = new StatementEmitter();
+          se.declareVar(errorVar, "Value");
+          catchBodyC = topLevelTry.catchClause.body
+            .map((s: any) => se.emit(s))
+            .filter((s: string) => s && s.trim())
+            .map((s: string) => "    " + s)
+            .join("\n");
+        }
+        lines.push('  TS_TRY {');
+        lines.push(`    ${entryBase}_entry();`);
+        lines.push('  } TS_CATCH {');
+        lines.push(`    Value ${errorVar} = _ts_current_error.error_value;`);
+        if (catchBodyC) {
+          lines.push(catchBodyC);
+        } else {
+          lines.push(`    ts_console_log(${errorVar});`);
+        }
+        lines.push('  }');
+      } else {
+        lines.push(`  ${entryBase}_entry();`);
+      }
+      lines.push('}');
+      lines.push('');
+      return lines.join('\n');
+    }
+
     lines.push('int main(int argc, char* argv[]) {');
     lines.push('  node_process_set_argv(argc, argv);');
     lines.push('  /* GC: stack bottom for conservative mark + init */');
@@ -1166,6 +1225,7 @@ extern TsErrorContext _ts_current_error;
       /\bts_websocket_/.test(allC);
     const needWorkerThreads = usage?.modules.has("worker_threads") ?? false;
     const needSqlite = usage?.modules.has("sqlite") ?? false;
+    const needFfi = usage?.modules.has("ffi") ?? false;
     const coreRuntime: string[] = [];
     if (needsTsRuntime) {
       // string_ops holds core strings + indexOf/substring/replace/… (linker GC drops unused)
@@ -1190,6 +1250,9 @@ extern TsErrorContext _ts_current_error;
         // Amalgamation lives under runtime/src/sqlite/ (not builtins/)
         const sqliteAmalg = path.join(runtimeDir, "sqlite", "sqlite3.c");
         if (fs.existsSync(sqliteAmalg)) runtimeSrcFiles.push(sqliteAmalg);
+      }
+      if (needFfi) {
+        coreRuntime.push("node_ffi.c");
       }
     }
     // Automatic GC is always linked: main() always calls ts_gc_init / set_stack_bottom
@@ -1231,11 +1294,15 @@ extern TsErrorContext _ts_current_error;
       "-fmerge-all-constants",
     ];
     // MSVC/lld-link: /OPT:REF (+ ICF); GNU: --gc-sections
-    const gcFlags = isWindows
-      ? ["-Wl,/OPT:REF", "-Wl,/OPT:ICF"]
-      : ["-Wl,--gc-sections", "-Wl,--as-needed"];
+    const gcFlags = options.shared
+      ? []
+      : isWindows
+        ? ["-Wl,/OPT:REF", "-Wl,/OPT:ICF"]
+        : ["-Wl,--gc-sections", "-Wl,--as-needed"];
 
-    const outExe = path.join(outputDir, outputName + (isWindows ? ".exe" : ""));
+    const outExe = options.shared
+      ? path.join(outputDir, outputName + (isWindows ? ".dll" : ".so"))
+      : path.join(outputDir, outputName + (isWindows ? ".exe" : ""));
     const { execSync, execFileSync } = await import("child_process");
 
     // Prefer lld when available (better /OPT:REF + ICF on Windows)
@@ -1263,6 +1330,8 @@ extern TsErrorContext _ts_current_error;
       "clang",
       ...sizeFlags,
       ...lldFlags,
+      ...(options.shared ? (isWindows ? ["-Wl,/DLL"] : ["-shared"]) : []),
+      ...(options.shared && isUnix ? ["-fPIC"] : []),
       ...cFiles,
       ...runtimeSrcFiles,
       `-I${includeDir}`,
@@ -1280,6 +1349,8 @@ extern TsErrorContext _ts_current_error;
       ...(isWindows && needFetch ? ["-lwinhttp"] : []),
       // sqlite amalgamation needs math on some platforms
       ...(needSqlite && isUnix ? ["-lm"] : []),
+      // ffi needs dl library on Unix
+      ...(needFfi && isUnix ? ["-ldl"] : []),
       ...gcFlags,
       "-Wno-implicit-function-declaration",
       "-Wno-deprecated-non-prototype",
@@ -1292,13 +1363,15 @@ extern TsErrorContext _ts_current_error;
       throw new Error(`clang failed: ${e.stderr?.toString() || e.message}`);
     }
 
-    // Strip unneeded symbols when a strip tool is available
-    for (const tool of ["llvm-strip", "strip"]) {
-      try {
-        execFileSync(tool, ["--strip-unneeded", outExe], { stdio: "pipe" });
-        break;
-      } catch {
-        // try next
+    // Strip unneeded symbols when a strip tool is available (skip for shared libraries)
+    if (!options.shared) {
+      for (const tool of ["llvm-strip", "strip"]) {
+        try {
+          execFileSync(tool, ["--strip-unneeded", outExe], { stdio: "pipe" });
+          break;
+        } catch {
+          // try next
+        }
       }
     }
   }

@@ -21,11 +21,12 @@ program
 program
   .command("compile")
   .alias("c")
-  .description("Compile TypeScript to native executable")
+  .description("Compile TypeScript to native executable or shared library")
   .argument("<entry>", "Entry TypeScript file")
   .option("-o, --output <name>", "Output executable name", "output")
   .option("-d, --out-dir <dir>", "Output directory for .c/.h files", "./out")
   .option("-t, --target <platform>", "Target platform (windows|linux)", process.platform === "win32" ? "windows" : "linux")
+  .option("--shared", "Compile as shared library (.dll/.so) instead of executable")
   .option("--no-runtime", "Exclude runtime library")
   .option("-v, --verbose", "Print intermediate C code")
   .option("--keep-c", "Keep generated .c/.h files")
@@ -36,6 +37,7 @@ program
       output: opts.output,
       outDir: opts.outDir,
       target: opts.target,
+      shared: opts.shared,
       runtime: opts.runtime,
       verbose: opts.verbose,
       keepC: opts.keepC,

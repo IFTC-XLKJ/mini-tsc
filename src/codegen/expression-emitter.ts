@@ -1774,7 +1774,7 @@ export class ExpressionEmitter {
     if (callee.kind === "property_access" &&
         callee.object.kind === "identifier") {
       const moduleName = callee.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi"];
       if (builtinModules.includes(moduleName)) {
         const funcName = `node_${moduleName}_${callee.property}`;
         // Wrap each argument in Value constructors
@@ -2028,6 +2028,14 @@ export class ExpressionEmitter {
         if (moduleName === "sqlite") {
           if (callee.property === "open" || callee.property === "Database") {
             while (args.length < 1) args.push('ts_value_string(ts_string_new(":memory:"))');
+          }
+        }
+
+        // ffi: ensure call() third arg is TAG_ARRAY, not TAG_OBJECT
+        if (moduleName === "ffi" && callee.property === "call") {
+          if (args.length >= 3) {
+            // If the third arg is ts_value_object(ts_array_new()), fix to ts_value_array(ts_array_new())
+            args[2] = args[2].replace(/^ts_value_object\(ts_array_new\(\)\)$/, "ts_value_array(ts_array_new())");
           }
         }
 
@@ -3648,7 +3656,61 @@ export class ExpressionEmitter {
       // Resolve imported symbol mangled name
       const imported = this.importedSymbols.get(callee.name);
       if (imported) callName = imported;
-      let args = (node.arguments || []).map((a: CNode) => this.emit(a));
+      // Wrap arguments for imported Node builtin function calls (e.g. dlopen from ffi)
+      const isBuiltinImport = imported && /^(node_(?:fs|path|process|os|http|net|child_process|events|readline|assert|crypto|worker_threads|chalk|sqlite|ffi)_)/.test(imported);
+      let args: string[];
+      if (isBuiltinImport) {
+        args = (node.arguments || []).map((a: CNode) => {
+          const emitted = this.emit(a);
+          if (emitted.startsWith("ts_value_") ||
+              emitted.startsWith("ts_null(") ||
+              emitted.startsWith("ts_undefined(")) {
+            return emitted;
+          }
+          if (a.kind === "function_ref" || a.kind === "arrow_function" || a.kind === "function_expression") {
+            return emitted;
+          }
+          if (a.kind === "string_literal") {
+            return `ts_value_string(${emitted})`;
+          }
+          if (a.kind === "number_literal") {
+            return `ts_value_number(${emitted})`;
+          }
+          if (a.kind === "boolean_literal") {
+            return `ts_value_boolean(${emitted})`;
+          }
+          if (a.kind === "identifier") {
+            const varType = this.varTypes.get(a.name);
+            if (varType === "double" || varType === "number") {
+              return `ts_value_number(${emitted})`;
+            }
+            if (varType === "TSString*" || varType === "string") {
+              return `ts_value_string(${emitted})`;
+            }
+            if (varType === "int" || varType === "boolean") {
+              return `ts_value_boolean(${emitted})`;
+            }
+            if (varType === "Value") {
+              return emitted;
+            }
+          }
+          if (a.kind === "call_expression" ||
+              emitted.startsWith("node_") || emitted.startsWith("ts_value_") ||
+              emitted.startsWith("ts_fetch_") || emitted.startsWith("ts_json_")) {
+            return emitted;
+          }
+          if (a.kind === "object_literal" || a.kind === "array_literal") {
+            return emitted.startsWith("ts_value_") ? emitted : `ts_value_object(${emitted})`;
+          }
+          return `ts_value_string(ts_to_string(${emitted}))`;
+        });
+      } else {
+        args = (node.arguments || []).map((a: CNode) => this.emit(a));
+      }
+      // ffi: ensure call() third arg is TAG_ARRAY, not TAG_OBJECT
+      if (callee.name === "call" && imported?.startsWith("node_ffi_call") && args.length >= 3) {
+        args[2] = args[2].replace(/^ts_value_object\(ts_array_new\(\)\)$/, "ts_value_array(ts_array_new())");
+      }
       // formatHelp(command, config?) — pad missing config
       if (callName.includes("formatHelp") || callee.name === "formatHelp") {
         while (args.length < 2) args.push("ts_value_undefined()");
@@ -3767,7 +3829,7 @@ export class ExpressionEmitter {
     // must emit as function calls: node_process_argv()
     if (node.object.kind === "identifier") {
       const moduleName = node.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi"];
       if (builtinModules.includes(moduleName)) {
         const funcName = `node_${moduleName}_${node.property}`;
         this._lastBuiltinCall = funcName;
@@ -4432,6 +4494,8 @@ export class ExpressionEmitter {
         let val = this.emit(e);
         // Wrap in Value constructor if needed
         if (e.kind === "number_literal") {
+          val = `ts_value_number(${val})`;
+        } else if (e.kind === "unary_expression" && e.operator === "-" && e.operand?.kind === "number_literal") {
           val = `ts_value_number(${val})`;
         } else if (e.kind === "string_literal") {
           val = `ts_value_string(${val})`;

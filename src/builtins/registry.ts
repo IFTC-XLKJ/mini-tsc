@@ -360,6 +360,17 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "unref", cName: "node_worker_threads_unref", signature: "Value node_worker_threads_unref(Value self)" },
     ],
   }],
+  ["ffi", {
+    name: "ffi",
+    headerFile: "node_ffi.h",
+    cSourceFile: "node_ffi.c",
+    functions: [
+      { tsName: "dlopen", cName: "node_ffi_dlopen", signature: "Value node_ffi_dlopen(Value path)" },
+      { tsName: "dlsym", cName: "node_ffi_dlsym", signature: "Value node_ffi_dlsym(Value handle, Value symbol)" },
+      { tsName: "call", cName: "node_ffi_call", signature: "Value node_ffi_call(Value funcPtr, Value returnType, Value args)" },
+      { tsName: "dlclose", cName: "node_ffi_dlclose", signature: "Value node_ffi_dlclose(Value handle)" },
+    ],
+  }],
 ]);
 
 export function getBuiltinModule(name: string): BuiltinModule | undefined {

@@ -603,7 +603,7 @@ export class AstVisitor {
       "fs", "path", "http", "https", "net", "os", "process", "child_process",
       "crypto", "url", "util", "events", "stream", "buffer", "querystring",
       "assert", "constants", "module", "repl", "tty", "zlib", "readline",
-      "worker_threads", "chalk", "sqlite",
+      "worker_threads", "chalk", "sqlite", "ffi",
     ]);
     if (NODE_BUILTINS.has(specifier)) {
       // Default import: import chalk from "chalk"
