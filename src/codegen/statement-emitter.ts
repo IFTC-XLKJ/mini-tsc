@@ -3,6 +3,15 @@ import { ExpressionEmitter, sanitizeCIdentifier } from "./expression-emitter.js"
 
 export class StatementEmitter {
   private exprEmitter = new ExpressionEmitter();
+  private shared = false;
+  private sharedExportPrefix = "";
+
+  setShared(shared: boolean, isWindows = process.platform === "win32"): void {
+    this.shared = shared;
+    this.sharedExportPrefix = shared
+      ? (isWindows ? '__declspec(dllexport) ' : '__attribute__((visibility("default"))) ')
+      : "";
+  }
 
   /** Register a local/global variable type for expression emission (console.log wrapping, etc.) */
   declareVar(name: string, type: string): void {
@@ -86,7 +95,16 @@ export class StatementEmitter {
       : "void";
     // Rename 'main' to avoid conflict with C's main
     const funcName = node.name === "main" ? "entry" : node.name;
-    return `${node.returnType || "void"} ${funcName}(${paramStr});`;
+    const exportAttr = this.sharedExportAttr(funcName);
+    return `${exportAttr}${node.returnType || "void"} ${funcName}(${paramStr});`;
+  }
+
+  /** Windows DLL / ELF visibility for free functions in --shared mode. */
+  private sharedExportAttr(funcName: string | undefined): string {
+    if (!this.shared || !this.sharedExportPrefix || !funcName) return "";
+    // Keep compiler-internal helpers private
+    if (funcName.startsWith("__") || funcName.endsWith("_destructor")) return "";
+    return this.sharedExportPrefix;
   }
 
   emitClassMethods(node: CNode): string {
@@ -125,16 +143,17 @@ export class StatementEmitter {
     this.currentReturnType = prevRet;
     // Rename 'main' to avoid conflict with C's main
     const funcName = node.name === "main" ? "entry" : node.name;
+    const exportAttr = this.sharedExportAttr(funcName);
     // For non-void functions, insert a default return before closing brace
     if (node.body && node.returnType && node.returnType !== "void") {
       const defaultRet = node.returnType === "Value" ? "return ts_value_undefined();" : `return (${node.returnType}){0};`;
       const lastBrace = body.lastIndexOf("}");
       if (lastBrace > 0) {
         const patched = body.slice(0, lastBrace) + " " + defaultRet + " " + body.slice(lastBrace);
-        return `${node.returnType || "void"} ${funcName}(${params}) ${patched}`;
+        return `${exportAttr}${node.returnType || "void"} ${funcName}(${params}) ${patched}`;
       }
     }
-    return `${node.returnType || "void"} ${funcName}(${params}) ${body}`;
+    return `${exportAttr}${node.returnType || "void"} ${funcName}(${params}) ${body}`;
   }
 
   private emitVariableDecl(node: CNode): string {

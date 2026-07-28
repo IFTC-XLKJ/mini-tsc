@@ -23,14 +23,28 @@ export async function init(projectName: string, options: InitOptions): Promise<v
   // Create project directory
   fs.mkdirSync(projectDir, { recursive: true });
 
-  // Create app.json
+  // Create app.json (build holds binary metadata: name, icon, author, …)
   const appJson = {
     name: projectName,
     version: "1.0.0",
     description: "",
+    author: "",
     main: "main.ts",
+    build: {
+      name: projectName,
+      productName: projectName,
+      icon: {
+        win: "icon.ico",
+        linux: "icon.png",
+      },
+      description: "",
+      author: "",
+      company: "",
+      copyright: "",
+      version: "1.0.0",
+    },
     scripts: {
-      build: "mini-tsc compile main.ts",
+      build: `mini-tsc compile main.ts -o ${projectName}`,
       transpile: "mini-tsc transpile main.ts",
     },
   };

@@ -66,9 +66,17 @@ export class CEmitter {
   private mangler = new SymbolMangler();
   /** When set, only these node_*.h headers are #included in generated .c files. */
   private usedBuiltinModules: Set<string> | null = null;
+  /** Shared-library mode: decorate free functions with dllexport / default visibility. */
+  private shared = false;
 
   setUsedBuiltinModules(mods: Set<string> | null): void {
     this.usedBuiltinModules = mods;
+  }
+
+  setShared(shared: boolean, isWindows = process.platform === "win32"): void {
+    this.shared = shared;
+    this.statementEmitter.setShared(shared, isWindows);
+    this.headerEmitter.setShared(shared, isWindows);
   }
 
   emitUnit(unit: TranspilationUnit, moduleInfo: ModuleInfo): EmitFile[] {
@@ -365,6 +373,23 @@ export class CEmitter {
     }
     lines.push('}');
     lines.push('');
+
+    // Synthetic entry export (compiler always registers entry for the root file)
+    // must have a definition when the TS source has no main()/entry().
+    const entryExport = moduleInfo.exports.find(e => e.name === "entry" && !e.isType);
+    if (entryExport) {
+      const entryMangled = entryExport.mangledName;
+      const hasEntryDef = unit.nodes.some(n => {
+        if (n.kind !== "function_decl" || !n.name) return false;
+        const nm = n.name as string;
+        return nm === "entry" || nm === "main" || nm === entryMangled || nm.endsWith("_entry");
+      });
+      if (!hasEntryDef) {
+        lines.push(`/* no user main(): empty program entry for main.c */`);
+        lines.push(`void ${entryMangled}(void) {}`);
+        lines.push('');
+      }
+    }
 
     return lines.join('\n');
   }

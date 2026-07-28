@@ -5,6 +5,21 @@ import { sanitizeCIdentifier } from "./expression-emitter.js";
 
 export class HeaderEmitter {
   private mangler = new SymbolMangler();
+  private shared = false;
+  private sharedExportPrefix = "";
+
+  setShared(shared: boolean, isWindows = process.platform === "win32"): void {
+    this.shared = shared;
+    this.sharedExportPrefix = shared
+      ? (isWindows ? '__declspec(dllexport) ' : '__attribute__((visibility("default"))) ')
+      : "";
+  }
+
+  private sharedExportAttr(funcName: string | undefined): string {
+    if (!this.shared || !this.sharedExportPrefix || !funcName) return "";
+    if (funcName.startsWith("__") || funcName.endsWith("_destructor") || funcName === "entry") return "";
+    return this.sharedExportPrefix;
+  }
 
   emitHeader(
     moduleName: string,
@@ -115,13 +130,14 @@ export class HeaderEmitter {
     // Exported declarations
     for (const exp of exports) {
       if (!exp.isType && exp.name !== "entry") {
+        const expAttr = this.sharedExportAttr(exp.mangledName);
         if (exp.isConstant) {
           const varType = exp.returnType || "Value";
-          lines.push(`extern ${varType} ${exp.mangledName};`);
+          lines.push(`extern ${expAttr}${varType} ${exp.mangledName};`);
         } else if (exp.paramTypes && exp.paramTypes.length > 0) {
-          lines.push(`extern ${exp.returnType || "Value"} ${exp.mangledName}(${exp.paramTypes.join(", ")});`);
+          lines.push(`extern ${expAttr}${exp.returnType || "Value"} ${exp.mangledName}(${exp.paramTypes.join(", ")});`);
         } else if (exp.returnType && exp.returnType !== "Value") {
-          lines.push(`extern ${exp.returnType} ${exp.mangledName}(void);`);
+          lines.push(`extern ${expAttr}${exp.returnType} ${exp.mangledName}(void);`);
         }
       }
     }
@@ -146,7 +162,8 @@ export class HeaderEmitter {
               return `${type} ${name}`;
             })
             .join(", ");
-          const sig = `${node.returnType || "void"} ${funcName}(${paramStr || "void"})`;
+          const expAttr = this.sharedExportAttr(funcName);
+          const sig = `${expAttr}${node.returnType || "void"} ${funcName}(${paramStr || "void"})`;
           if (!emittedSignatures.has(funcName)) {
             emittedSignatures.add(funcName);
             lines.push(`${sig};`);

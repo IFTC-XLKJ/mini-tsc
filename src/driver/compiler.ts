@@ -18,6 +18,23 @@ import {
   type FeatureUsage,
 } from "./feature-usage.js";
 
+/** Optional binary metadata from app.json `build` (name, icon, version info, …). */
+export interface AppBuildMetadata {
+  /** Display / product name (FileDescription ProductName). */
+  name?: string;
+  /** Output binary base name without extension. */
+  productName?: string;
+  /** Absolute or project-relative path to .ico (Windows). */
+  icon?: string;
+  description?: string;
+  author?: string;
+  company?: string;
+  copyright?: string;
+  version?: string;
+  /** Directory containing app.json (for resolving relative icon paths). */
+  appDir?: string;
+}
+
 export interface CompilerOptions {
   entry: string;
   output?: string;
@@ -29,6 +46,8 @@ export interface CompilerOptions {
   keepC?: boolean;
   clangArgs?: string[];
   projectRoot?: string;
+  /** From app.json `build` — embedded into the native binary when supported. */
+  appBuild?: AppBuildMetadata;
 }
 
 export interface CompilerResult {
@@ -198,6 +217,9 @@ export class CompilerDriver {
 
     // Emit C only after we know which builtin headers to include
     cEmitter.setUsedBuiltinModules(featureUsage.modules);
+    const sharedWin =
+      (options.target || process.platform) === "win32" || options.target === "windows";
+    cEmitter.setShared(!!options.shared, sharedWin);
     for (const { unit, moduleInfo } of unitModuleInfos) {
       allFiles.push(...cEmitter.emitUnit(unit, moduleInfo));
     }
@@ -276,10 +298,15 @@ export class CompilerDriver {
       } else {
         ext = isWindows ? ".exe" : "";
       }
-      if (path.isAbsolute(options.output)) {
-        outputPath = options.output + ext;
+      // Prefer productName from app.json when CLI still uses default "output"
+      const outBase =
+        options.appBuild?.productName && (options.output === "output")
+          ? options.appBuild.productName
+          : options.output;
+      if (path.isAbsolute(outBase)) {
+        outputPath = outBase + ext;
       } else {
-        outputPath = path.join(outDir, options.output + ext);
+        outputPath = path.join(outDir, outBase + ext);
       }
     }
 
@@ -1163,6 +1190,10 @@ extern TsErrorContext _ts_current_error;
       outputDir = path.dirname(outputFile);
       outputName = path.basename(outputFile);
     }
+    // app.json build.productName overrides default output name when still "output"
+    if (options.appBuild?.productName && (outputFile === "output" || !options.output)) {
+      outputName = options.appBuild.productName;
+    }
 
     // Write all C files to outDir
     if (!fs.existsSync(outDir)) {
@@ -1326,6 +1357,12 @@ extern TsErrorContext _ts_current_error;
     // LTO needs lld on this toolchain; enables cross-file dead-code elimination.
     const lldFlags = useLld ? ["-fuse-ld=lld", "-flto"] : [];
 
+    // Windows: embed VERSIONINFO (+ optional icon) from app.json build metadata
+    let resourceObj: string | undefined;
+    if (isWindows && !options.shared && options.appBuild) {
+      resourceObj = this.compileWindowsResources(outDir, outputName, options.appBuild, execFileSync);
+    }
+
     const cmd = [
       "clang",
       ...sizeFlags,
@@ -1334,6 +1371,7 @@ extern TsErrorContext _ts_current_error;
       ...(options.shared && isUnix ? ["-fPIC"] : []),
       ...cFiles,
       ...runtimeSrcFiles,
+      ...(resourceObj ? [resourceObj] : []),
       `-I${includeDir}`,
       `-I${runtimeInclude}`,
       `-I${builtinInclude}`,
@@ -1374,6 +1412,115 @@ extern TsErrorContext _ts_current_error;
         }
       }
     }
+  }
+
+  /**
+   * Generate a Windows .rc (VERSIONINFO + optional ICON) and compile via
+   * llvm-rc / windres. Returns a path to link (.res or .o), or undefined.
+   */
+  private compileWindowsResources(
+    outDir: string,
+    outputName: string,
+    meta: AppBuildMetadata,
+    execFileSync: typeof import("child_process").execFileSync,
+  ): string | undefined {
+    const esc = (s: string) =>
+      String(s || "")
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"');
+
+    const version = meta.version || "1.0.0";
+    const parts = version.replace(/^v/i, "").split(/[.\-]/).map(p => parseInt(p, 10) || 0);
+    const [v0, v1, v2, v3] = [parts[0] || 0, parts[1] || 0, parts[2] || 0, parts[3] || 0];
+    const fileVer = `${v0},${v1},${v2},${v3}`;
+    const displayName = meta.name || outputName;
+    const description = meta.description || displayName;
+    const company = meta.company || meta.author || "";
+    const copyright = meta.copyright || (meta.author ? `Copyright (c) ${meta.author}` : "");
+    const productName = meta.productName || displayName;
+
+    let iconLine = "";
+    // icon must be a string path (CLI resolves platform map → string)
+    const iconSpec = typeof meta.icon === "string" ? meta.icon.trim() : "";
+    if (iconSpec) {
+      const iconPath = path.isAbsolute(iconSpec)
+        ? iconSpec
+        : path.resolve(meta.appDir || process.cwd(), iconSpec);
+      if (fs.existsSync(iconPath)) {
+        const rcIcon = iconPath.replace(/\\/g, "/");
+        iconLine = `1 ICON "${rcIcon}"\n`;
+      }
+    }
+
+    const rcContent = `${iconLine}1 VERSIONINFO
+FILEVERSION ${fileVer}
+PRODUCTVERSION ${fileVer}
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "${esc(company)}"
+      VALUE "FileDescription", "${esc(description)}"
+      VALUE "FileVersion", "${esc(version)}"
+      VALUE "InternalName", "${esc(outputName)}"
+      VALUE "LegalCopyright", "${esc(copyright)}"
+      VALUE "OriginalFilename", "${esc(outputName)}.exe"
+      VALUE "ProductName", "${esc(productName)}"
+      VALUE "ProductVersion", "${esc(version)}"
+      VALUE "Author", "${esc(meta.author || company)}"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+`;
+
+    const rcPath = path.join(outDir, `${outputName}_app.rc`);
+    const resPath = path.join(outDir, `${outputName}_app.res`);
+    const objPath = path.join(outDir, `${outputName}_app_res.o`);
+    try {
+      fs.writeFileSync(rcPath, rcContent, "utf-8");
+    } catch {
+      return undefined;
+    }
+
+    // Prefer llvm-rc (.res links directly with clang+lld on Windows), then windres (.o)
+    const attempts: Array<() => string | undefined> = [
+      () => {
+        execFileSync("llvm-rc", ["/fo", resPath, rcPath], { stdio: "pipe" });
+        return fs.existsSync(resPath) ? resPath : undefined;
+      },
+      () => {
+        execFileSync("llvm-rc", [rcPath, `/fo${resPath}`], { stdio: "pipe" });
+        return fs.existsSync(resPath) ? resPath : undefined;
+      },
+      () => {
+        execFileSync(
+          "windres",
+          ["-i", rcPath, "-o", objPath, "--input-format=rc", "--output-format=coff"],
+          { stdio: "pipe" },
+        );
+        return fs.existsSync(objPath) ? objPath : undefined;
+      },
+    ];
+
+    for (const attempt of attempts) {
+      try {
+        const result = attempt();
+        if (typeof result === "string" && result.length > 0) return result;
+      } catch {
+        // try next tool
+      }
+    }
+    return undefined;
   }
 
   private static _lldCached: boolean | undefined;

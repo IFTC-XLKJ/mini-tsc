@@ -1,28 +1,11 @@
-import * as fs from "fs";
-import * as path from "path";
 import { execSync } from "child_process";
+import { loadAppJson, type AppJson } from "./app-json.js";
 
 export interface RunOptions {
   cwd: string;
 }
 
-interface AppJson {
-  name: string;
-  scripts: Record<string, string>;
-}
-
-function loadAppJson(cwd: string): AppJson | null {
-  const appJsonPath = path.join(cwd, "app.json");
-  if (!fs.existsSync(appJsonPath)) {
-    return null;
-  }
-  try {
-    const content = fs.readFileSync(appJsonPath, "utf-8");
-    return JSON.parse(content) as AppJson;
-  } catch {
-    return null;
-  }
-}
+export type { AppJson };
 
 export async function run(scriptName: string, options: RunOptions): Promise<void> {
   const appJson = loadAppJson(options.cwd);

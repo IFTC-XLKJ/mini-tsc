@@ -14,7 +14,7 @@ function main(): void {
 
   // Call the function
   console.log("Calling add function...");
-  const result = call(addFn, "number", [1, 2]);
+  const result = call(addFn, "double", [1, 2]);
   console.log("Add function result:", result); // Should be 3
 
   // Close the library
