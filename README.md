@@ -14,6 +14,8 @@ Not Supported Platform: MacOS
 npm install
 npm run build
 node dist/cli/index.js compile <input_ts_file> -o <output_exec_file>
+# Compile to shared library (.dll on Windows, .so on Linux)
+node dist/cli/index.js compile <input_ts_file> -o <output_exec_file> --shared
 ```
 
 ## Example
