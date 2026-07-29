@@ -18,9 +18,7 @@ function main(): void {
     webView.addJavaScriptInterface("miniTscBridge", {
         greet: (name: string) => {
             console.log("Native greet called:", name);
-        },
-        getTitle: () => {
-            console.log("Native getTitle called");
+            return `Hello, ${name}!`;
         }
     });
     webView.on("ready", () => {
@@ -29,7 +27,7 @@ function main(): void {
     });
     webView.on("load", () => {
         console.log("WebView loaded");
-        webView.executeJavaScript("if (window.miniTscBridge) { window.miniTscBridge.greet('world'); }");
+        webView.executeJavaScript("if (window.miniTscBridge) { window.miniTscBridge.greet('world').then(r => console.log('greet result:', r)); }");
     });
     webView.on("message", (message) => {
         console.log("WebView message:", message);

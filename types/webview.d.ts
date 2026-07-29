@@ -99,12 +99,12 @@ declare module "webview" {
 
     /**
      * Add a host-side JavaScript interface to this WebView.
-     * Native methods will be automatically bridged so that JS can call them via
-     * `window.<name>.<method>(...)`.
+     * Native methods are bridged via WebSocket so that JS can call them
+     * asynchronously via `await window.<name>.<method>(...)`.
      * @param name - Identifier used to track this interface (for removal).
      * @param methods - Map of method names → native callbacks.
      */
-    addJavaScriptInterface(name: string, methods: Record<string, (...args: any[]) => void>): void;
+    addJavaScriptInterface(name: string, methods: Record<string, (...args: any[]) => any>): void;
 
     /**
      * Remove a previously added JavaScript interface and its callbacks.

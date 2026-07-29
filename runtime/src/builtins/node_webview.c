@@ -8,6 +8,8 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
+typedef int socklen_t;
+
 #define CINTERFACE
 #define COBJMACROS
 #include "WebView2.h"
@@ -15,6 +17,17 @@
 #pragma comment(lib, "WebView2Loader.dll.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
+
+/* WebSocket bridge for async addJavaScriptInterface */
+typedef struct {
+  int listen_fd;
+  int client_fd;
+  int port;
+  int handshake_done;
+  char* recv_buf;
+  int recv_len;
+  int recv_cap;
+} WsBridge;
 
 /* WebView2 instance data */
 typedef struct {
@@ -43,6 +56,9 @@ typedef struct {
   TSHashMap* interfaces;
   /* Interface method callbacks: map "name.method" → callback Function */
   TSHashMap* interfaceMethods;
+  /* Async WebSocket bridge */
+  WsBridge* bridge;
+  int wsa_inited;
 } WebViewInstance;
 
 static const wchar_t* CLASS_NAME = L"MiniTscWebView";
@@ -84,6 +100,420 @@ static char* from_wide(const wchar_t* wstr) {
   char* str = (char*)malloc(len);
   if (str) WideCharToMultiByte(CP_UTF8, 0, wstr, -1, str, len, NULL, NULL);
   return str;
+}
+
+/* ==================== WebSocket Bridge ==================== */
+
+static void bridge_ensure_wsa(WebViewInstance* inst) {
+  if (!inst->wsa_inited) {
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    inst->wsa_inited = 1;
+  }
+}
+
+static int bridge_init(WebViewInstance* inst) {
+  if (inst->bridge) return inst->bridge->port;
+  bridge_ensure_wsa(inst);
+  WsBridge* b = (WsBridge*)calloc(1, sizeof(WsBridge));
+  if (!b) return -1;
+  b->listen_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+  if (b->listen_fd < 0) { free(b); return -1; }
+  int opt = 1;
+  setsockopt(b->listen_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+  struct sockaddr_in addr = {0};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = INADDR_ANY;
+  addr.sin_port = 0; /* dynamic */
+  if (bind(b->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    closesocket(b->listen_fd); free(b); return -1;
+  }
+  socklen_t addrlen = sizeof(addr);
+  if (getsockname(b->listen_fd, (struct sockaddr*)&addr, &addrlen) < 0) {
+    closesocket(b->listen_fd); free(b); return -1;
+  }
+  b->port = (int)ntohs(addr.sin_port);
+  if (listen(b->listen_fd, 1) < 0) {
+    closesocket(b->listen_fd); free(b); return -1;
+  }
+  u_long mode = 1;
+  ioctlsocket(b->listen_fd, FIONBIO, &mode);
+  b->client_fd = -1;
+  b->handshake_done = 0;
+  b->recv_cap = 4096;
+  b->recv_buf = (char*)malloc(b->recv_cap);
+  if (b->recv_buf) b->recv_buf[0] = '\0';
+  b->recv_len = 0;
+  inst->bridge = b;
+  fprintf(stderr, "WebView: Bridge server listening on port %d\n", b->port);
+  return b->port;
+}
+
+static void bridge_close_client(WsBridge* b) {
+  if (!b) return;
+  if (b->client_fd >= 0) {
+    closesocket(b->client_fd);
+    b->client_fd = -1;
+  }
+  b->handshake_done = 0;
+  b->recv_len = 0;
+  if (b->recv_buf) b->recv_buf[0] = '\0';
+  fprintf(stderr, "WebView: Bridge client disconnected\n");
+}
+
+static void bridge_shutdown(WebViewInstance* inst) {
+  if (!inst || !inst->bridge) return;
+  WsBridge* b = inst->bridge;
+  bridge_close_client(b);
+  if (b->listen_fd >= 0) { closesocket(b->listen_fd); b->listen_fd = -1; }
+  free(b->recv_buf);
+  free(b);
+  inst->bridge = NULL;
+  fprintf(stderr, "WebView: Bridge server shut down\n");
+}
+
+static int bridge_send_frame(int fd, const char* data, int len) {
+  if (fd < 0) return -1;
+  uint8_t header[10];
+  int hdrlen = 0;
+  header[0] = 0x81; /* FIN + text */
+  if (len < 126) {
+    header[1] = (uint8_t)len;
+    hdrlen = 2;
+  } else if (len <= 0xFFFF) {
+    header[1] = 126;
+    header[2] = (uint8_t)(len >> 8);
+    header[3] = (uint8_t)(len & 0xFF);
+    hdrlen = 4;
+  } else {
+    return -1; /* too large */
+  }
+  if (send(fd, (const char*)header, hdrlen, 0) != hdrlen) return -1;
+  if (len > 0 && send(fd, data, len, 0) != len) return -1;
+  return 0;
+}
+
+static int bridge_recv_raw(int fd, char* buf, int cap) {
+  int total = 0;
+  while (total < cap) {
+    int r = recv(fd, buf + total, cap - total, 0);
+    if (r > 0) total += r;
+    else if (r == 0) return -1; /* closed */
+    else {
+      int err = WSAGetLastError();
+      if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS) break;
+      return -1;
+    }
+  }
+  return total;
+}
+
+/* ---- Inline SHA-1 + Base64 for bridge handshake ---- */
+#define SHA1_BLOCK 64
+typedef struct { uint32_t state[5]; uint64_t count; uint8_t buffer[SHA1_BLOCK]; } BridgeSha1;
+
+static void bridge_sha1_transform(uint32_t state[5], const uint8_t block[64]) {
+  uint32_t a,b,c,d,e,w[80];
+  for (int i = 0; i < 16; i++)
+    w[i] = ((uint32_t)block[i*4]<<24)|((uint32_t)block[i*4+1]<<16)|((uint32_t)block[i*4+2]<<8)|(uint32_t)block[i*4+3];
+  for (int i = 16; i < 80; i++) { uint32_t t = w[i-3]^w[i-8]^w[i-14]^w[i-16]; w[i] = (t<<1)|(t>>31); }
+  a=state[0]; b=state[1]; c=state[2]; d=state[3]; e=state[4];
+  for (int i = 0; i < 80; i++) {
+    uint32_t f,t;
+    if (i<20)      { f=(b&c)|((~b)&d);          t=0x5A827999; }
+    else if (i<40) { f=b^c^d;                    t=0x6ED9EBA1; }
+    else if (i<60) { f=(b&c)|(b&d)|(c&d);        t=0x8F1BBCDC; }
+    else           { f=b^c^d;                    t=0xCA62C1D6; }
+    uint32_t tmp = ((a<<5)|(a>>27))+f+e+t+w[i]; e=d; d=c; c=(b<<30)|(b>>2); b=a; a=tmp;
+  }
+  state[0]+=a; state[1]+=b; state[2]+=c; state[3]+=d; state[4]+=e;
+}
+
+static void bridge_sha1_init(BridgeSha1* h) {
+  h->state[0]=0x67452301; h->state[1]=0xEFCDAB89; h->state[2]=0x98BADCFE; h->state[3]=0x10325476; h->state[4]=0xC3D2E1F0;
+  h->count=0; memset(h->buffer,0,SHA1_BLOCK);
+}
+
+static void bridge_sha1_update(BridgeSha1* h, const uint8_t* data, size_t len) {
+  size_t idx=(size_t)(h->count&63); h->count+=len;
+  for (size_t i=0;i<len;i++) { h->buffer[idx++]=data[i]; if(idx==64){bridge_sha1_transform(h->state,h->buffer);idx=0;} }
+}
+
+static void bridge_sha1_final(BridgeSha1* h, uint8_t digest[20]) {
+  uint64_t bits=h->count*8; uint32_t idx=(uint32_t)(h->count&63);
+  h->buffer[idx++]=0x80;
+  if(idx>56){while(idx<64)h->buffer[idx++]=0;bridge_sha1_transform(h->state,h->buffer);idx=0;}
+  while(idx<56) h->buffer[idx++]=0;
+  h->buffer[56]=(uint8_t)(bits>>24); h->buffer[57]=(uint8_t)(bits>>16);
+  h->buffer[58]=(uint8_t)(bits>>8);  h->buffer[59]=(uint8_t)bits;
+  bridge_sha1_transform(h->state,h->buffer);
+  for(int i=0;i<5;i++){ digest[i*4]=(uint8_t)(h->state[i]>>24); digest[i*4+1]=(uint8_t)(h->state[i]>>16); digest[i*4+2]=(uint8_t)(h->state[i]>>8); digest[i*4+3]=(uint8_t)h->state[i]; }
+}
+
+static const char B64[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void bridge_base64(const uint8_t* data, int len, char* out) {
+  int j=0;
+  for(int i=0;i<len;i+=3){
+    uint32_t a=(uint32_t)data[i];
+    uint32_t b=(i+1<len)?(uint32_t)data[i+1]:0;
+    uint32_t c=(i+2<len)?(uint32_t)data[i+2]:0;
+    uint32_t triple=(a<<16)|(b<<8)|c;
+    out[j++]=B64[(triple>>18)&0x3F];
+    out[j++]=B64[(triple>>12)&0x3F];
+    out[j++]=(i+1<len)?B64[(triple>>6)&0x3F]:'=';
+    out[j++]=(i+2<len)?B64[triple&0x3F]:'=';
+  }
+  out[j]='\0';
+}
+
+static void bridge_append_recv(WsBridge* b, const char* data, int len) {
+  if (!b || !data || len <= 0) return;
+  if (b->recv_len + len > b->recv_cap) {
+    b->recv_cap = b->recv_len + len + 4096;
+    b->recv_buf = (char*)realloc(b->recv_buf, b->recv_cap);
+  }
+  memcpy(b->recv_buf + b->recv_len, data, len);
+  b->recv_len += len;
+}
+
+static int bridge_try_parse_frame(WsBridge* b, char** out_payload, int* out_len) {
+  if (!b || b->recv_len < 2) return 0;
+
+  unsigned char* buf = (unsigned char*)b->recv_buf;
+  int opcode = buf[0] & 0x0F;
+  int masked = buf[1] & 0x80;
+  uint64_t payload_len = buf[1] & 0x7F;
+  int header_len = 2;
+
+  if (payload_len == 126) {
+    header_len += 2;
+    if (b->recv_len < header_len) return 0;
+    payload_len = ((uint64_t)buf[2] << 8) | (uint64_t)buf[3];
+  } else if (payload_len == 127) {
+    header_len += 8;
+    if (b->recv_len < header_len) return 0;
+    payload_len = 0;
+    for (int i = 0; i < 8; i++) {
+      payload_len = (payload_len << 8) | (uint64_t)buf[2 + i];
+    }
+  }
+
+  if (masked) header_len += 4;
+  if (b->recv_len < header_len) return 0;
+
+  if (payload_len > 65536) return -1;
+
+  int total_len = header_len + (int)payload_len;
+  if (b->recv_len < total_len) return 0;
+
+  char* payload = (char*)malloc((size_t)payload_len + 1);
+  if (!payload) return -1;
+
+  if (payload_len > 0) {
+    memcpy(payload, b->recv_buf + header_len, (size_t)payload_len);
+    if (masked) {
+      unsigned char* mask = buf + header_len - 4;
+      for (uint64_t i = 0; i < payload_len; i++) {
+        payload[i] ^= mask[i % 4];
+      }
+    }
+  }
+  payload[payload_len] = '\0';
+
+  int remaining = b->recv_len - total_len;
+  if (remaining > 0) {
+    memmove(b->recv_buf, b->recv_buf + total_len, remaining);
+  }
+  b->recv_len = remaining;
+
+  *out_payload = payload;
+  *out_len = (int)payload_len;
+  return opcode;
+}
+
+static void bridge_handle_handshake(WsBridge* b) {
+  char temp[2048];
+  int n = recv(b->client_fd, temp, sizeof(temp), 0);
+  if (n > 0) {
+    bridge_append_recv(b, temp, n);
+  } else if (n == 0) {
+    bridge_close_client(b);
+    return;
+  } else {
+    int err = WSAGetLastError();
+    if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS) {
+      bridge_close_client(b);
+    }
+    return;
+  }
+
+  if (b->recv_len < 4) return;
+  if (b->recv_len > 8192) { bridge_close_client(b); return; }
+
+  b->recv_buf[b->recv_len] = '\0';
+
+  if (!strstr(b->recv_buf, "\r\n\r\n")) return;
+
+  if (!strstr(b->recv_buf,"Upgrade: websocket") && !strstr(b->recv_buf,"upgrade: websocket")){
+    bridge_close_client(b); return;
+  }
+  char* key_line = strstr(b->recv_buf,"Sec-WebSocket-Key:");
+  if (!key_line) key_line = strstr(b->recv_buf,"sec-websocket-key:");
+  if (!key_line) { bridge_close_client(b); return; }
+  char* ks = key_line + 18;
+  while(*ks==' ' || *ks=='\t') ks++;
+  char key[128]={0}; int ki=0;
+  while(*ks && *ks!='\r' && *ks!='\n' && ki<127) key[ki++]=*ks++;
+
+  const char* GUID="258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  size_t tlen = strlen(key)+strlen(GUID);
+  uint8_t* tmp=(uint8_t*)malloc(tlen);
+  if(!tmp){bridge_close_client(b);return;}
+  memcpy(tmp,key,strlen(key));
+  memcpy(tmp+strlen(key),GUID,strlen(GUID));
+  uint8_t digest[20];
+  BridgeSha1 sha;
+  bridge_sha1_init(&sha);
+  bridge_sha1_update(&sha,tmp,(int)tlen);
+  bridge_sha1_final(&sha,digest);
+  free(tmp);
+  char accept_key[64];
+  bridge_base64(digest,20,accept_key);
+
+  char resp[512];
+  int rlen = snprintf(resp,sizeof(resp),
+    "HTTP/1.1 101 Switching Protocols\r\n"
+    "Upgrade: websocket\r\n"
+    "Connection: Upgrade\r\n"
+    "Sec-WebSocket-Accept: %s\r\n"
+    "\r\n", accept_key);
+  send(b->client_fd, resp, rlen, 0);
+  b->handshake_done = 1;
+  b->recv_len = 0;
+  fprintf(stderr, "WebView: Bridge handshake done\n");
+}
+
+static void bridge_dispatch_message(WebViewInstance* inst, const char* payload, int payload_len) {
+  (void)payload_len;
+  if (!inst || !inst->interfaceMethods || !payload) return;
+
+  TSString* msgStr = ts_string_new(payload);
+  Value parsed = ts_json_parse(msgStr);
+  ts_string_free(msgStr);
+
+  if (parsed.tag != TAG_OBJECT || !parsed.as.object) return;
+
+  TSHashMap* map = (TSHashMap*)parsed.as.object;
+  Value ifVal = ts_hashmap_get(map, ts_string_new("__if"));
+  Value mVal = ts_hashmap_get(map, ts_string_new("__m"));
+  Value aVal = ts_hashmap_get(map, ts_string_new("__a"));
+  Value idVal = ts_hashmap_get(map, ts_string_new("__id"));
+
+  if (ifVal.tag != TAG_STRING || !ifVal.as.string || mVal.tag != TAG_STRING || !mVal.as.string) {
+    return;
+  }
+
+  size_t keyLen = strlen(ifVal.as.string->data) + 1 + strlen(mVal.as.string->data) + 1;
+  char* compositeKey = (char*)malloc(keyLen);
+  if (!compositeKey) return;
+  snprintf(compositeKey, keyLen, "%s.%s", ifVal.as.string->data, mVal.as.string->data);
+  Value cb = ts_hashmap_get(inst->interfaceMethods, ts_string_new(compositeKey));
+  free(compositeKey);
+
+  if ((cb.tag != TAG_FUNCTION || !cb.as.function) &&
+      !(cb.tag == TAG_OBJECT && cb.as.object && *(int32_t*)cb.as.object == BOUND_FN_TAG)) {
+    return;
+  }
+
+  TSArray* argsArr = (aVal.tag == TAG_ARRAY && aVal.as.array) ? aVal.as.array : NULL;
+  int argc = argsArr ? argsArr->length : 0;
+  static Value callArgs[16];
+  for (int i = 0; i < argc && i < 16; i++) {
+    callArgs[i] = ts_array_get(argsArr, i);
+  }
+
+  Value result = ts_value_call(cb, callArgs, argc);
+
+  if (idVal.tag == TAG_STRING && idVal.as.string && idVal.as.string->data &&
+      inst->bridge && inst->bridge->client_fd >= 0 && inst->bridge->handshake_done) {
+    TSString* resultJson = ts_json_stringify(result);
+    char resp[65536];
+    int respLen = snprintf(resp, sizeof(resp), "{\"__id\":\"%s\",\"__res\":%s}",
+                           idVal.as.string->data, resultJson ? resultJson->data : "null");
+    if (resultJson) ts_string_free(resultJson);
+    bridge_send_frame(inst->bridge->client_fd, resp, respLen);
+  }
+
+  fflush(stdout);
+  fflush(stderr);
+}
+
+static void bridge_poll(WebViewInstance* inst) {
+  if (!inst || !inst->bridge) return;
+  WsBridge* b = inst->bridge;
+
+  if (b->client_fd < 0) {
+    struct sockaddr_in addr;
+    int addrlen = sizeof(addr);
+    int fd = (int)accept(b->listen_fd, (struct sockaddr*)&addr, &addrlen);
+    if (fd >= 0) {
+      u_long mode = 1;
+      ioctlsocket(fd, FIONBIO, &mode);
+      b->client_fd = fd;
+      b->handshake_done = 0;
+      b->recv_len = 0;
+      fprintf(stderr, "WebView: Bridge client connected\n");
+    }
+    if (b->client_fd < 0) return;
+  }
+
+  if (!b->handshake_done) {
+    bridge_handle_handshake(b);
+    return;
+  }
+
+  char temp[4096];
+  int n = recv(b->client_fd, temp, sizeof(temp), 0);
+  if (n > 0) {
+    bridge_append_recv(b, temp, n);
+  } else if (n == 0) {
+    bridge_close_client(b);
+    return;
+  } else {
+    int err = WSAGetLastError();
+    if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS) {
+      bridge_close_client(b);
+      return;
+    }
+  }
+
+  while (1) {
+    char* payload = NULL;
+    int payload_len = 0;
+    int opcode = bridge_try_parse_frame(b, &payload, &payload_len);
+    if (opcode == 0) break;
+    if (opcode < 0) {
+      bridge_close_client(b);
+      return;
+    }
+
+    if (opcode == 0x08) {
+      bridge_close_client(b);
+      free(payload);
+      return;
+    }
+    if (opcode == 0x09) {
+      uint8_t pong[2] = {0x8A, 0x00};
+      send(b->client_fd, (char*)pong, 2, 0);
+      free(payload);
+      continue;
+    }
+    if (opcode == 0x01 || opcode == 0x02) {
+      bridge_dispatch_message(inst, payload, payload_len);
+    }
+    free(payload);
+  }
 }
 
 static void webview_emit(WebViewInstance* inst, const char* event, Value* args, int argc) {
@@ -982,6 +1412,9 @@ Value node_webview_close(Value self) {
   }
   DestroyWindow(inst->hwnd);
 
+  /* Shutdown WebSocket bridge */
+  bridge_shutdown(inst);
+
   /* Cleanup C strings (but leave inst itself — runtime/GC owns the object pointer) */
   free(inst->url);
   free(inst->title);
@@ -1000,17 +1433,27 @@ Value node_webview_run(Value self) {
   fprintf(stderr, "WebView: Starting message loop, hwnd=%p\n", inst->hwnd);
 
   MSG msg;
-  int msgCount = 0;
-  while (GetMessage(&msg, NULL, 0, 0)) {
-    msgCount++;
-    if (msgCount <= 5) {
-      fprintf(stderr, "WebView: Message %d: msg=%u hwnd=%p\n", msgCount, msg.message, msg.hwnd);
+  int running = 1;
+  while (running) {
+    while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+      if (msg.message == WM_QUIT) {
+        running = 0;
+        break;
+      }
+      TranslateMessage(&msg);
+      DispatchMessage(&msg);
     }
-    TranslateMessage(&msg);
-    DispatchMessage(&msg);
+    if (!running) break;
+
+    /* Poll WebSocket bridge for async interface messages */
+    if (inst && inst->bridge) {
+      bridge_poll(inst);
+    }
+
+    Sleep(5);
   }
 
-  fprintf(stderr, "WebView: Message loop ended, total messages: %d\n", msgCount);
+  fprintf(stderr, "WebView: Message loop ended\n");
   return ts_value_undefined();
 }
 
@@ -1112,40 +1555,48 @@ static char* sb_take(StrBuilder* sb) {
   return result;
 }
 
-/* Context passed to build_script_cb */
-typedef struct {
-  const char* name;
+static char* build_interface_script(const char* name, TSHashMap* methods, int port) {
   StrBuilder sb;
-} BuildScriptCtx;
+  sb_init(&sb);
+  if (!sb.buf) return NULL;
 
-static void build_script_cb(TSString* key, Value value, void* ctx) {
-  (void)value;
-  BuildScriptCtx* b = (BuildScriptCtx*)ctx;
-  sb_append(&b->sb, "window.");
-  sb_append(&b->sb, b->name);
-  sb_append(&b->sb, " = window.");
-  sb_append(&b->sb, b->name);
-  sb_append(&b->sb, " || {};\nwindow.");
-  sb_append(&b->sb, b->name);
-  sb_append(&b->sb, "[\"");
-  sb_append(&b->sb, key->data);
-  sb_append(&b->sb, "\"] = function(...args) {\n"
-                    "  if (typeof window.chrome !== 'undefined' && window.chrome.webview) {\n"
-                    "    window.chrome.webview.postMessage(JSON.stringify({__if:\"");
-  sb_append(&b->sb, b->name);
-  sb_append(&b->sb, "\",__m:\"");
-  sb_append(&b->sb, key->data);
-  sb_append(&b->sb, "\",__a:args}));\n"
-                    "  }\n"
-                    "};\n");
-}
+  sb_append(&sb, "(function() {\n");
+  sb_append(&sb, "  var name = \""); sb_append(&sb, name); sb_append(&sb, "\";\n");
+  sb_append(&sb, "  var ws = null, pending = {}, queue = [], connected = false;\n");
+  sb_append(&sb, "  function gid() { return Math.random().toString(36).substring(2,11)+Date.now().toString(36); }\n");
+  sb_append(&sb, "  function flush() { while(queue.length&&ws&&ws.readyState===1){ws.send(queue.shift());} }\n");
+  sb_append(&sb, "  function onmsg(ev){var d=JSON.parse(ev.data);if(d.__id&&pending[d.__id]){if(d.__err){pending[d.__id].rej(new Error(d.__err));}else{pending[d.__id].res(d.__res);}delete pending[d.__id];}}\n");
+  sb_append(&sb, "  function conn(){connected=false;ws=new WebSocket('ws://127.0.0.1:");
 
-static char* build_interface_script(const char* name, TSHashMap* methods) {
-  BuildScriptCtx ctx = { .name = name };
-  sb_init(&ctx.sb);
-  if (!ctx.sb.buf) return NULL;
-  ts_hashmap_for_each(methods, build_script_cb, &ctx);
-  return sb_take(&ctx.sb);
+  char port_str[16];
+  snprintf(port_str, sizeof(port_str), "%d", port);
+  sb_append(&sb, port_str);
+
+  sb_append(&sb, "');ws.onopen=function(){connected=true;flush();};ws.onmessage=onmsg;ws.onclose=function(){setTimeout(conn,500);};ws.onerror=function(){ws.close();};}\n");
+  sb_append(&sb, "  conn();\n");
+  sb_append(&sb, "  window[name] = window[name] || {};\n");
+
+  for (int32_t i = 0; i < methods->capacity; i++) {
+    if (!methods->entries[i].occupied) continue;
+    TSString* key = methods->entries[i].key;
+    sb_append(&sb, "  window[name][\"");
+    sb_append(&sb, key->data);
+    sb_append(&sb, "\"] = function() {\n");
+    sb_append(&sb, "    return new Promise(function(res, rej) {\n");
+    sb_append(&sb, "      var id = gid(), args = Array.prototype.slice.call(arguments);\n");
+    sb_append(&sb, "      var msg = JSON.stringify({__if:name,__m:\"");
+    sb_append(&sb, key->data);
+    sb_append(&sb, "\",__a:args,__id:id});\n");
+    sb_append(&sb, "      pending[id] = {res:res, rej:rej};\n");
+    sb_append(&sb, "      if (connected && ws && ws.readyState === 1) ws.send(msg);\n");
+    sb_append(&sb, "      else queue.push(msg);\n");
+    sb_append(&sb, "      setTimeout(function(){if(pending[id]){delete pending[id];rej(new Error('Timeout'));}}, 30000);\n");
+    sb_append(&sb, "    });\n");
+    sb_append(&sb, "  };\n");
+  }
+
+  sb_append(&sb, "})();\n");
+  return sb_take(&sb);
 }
 
 Value node_webview_addJavaScriptInterface(Value self, Value name, Value methods) {
@@ -1156,6 +1607,13 @@ Value node_webview_addJavaScriptInterface(Value self, Value name, Value methods)
 
   TSHashMap* methodsMap = (TSHashMap*)methods.as.object;
   const char* ifName = name.as.string->data;
+
+  /* Initialize WebSocket bridge */
+  int port = bridge_init(inst);
+  if (port < 0) {
+    fprintf(stderr, "WebView: Failed to initialize bridge\n");
+    return ts_value_undefined();
+  }
 
   /* Store callbacks */
   if (!inst->interfaceMethods) {
@@ -1174,7 +1632,7 @@ Value node_webview_addJavaScriptInterface(Value self, Value name, Value methods)
   }
 
   /* Build JS shim and store for re-injection on every navigation */
-  char* jsCode = build_interface_script(ifName, methodsMap);
+  char* jsCode = build_interface_script(ifName, methodsMap, port);
   if (!jsCode) return ts_value_undefined();
 
   if (!inst->interfaces) {
