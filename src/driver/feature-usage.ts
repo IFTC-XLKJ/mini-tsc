@@ -456,6 +456,8 @@ export function analyzeFeatureUsage(
             addMethod(usage, "node_webview_on");
             addMethod(usage, "node_webview_show");
             addMethod(usage, "node_webview_close");
+            addMethod(usage, "node_webview_addJavaScriptInterface");
+            addMethod(usage, "node_webview_removeJavaScriptInterface");
           }
         }
 
@@ -578,6 +580,7 @@ export function analyzeFeatureUsage(
             "setTitle", "setSize", "setIcon", "setPosition", "center",
             "show", "hide", "focus", "minimize", "maximize", "unmaximize",
             "close", "run", "on", "once", "off",
+            "addJavaScriptInterface", "removeJavaScriptInterface",
           ];
           if (wvMethods.includes(m) &&
               (/webview|^wv$|window/i.test(obj) ||
@@ -759,6 +762,11 @@ export function analyzeFeatureUsage(
     usage.features.add("hashmap");
     usage.features.add("array");
     usage.features.add("json"); // deep-clone via JSON for cross-thread messages
+  }
+
+  // webview: JSON parser needed for addJavaScriptInterface message dispatch
+  if (usage.modules.has("webview")) {
+    usage.features.add("json");
   }
 
   // sqlite: keep open/Database + SQL/CRUD ops when module is used

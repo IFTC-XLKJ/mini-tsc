@@ -34,4 +34,8 @@ Value node_webview_off(Value self, Value event, Value callback);
 Value node_webview_get_ready(Value self);
 Value node_webview_get_url(Value self);
 
+/* JavaScript interface injection */
+Value node_webview_addJavaScriptInterface(Value self, Value name, Value code);
+Value node_webview_removeJavaScriptInterface(Value self, Value name);
+
 #endif /* NODE_WEBVIEW_H */

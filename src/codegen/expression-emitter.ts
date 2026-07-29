@@ -2745,6 +2745,7 @@ export class ExpressionEmitter {
           "setTitle", "setSize", "setIcon", "setPosition", "center",
           "show", "hide", "focus", "minimize", "maximize", "unmaximize",
           "close", "run", "on", "once", "off",
+          "addJavaScriptInterface", "removeJavaScriptInterface",
         ]);
         const looksLikeWebView =
           /webview|^wv$|window/i.test(objectName || "") ||
@@ -2770,6 +2771,10 @@ export class ExpressionEmitter {
           const callArgs = (node.arguments || []).map(wrapArg);
           if (methodName === "setSize" || methodName === "setPosition") {
             while (callArgs.length < 2) callArgs.push("ts_value_number(0)");
+            return `node_webview_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]})`;
+          }
+          if (methodName === "addJavaScriptInterface") {
+            while (callArgs.length < 2) callArgs.push("ts_value_null()");
             return `node_webview_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]})`;
           }
           if (methodName === "on" || methodName === "once" || methodName === "off") {

@@ -15,16 +15,24 @@ function main(): void {
         transparent: true,
         devTools: true,
     });
-    webView.run();
+    webView.addJavaScriptInterface("miniTscBridge", {
+        greet: (name: string) => {
+            console.log("Native greet called:", name);
+        },
+        getTitle: () => {
+            console.log("Native getTitle called");
+        }
+    });
     webView.on("ready", () => {
         console.log("WebView ready");
         webView.executeJavaScript("console.log('Hello from my_app!');");
     });
-    webView.on("message", (message) => {
-        console.log("WebView message:", message);
-    });
     webView.on("load", () => {
         console.log("WebView loaded");
+        webView.executeJavaScript("if (window.miniTscBridge) { window.miniTscBridge.greet('world'); }");
+    });
+    webView.on("message", (message) => {
+        console.log("WebView message:", message);
     });
     webView.on("navigate", () => {
         console.log("WebView navigate");
@@ -41,6 +49,8 @@ function main(): void {
     webView.on("close", () => {
         console.log("WebView closed");
     });
+    webView.run();
+
     const webView2 = new WebView({
         url: "https://iftc.koyeb.app/mini-tsc",
         width: 800,

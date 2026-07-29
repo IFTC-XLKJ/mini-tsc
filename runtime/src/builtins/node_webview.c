@@ -1,8 +1,12 @@
 #include "node_webview.h"
 #include <stdio.h>
 #include <string.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <commctrl.h>
+
+#pragma comment(lib, "ws2_32.lib")
 
 #define CINTERFACE
 #define COBJMACROS
@@ -28,6 +32,17 @@ typedef struct {
   int frame;        /* 1 = show window frame (default), 0 = frameless */
   int transparent;  /* 1 = transparent background, 0 = opaque (default) */
   int devTools;     /* 1 = open devtools (default), 0 = hide devtools */
+  /* Event listeners: map eventName → array of functions */
+  TSHashMap* listeners;
+  /* COM event tokens for cleanup */
+  EventRegistrationToken token_nav_completed;
+  EventRegistrationToken token_source_changed;
+  EventRegistrationToken token_web_message;
+  EventRegistrationToken token_title_changed;
+  /* JavaScript interfaces: map name → JS shim script string */
+  TSHashMap* interfaces;
+  /* Interface method callbacks: map "name.method" → callback Function */
+  TSHashMap* interfaceMethods;
 } WebViewInstance;
 
 static const wchar_t* CLASS_NAME = L"MiniTscWebView";
@@ -62,6 +77,29 @@ static void register_class(void) {
   RegisterClassExW(&wc);
 }
 
+/* Convert wchar_t* to char* (caller must free) */
+static char* from_wide(const wchar_t* wstr) {
+  if (!wstr) return NULL;
+  int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
+  char* str = (char*)malloc(len);
+  if (str) WideCharToMultiByte(CP_UTF8, 0, wstr, -1, str, len, NULL, NULL);
+  return str;
+}
+
+static void webview_emit(WebViewInstance* inst, const char* event, Value* args, int argc) {
+  if (!inst || !inst->listeners) return;
+  Value arr = ts_hashmap_get(inst->listeners, ts_string_new(event));
+  if (arr.tag == TAG_ARRAY && arr.as.array) {
+    TSArray* a = arr.as.array;
+    for (int i = 0; i < a->length; i++) {
+      Value fn = ts_array_get(a, i);
+      ts_value_call(fn, args, argc);
+    }
+  }
+  fflush(stdout);
+  fflush(stderr);
+}
+
 /* Window procedure */
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   WebViewInstance* inst = (WebViewInstance*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
@@ -88,12 +126,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         RECT bounds;
         GetClientRect(hwnd, &bounds);
         ICoreWebView2Controller_put_Bounds(inst->controller, bounds);
+        if (inst) {
+          Value w = ts_value_number((double)(bounds.right - bounds.left));
+          Value h = ts_value_number((double)(bounds.bottom - bounds.top));
+          Value args[2] = { w, h };
+          webview_emit(inst, "resize", args, 2);
+        }
       }
       return 0;
     case WM_DESTROY:
       PostQuitMessage(0);
       return 0;
     case WM_CLOSE:
+      if (inst) {
+        webview_emit(inst, "close", NULL, 0);
+      }
       if (inst && inst->controller) {
         ICoreWebView2Controller_Close(inst->controller);
       }
@@ -117,6 +164,218 @@ static void navigate_to_url(WebViewInstance* inst) {
     free(wurl);
   }
 }
+
+/* ==================== COM Event Handlers ==================== */
+
+/* --- NavigationCompleted → "load" --- */
+typedef struct {
+  ICoreWebView2NavigationCompletedEventHandler handler;
+  WebViewInstance* inst;
+} NavCompletedHandler;
+
+static HRESULT STDMETHODCALLTYPE NavCompleted_QueryInterface(
+    ICoreWebView2NavigationCompletedEventHandler* This, REFIID riid, void** ppv) {
+  if (!ppv) return E_POINTER;
+  *ppv = NULL;
+  if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_ICoreWebView2NavigationCompletedEventHandler)) {
+    *ppv = This;
+    This->lpVtbl->AddRef(This);
+    return S_OK;
+  }
+  return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE NavCompleted_AddRef(ICoreWebView2NavigationCompletedEventHandler* This) { (void)This; return 1; }
+static ULONG STDMETHODCALLTYPE NavCompleted_Release(ICoreWebView2NavigationCompletedEventHandler* This) { (void)This; return 1; }
+static HRESULT STDMETHODCALLTYPE NavCompleted_Invoke(
+    ICoreWebView2NavigationCompletedEventHandler* This,
+    ICoreWebView2* sender, ICoreWebView2NavigationCompletedEventArgs* args) {
+  (void)sender; (void)args;
+  NavCompletedHandler* h = (NavCompletedHandler*)This;
+  /* Re-inject interface scripts for the newly loaded document */
+  if (h->inst && h->inst->interfaces && h->inst->webview) {
+    for (size_t i = 0; i < h->inst->interfaces->capacity; i++) {
+      if (h->inst->interfaces->entries[i].occupied) {
+        Value val = h->inst->interfaces->entries[i].value;
+        if (val.tag == TAG_STRING && val.as.string && val.as.string->data) {
+          wchar_t* wcode = to_wide(val.as.string->data);
+          if (wcode) {
+            ICoreWebView2_ExecuteScript(h->inst->webview, wcode, NULL);
+            free(wcode);
+          }
+        }
+      }
+    }
+  }
+  webview_emit(h->inst, "load", NULL, 0);
+  return S_OK;
+}
+static ICoreWebView2NavigationCompletedEventHandlerVtbl navCompletedVtbl = {
+  NavCompleted_QueryInterface, NavCompleted_AddRef, NavCompleted_Release, NavCompleted_Invoke
+};
+
+/* --- SourceChanged → "navigate" --- */
+typedef struct {
+  ICoreWebView2SourceChangedEventHandler handler;
+  WebViewInstance* inst;
+} SourceChangedHandler;
+
+static HRESULT STDMETHODCALLTYPE SourceChanged_QueryInterface(
+    ICoreWebView2SourceChangedEventHandler* This, REFIID riid, void** ppv) {
+  if (!ppv) return E_POINTER;
+  *ppv = NULL;
+  if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_ICoreWebView2SourceChangedEventHandler)) {
+    *ppv = This;
+    This->lpVtbl->AddRef(This);
+    return S_OK;
+  }
+  return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE SourceChanged_AddRef(ICoreWebView2SourceChangedEventHandler* This) { (void)This; return 1; }
+static ULONG STDMETHODCALLTYPE SourceChanged_Release(ICoreWebView2SourceChangedEventHandler* This) { (void)This; return 1; }
+static HRESULT STDMETHODCALLTYPE SourceChanged_Invoke(
+    ICoreWebView2SourceChangedEventHandler* This,
+    ICoreWebView2* sender, ICoreWebView2SourceChangedEventArgs* args) {
+  (void)args;
+  SourceChangedHandler* h = (SourceChangedHandler*)This;
+  char* url = NULL;
+  if (sender) {
+    LPWSTR urlW = NULL;
+    ICoreWebView2_get_Source(sender, &urlW);
+    if (urlW) {
+      url = from_wide(urlW);
+      CoTaskMemFree(urlW);
+    }
+  }
+  Value arg = ts_value_string(ts_string_new(url ? url : ""));
+  Value argsArr[1] = { arg };
+  webview_emit(h->inst, "navigate", argsArr, 1);
+  free(url);
+  return S_OK;
+}
+static ICoreWebView2SourceChangedEventHandlerVtbl sourceChangedVtbl = {
+  SourceChanged_QueryInterface, SourceChanged_AddRef, SourceChanged_Release, SourceChanged_Invoke
+};
+
+/* --- WebMessageReceived → "message" --- */
+typedef struct {
+  ICoreWebView2WebMessageReceivedEventHandler handler;
+  WebViewInstance* inst;
+} WebMessageReceivedHandler;
+
+static HRESULT STDMETHODCALLTYPE WebMsg_QueryInterface(
+    ICoreWebView2WebMessageReceivedEventHandler* This, REFIID riid, void** ppv) {
+  if (!ppv) return E_POINTER;
+  *ppv = NULL;
+  if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_ICoreWebView2WebMessageReceivedEventHandler)) {
+    *ppv = This;
+    This->lpVtbl->AddRef(This);
+    return S_OK;
+  }
+  return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE WebMsg_AddRef(ICoreWebView2WebMessageReceivedEventHandler* This) { (void)This; return 1; }
+static ULONG STDMETHODCALLTYPE WebMsg_Release(ICoreWebView2WebMessageReceivedEventHandler* This) { (void)This; return 1; }
+static HRESULT STDMETHODCALLTYPE WebMsg_Invoke(
+    ICoreWebView2WebMessageReceivedEventHandler* This,
+    ICoreWebView2* sender, ICoreWebView2WebMessageReceivedEventArgs* args) {
+  (void)sender;
+  WebMessageReceivedHandler* h = (WebMessageReceivedHandler*)This;
+  char* msg = NULL;
+  if (args) {
+    LPWSTR msgW = NULL;
+    ICoreWebView2WebMessageReceivedEventArgs_TryGetWebMessageAsString(args, &msgW);
+    if (msgW) {
+      msg = from_wide(msgW);
+      CoTaskMemFree(msgW);
+    }
+  }
+  int interfaceDispatched = 0;
+  if (msg && h->inst && h->inst->interfaceMethods) {
+    TSString* msgStr = ts_string_new(msg);
+    Value parsed = ts_json_parse(msgStr);
+    ts_string_free(msgStr);
+    if (parsed.tag == TAG_OBJECT && parsed.as.object) {
+      TSHashMap* map = (TSHashMap*)parsed.as.object;
+      Value ifVal = ts_hashmap_get(map, ts_string_new("__if"));
+      Value mVal = ts_hashmap_get(map, ts_string_new("__m"));
+      Value aVal = ts_hashmap_get(map, ts_string_new("__a"));
+      if (ifVal.tag == TAG_STRING && ifVal.as.string && mVal.tag == TAG_STRING && mVal.as.string) {
+        size_t keyLen = strlen(ifVal.as.string->data) + 1 + strlen(mVal.as.string->data) + 1;
+        char* compositeKey = (char*)malloc(keyLen);
+        if (compositeKey) {
+          snprintf(compositeKey, keyLen, "%s.%s", ifVal.as.string->data, mVal.as.string->data);
+          Value cb = ts_hashmap_get(h->inst->interfaceMethods, ts_string_new(compositeKey));
+          free(compositeKey);
+          if ((cb.tag == TAG_FUNCTION && cb.as.function) || (cb.tag == TAG_OBJECT && cb.as.object && *(int32_t*)cb.as.object == BOUND_FN_TAG)) {
+            TSArray* argsArr = (aVal.tag == TAG_ARRAY && aVal.as.array) ? aVal.as.array : NULL;
+            int argc = argsArr ? argsArr->length : 0;
+            static Value callArgs[16];
+            for (int i = 0; i < argc && i < 16; i++) {
+              callArgs[i] = ts_array_get(argsArr, i);
+            }
+            ts_value_call(cb, callArgs, argc);
+            interfaceDispatched = 1;
+            fflush(stdout);
+            fflush(stderr);
+          }
+        }
+      }
+    }
+  }
+  if (!interfaceDispatched) {
+    Value arg = ts_value_string(ts_string_new(msg ? msg : ""));
+    Value argsArr[1] = { arg };
+    webview_emit(h->inst, "message", argsArr, 1);
+  }
+  free(msg);
+  return S_OK;
+}
+static ICoreWebView2WebMessageReceivedEventHandlerVtbl webMsgVtbl = {
+  WebMsg_QueryInterface, WebMsg_AddRef, WebMsg_Release, WebMsg_Invoke
+};
+
+/* --- DocumentTitleChanged → "title" --- */
+typedef struct {
+  ICoreWebView2DocumentTitleChangedEventHandler handler;
+  WebViewInstance* inst;
+} TitleChangedHandler;
+
+static HRESULT STDMETHODCALLTYPE TitleChanged_QueryInterface(
+    ICoreWebView2DocumentTitleChangedEventHandler* This, REFIID riid, void** ppv) {
+  if (!ppv) return E_POINTER;
+  *ppv = NULL;
+  if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_ICoreWebView2DocumentTitleChangedEventHandler)) {
+    *ppv = This;
+    This->lpVtbl->AddRef(This);
+    return S_OK;
+  }
+  return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE TitleChanged_AddRef(ICoreWebView2DocumentTitleChangedEventHandler* This) { (void)This; return 1; }
+static ULONG STDMETHODCALLTYPE TitleChanged_Release(ICoreWebView2DocumentTitleChangedEventHandler* This) { (void)This; return 1; }
+static HRESULT STDMETHODCALLTYPE TitleChanged_Invoke(
+    ICoreWebView2DocumentTitleChangedEventHandler* This,
+    ICoreWebView2* sender, IUnknown* args) {
+  (void)args;
+  TitleChangedHandler* h = (TitleChangedHandler*)This;
+  char* title = NULL;
+  if (sender) {
+    LPWSTR titleW = NULL;
+    ICoreWebView2_get_DocumentTitle(sender, &titleW);
+    if (titleW) {
+      title = from_wide(titleW);
+      CoTaskMemFree(titleW);
+    }
+  }
+  Value arg = ts_value_string(ts_string_new(title ? title : ""));
+  Value argsArr[1] = { arg };
+  webview_emit(h->inst, "title", argsArr, 1);
+  free(title);
+  return S_OK;
+}
+static ICoreWebView2DocumentTitleChangedEventHandlerVtbl titleChangedVtbl = {
+  TitleChanged_QueryInterface, TitleChanged_AddRef, TitleChanged_Release, TitleChanged_Invoke
+};
 
 /* Controller completion handler vtable - forward declarations */
 static HRESULT STDMETHODCALLTYPE ControllerCreatedHandler_QueryInterface(
@@ -226,6 +485,7 @@ static HRESULT STDMETHODCALLTYPE ControllerCreatedHandler_Invoke(
     HRESULT hrSettings = ICoreWebView2_get_Settings(inst->webview, &settings);
     if (SUCCEEDED(hrSettings) && settings) {
       ICoreWebView2Settings_put_AreDevToolsEnabled(settings, TRUE);
+      ICoreWebView2Settings_put_IsWebMessageEnabled(settings, TRUE);
       ICoreWebView2Settings_Release(settings);
       fprintf(stderr, "WebView: DevTools enabled\n");
     }
@@ -237,6 +497,56 @@ static HRESULT STDMETHODCALLTYPE ControllerCreatedHandler_Invoke(
       fprintf(stderr, "WebView: Failed to open DevTools: 0x%08lx\n", hrDevTools);
     }
   }
+
+  /* Register COM event handlers */
+  {
+    NavCompletedHandler* nc = (NavCompletedHandler*)malloc(sizeof(NavCompletedHandler));
+    if (nc) {
+      nc->handler.lpVtbl = &navCompletedVtbl;
+      nc->inst = inst;
+      ICoreWebView2_add_NavigationCompleted(inst->webview, &nc->handler, &inst->token_nav_completed);
+    }
+
+    SourceChangedHandler* sc = (SourceChangedHandler*)malloc(sizeof(SourceChangedHandler));
+    if (sc) {
+      sc->handler.lpVtbl = &sourceChangedVtbl;
+      sc->inst = inst;
+      ICoreWebView2_add_SourceChanged(inst->webview, &sc->handler, &inst->token_source_changed);
+    }
+
+    WebMessageReceivedHandler* wm = (WebMessageReceivedHandler*)malloc(sizeof(WebMessageReceivedHandler));
+    if (wm) {
+      wm->handler.lpVtbl = &webMsgVtbl;
+      wm->inst = inst;
+      ICoreWebView2_add_WebMessageReceived(inst->webview, &wm->handler, &inst->token_web_message);
+    }
+
+    TitleChangedHandler* tc = (TitleChangedHandler*)malloc(sizeof(TitleChangedHandler));
+    if (tc) {
+      tc->handler.lpVtbl = &titleChangedVtbl;
+      tc->inst = inst;
+      ICoreWebView2_add_DocumentTitleChanged(inst->webview, &tc->handler, &inst->token_title_changed);
+    }
+  }
+
+  /* Re-inject any existing interface scripts into current page */
+  if (inst->interfaces && inst->webview) {
+    for (size_t i = 0; i < inst->interfaces->capacity; i++) {
+      if (inst->interfaces->entries[i].occupied) {
+        Value val = inst->interfaces->entries[i].value;
+        if (val.tag == TAG_STRING && val.as.string && val.as.string->data) {
+          wchar_t* wcode = to_wide(val.as.string->data);
+          if (wcode) {
+            ICoreWebView2_ExecuteScript(inst->webview, wcode, NULL);
+            free(wcode);
+          }
+        }
+      }
+    }
+  }
+
+  /* Emit ready event */
+  webview_emit(inst, "ready", NULL, 0);
 
   return S_OK;
 }
@@ -659,10 +969,23 @@ Value node_webview_unmaximize(Value self) {
 Value node_webview_close(Value self) {
   WebViewInstance* inst = (WebViewInstance*)self.as.object;
   if (!inst || !inst->hwnd) return ts_value_undefined();
+
+  if (inst->webview) {
+    ICoreWebView2_remove_NavigationCompleted(inst->webview, inst->token_nav_completed);
+    ICoreWebView2_remove_SourceChanged(inst->webview, inst->token_source_changed);
+    ICoreWebView2_remove_WebMessageReceived(inst->webview, inst->token_web_message);
+    ICoreWebView2_remove_DocumentTitleChanged(inst->webview, inst->token_title_changed);
+  }
+
   if (inst->controller) {
     ICoreWebView2Controller_Close(inst->controller);
   }
   DestroyWindow(inst->hwnd);
+
+  /* Cleanup C strings (but leave inst itself — runtime/GC owns the object pointer) */
+  free(inst->url);
+  free(inst->title);
+  free(inst->icon);
   return ts_value_undefined();
 }
 
@@ -692,19 +1015,55 @@ Value node_webview_run(Value self) {
 }
 
 Value node_webview_on(Value self, Value event, Value callback) {
-  (void)self; (void)event; (void)callback;
-  /* TODO: Implement event handling */
-  return ts_value_undefined();
+  if (self.tag != TAG_OBJECT || !self.as.object) return self;
+  WebViewInstance* inst = (WebViewInstance*)self.as.object;
+  if (!inst) return self;
+
+  if (!inst->listeners) {
+    inst->listeners = ts_hashmap_new();
+  }
+
+  TSString* evName = ts_to_string(event);
+  if (!evName) return self;
+
+  Value arr = ts_hashmap_get(inst->listeners, evName);
+  if (arr.tag != TAG_ARRAY || !arr.as.array) {
+    arr = ts_value_array(ts_array_new());
+    ts_hashmap_set(inst->listeners, evName, arr);
+  }
+  ts_array_push(arr.as.array, callback);
+  return self;
 }
 
 Value node_webview_once(Value self, Value event, Value callback) {
+  /* For simplicity, same as on (full implementation would track once flag) */
   return node_webview_on(self, event, callback);
 }
 
 Value node_webview_off(Value self, Value event, Value callback) {
-  (void)self; (void)event; (void)callback;
-  /* TODO: Implement event removal */
-  return ts_value_undefined();
+  if (self.tag != TAG_OBJECT || !self.as.object) return self;
+  WebViewInstance* inst = (WebViewInstance*)self.as.object;
+  if (!inst || !inst->listeners) return self;
+
+  TSString* evName = ts_to_string(event);
+  if (!evName) return self;
+
+  Value arr = ts_hashmap_get(inst->listeners, evName);
+  if (arr.tag != TAG_ARRAY || !arr.as.array) return self;
+
+  TSArray* old = arr.as.array;
+  TSArray* neu = ts_array_new();
+  int removed = 0;
+  for (int i = 0; i < old->length; i++) {
+    Value fn = ts_array_get(old, i);
+    if (!removed && fn.tag == callback.tag && fn.as.function == callback.as.function) {
+      removed = 1;
+      continue;
+    }
+    ts_array_push(neu, fn);
+  }
+  ts_hashmap_set(inst->listeners, evName, ts_value_array(neu));
+  return self;
 }
 
 Value node_webview_get_ready(Value self) {
@@ -717,4 +1076,164 @@ Value node_webview_get_url(Value self) {
   WebViewInstance* inst = (WebViewInstance*)self.as.object;
   if (!inst || !inst->url) return ts_value_string(ts_string_new(""));
   return ts_value_string(ts_string_new(inst->url));
+}
+
+/* helper: dynamic string builder */
+typedef struct {
+  char* buf;
+  size_t cap;
+  size_t len;
+} StrBuilder;
+
+static void sb_init(StrBuilder* sb) {
+  sb->cap = 256;
+  sb->buf = (char*)malloc(sb->cap);
+  sb->len = 0;
+  if (sb->buf) sb->buf[0] = '\0';
+}
+
+static void sb_append(StrBuilder* sb, const char* text) {
+  if (!sb->buf) return;
+  size_t tlen = strlen(text);
+  while (sb->len + tlen + 1 > sb->cap) {
+    sb->cap = sb->cap * 2 + tlen + 1;
+    sb->buf = (char*)realloc(sb->buf, sb->cap);
+  }
+  memcpy(sb->buf + sb->len, text, tlen);
+  sb->len += tlen;
+  sb->buf[sb->len] = '\0';
+}
+
+static char* sb_take(StrBuilder* sb) {
+  char* result = sb->buf;
+  sb->buf = NULL;
+  sb->cap = 0;
+  sb->len = 0;
+  return result;
+}
+
+/* Context passed to build_script_cb */
+typedef struct {
+  const char* name;
+  StrBuilder sb;
+} BuildScriptCtx;
+
+static void build_script_cb(TSString* key, Value value, void* ctx) {
+  (void)value;
+  BuildScriptCtx* b = (BuildScriptCtx*)ctx;
+  sb_append(&b->sb, "window.");
+  sb_append(&b->sb, b->name);
+  sb_append(&b->sb, " = window.");
+  sb_append(&b->sb, b->name);
+  sb_append(&b->sb, " || {};\nwindow.");
+  sb_append(&b->sb, b->name);
+  sb_append(&b->sb, "[\"");
+  sb_append(&b->sb, key->data);
+  sb_append(&b->sb, "\"] = function(...args) {\n"
+                    "  if (typeof window.chrome !== 'undefined' && window.chrome.webview) {\n"
+                    "    window.chrome.webview.postMessage(JSON.stringify({__if:\"");
+  sb_append(&b->sb, b->name);
+  sb_append(&b->sb, "\",__m:\"");
+  sb_append(&b->sb, key->data);
+  sb_append(&b->sb, "\",__a:args}));\n"
+                    "  }\n"
+                    "};\n");
+}
+
+static char* build_interface_script(const char* name, TSHashMap* methods) {
+  BuildScriptCtx ctx = { .name = name };
+  sb_init(&ctx.sb);
+  if (!ctx.sb.buf) return NULL;
+  ts_hashmap_for_each(methods, build_script_cb, &ctx);
+  return sb_take(&ctx.sb);
+}
+
+Value node_webview_addJavaScriptInterface(Value self, Value name, Value methods) {
+  WebViewInstance* inst = (WebViewInstance*)self.as.object;
+  if (!inst) return ts_value_undefined();
+  if (name.tag != TAG_STRING || !name.as.string || !name.as.string->data) return ts_value_undefined();
+  if (methods.tag != TAG_OBJECT || !methods.as.object) return ts_value_undefined();
+
+  TSHashMap* methodsMap = (TSHashMap*)methods.as.object;
+  const char* ifName = name.as.string->data;
+
+  /* Store callbacks */
+  if (!inst->interfaceMethods) {
+    inst->interfaceMethods = ts_hashmap_new();
+  }
+  for (int32_t i = 0; i < methodsMap->capacity; i++) {
+    if (!methodsMap->entries[i].occupied) continue;
+    TSString* key = methodsMap->entries[i].key;
+    Value fn = methodsMap->entries[i].value;
+    if (fn.tag != TAG_FUNCTION && !(fn.tag == TAG_OBJECT && fn.as.object && *(int32_t*)fn.as.object == BOUND_FN_TAG)) continue;
+    size_t keyLen = strlen(ifName) + 1 + strlen(key->data) + 1;
+    char* compositeKey = (char*)malloc(keyLen);
+    snprintf(compositeKey, keyLen, "%s.%s", ifName, key->data);
+    ts_hashmap_set(inst->interfaceMethods, ts_string_new(compositeKey), fn);
+    free(compositeKey);
+  }
+
+  /* Build JS shim and store for re-injection on every navigation */
+  char* jsCode = build_interface_script(ifName, methodsMap);
+  if (!jsCode) return ts_value_undefined();
+
+  if (!inst->interfaces) {
+    inst->interfaces = ts_hashmap_new();
+  }
+  TSString* keyStr = ts_string_new(ifName);
+  /* Remove old script string if present */
+  Value oldVal = ts_hashmap_get(inst->interfaces, keyStr);
+  if (oldVal.tag == TAG_STRING && oldVal.as.string) {
+    ts_string_free(oldVal.as.string);
+  }
+  Value scriptVal;
+  scriptVal.tag = TAG_STRING;
+  scriptVal.as.string = ts_string_new(jsCode);
+  ts_hashmap_set(inst->interfaces, keyStr, scriptVal);
+  ts_string_free(keyStr);
+
+  /* If webview already ready, inject immediately into current page */
+  if (inst->webview) {
+    wchar_t* wcode = to_wide(jsCode);
+    if (wcode) {
+      ICoreWebView2_ExecuteScript(inst->webview, wcode, NULL);
+      free(wcode);
+    }
+  }
+
+  free(jsCode);
+  return ts_value_undefined();
+}
+
+Value node_webview_removeJavaScriptInterface(Value self, Value name) {
+  WebViewInstance* inst = (WebViewInstance*)self.as.object;
+  if (!inst) return ts_value_undefined();
+  if (name.tag != TAG_STRING || !name.as.string || !name.as.string->data) return ts_value_undefined();
+
+  /* Remove stored script string */
+  if (inst->interfaces) {
+    Value idVal = ts_hashmap_get(inst->interfaces, name.as.string);
+    if (idVal.tag == TAG_STRING && idVal.as.string) {
+      ts_string_free(idVal.as.string);
+    }
+    ts_hashmap_set(inst->interfaces, name.as.string, ts_value_undefined());
+  }
+
+  /* Remove callbacks */
+  if (inst->interfaceMethods) {
+    const char* prefix = name.as.string->data;
+    size_t prefixLen = strlen(prefix);
+    TSHashMap* newMap = ts_hashmap_new();
+    for (int32_t i = 0; i < inst->interfaceMethods->capacity; i++) {
+      if (!inst->interfaceMethods->entries[i].occupied) continue;
+      TSString* key = inst->interfaceMethods->entries[i].key;
+      if (strlen(key->data) <= prefixLen || strncmp(key->data, prefix, prefixLen) != 0 || key->data[prefixLen] != '.') {
+        ts_hashmap_set(newMap, key, inst->interfaceMethods->entries[i].value);
+      }
+    }
+    /* We intentionally leak the old hashmap and just swap pointer; GC will handle orphans */
+    inst->interfaceMethods = newMap;
+  }
+
+  return ts_value_undefined();
 }

@@ -98,6 +98,21 @@ declare module "webview" {
     off(event: string, callback: (...args: any[]) => void): this;
 
     /**
+     * Add a host-side JavaScript interface to this WebView.
+     * Native methods will be automatically bridged so that JS can call them via
+     * `window.<name>.<method>(...)`.
+     * @param name - Identifier used to track this interface (for removal).
+     * @param methods - Map of method names → native callbacks.
+     */
+    addJavaScriptInterface(name: string, methods: Record<string, (...args: any[]) => void>): void;
+
+    /**
+     * Remove a previously added JavaScript interface and its callbacks.
+     * @param name - The identifier passed to `addJavaScriptInterface`.
+     */
+    removeJavaScriptInterface(name: string): void;
+
+    /**
      * Run the native UI message loop until the window closes (blocking).
      * Call after configuring loadURL / on handlers.
      */
