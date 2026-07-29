@@ -5,8 +5,11 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <commctrl.h>
+#include <wincrypt.h>
 
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "crypt32.lib")
 
 typedef int socklen_t;
 
@@ -267,6 +270,68 @@ static void bridge_base64(const uint8_t* data, int len, char* out) {
   out[j]='\0';
 }
 
+static int bridge_send_all(int fd, const char* data, int len) {
+  int total = 0;
+  while (total < len) {
+    int sent = send(fd, data + total, len - total, 0);
+    if (sent > 0) {
+      total += sent;
+    } else if (sent == 0) {
+      return -1;
+    } else {
+      int err = WSAGetLastError();
+      if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS) {
+        Sleep(1);
+        continue;
+      }
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static int compute_accept_key(const char* key, char* out, size_t out_len) {
+  HCRYPTPROV hProv = 0;
+  HCRYPTHASH hHash = 0;
+  if (!CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+    return -1;
+  }
+  if (!CryptCreateHash(hProv, CALG_SHA1, 0, 0, &hHash)) {
+    CryptReleaseContext(hProv, 0);
+    return -1;
+  }
+  const char* GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  if (!CryptHashData(hHash, (BYTE*)key, (DWORD)strlen(key), 0)) goto hash_fail;
+  if (!CryptHashData(hHash, (BYTE*)GUID, (DWORD)strlen(GUID), 0)) goto hash_fail;
+  BYTE digest[20];
+  DWORD dwHashLen = 20;
+  if (!CryptGetHashParam(hHash, HP_HASHVAL, digest, &dwHashLen, 0)) goto hash_fail;
+
+  DWORD base64Len = 0;
+  if (!CryptBinaryToStringA(digest, 20, CRYPT_STRING_BASE64, NULL, &base64Len)) goto hash_fail;
+  char* base64Str = (char*)malloc(base64Len);
+  if (!base64Str) goto hash_fail;
+  if (!CryptBinaryToStringA(digest, 20, CRYPT_STRING_BASE64, base64Str, &base64Len)) {
+    free(base64Str);
+    goto hash_fail;
+  }
+  int j = 0;
+  for (size_t i = 0; base64Str[i] && j < (int)out_len - 1; i++) {
+    if (base64Str[i] != '\r' && base64Str[i] != '\n') {
+      out[j++] = base64Str[i];
+    }
+  }
+  out[j] = '\0';
+  free(base64Str);
+  CryptDestroyHash(hHash);
+  CryptReleaseContext(hProv, 0);
+  return 0;
+hash_fail:
+  CryptDestroyHash(hHash);
+  CryptReleaseContext(hProv, 0);
+  return -1;
+}
+
 static void bridge_append_recv(WsBridge* b, const char* data, int len) {
   if (!b || !data || len <= 0) return;
   if (b->recv_len + len > b->recv_cap) {
@@ -365,21 +430,16 @@ static void bridge_handle_handshake(WsBridge* b) {
   while(*ks==' ' || *ks=='\t') ks++;
   char key[128]={0}; int ki=0;
   while(*ks && *ks!='\r' && *ks!='\n' && ki<127) key[ki++]=*ks++;
+  // trim trailing spaces from key
+  while(ki>0 && (key[ki-1]==' ' || key[ki-1]=='\t')) { key[ki-1]='\0'; ki--; }
 
-  const char* GUID="258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-  size_t tlen = strlen(key)+strlen(GUID);
-  uint8_t* tmp=(uint8_t*)malloc(tlen);
-  if(!tmp){bridge_close_client(b);return;}
-  memcpy(tmp,key,strlen(key));
-  memcpy(tmp+strlen(key),GUID,strlen(GUID));
-  uint8_t digest[20];
-  BridgeSha1 sha;
-  bridge_sha1_init(&sha);
-  bridge_sha1_update(&sha,tmp,(int)tlen);
-  bridge_sha1_final(&sha,digest);
-  free(tmp);
-  char accept_key[64];
-  bridge_base64(digest,20,accept_key);
+  char accept_key[64] = {0};
+  if (compute_accept_key(key, accept_key, sizeof(accept_key)) != 0) {
+    fprintf(stderr, "WebView: Failed to compute accept key for '%s'\n", key);
+    bridge_close_client(b);
+    return;
+  }
+  fprintf(stderr, "WebView: key='%s' accept='%s'\n", key, accept_key);
 
   char resp[512];
   int rlen = snprintf(resp,sizeof(resp),
@@ -388,21 +448,33 @@ static void bridge_handle_handshake(WsBridge* b) {
     "Connection: Upgrade\r\n"
     "Sec-WebSocket-Accept: %s\r\n"
     "\r\n", accept_key);
-  send(b->client_fd, resp, rlen, 0);
+  if (bridge_send_all(b->client_fd, resp, rlen) != 0) {
+    fprintf(stderr, "WebView: Failed to send handshake response\n");
+    bridge_close_client(b);
+    return;
+  }
   b->handshake_done = 1;
   b->recv_len = 0;
+  if (b->recv_buf) b->recv_buf[0] = '\0';
   fprintf(stderr, "WebView: Bridge handshake done\n");
 }
 
 static void bridge_dispatch_message(WebViewInstance* inst, const char* payload, int payload_len) {
   (void)payload_len;
-  if (!inst || !inst->interfaceMethods || !payload) return;
+  fprintf(stderr, "WebView: Bridge dispatch '%s'\n", payload);
+  if (!inst || !inst->interfaceMethods || !payload) {
+    fprintf(stderr, "WebView: dispatch early return (null args)\n");
+    return;
+  }
 
   TSString* msgStr = ts_string_new(payload);
   Value parsed = ts_json_parse(msgStr);
   ts_string_free(msgStr);
 
-  if (parsed.tag != TAG_OBJECT || !parsed.as.object) return;
+  if (parsed.tag != TAG_OBJECT || !parsed.as.object) {
+    fprintf(stderr, "WebView: dispatch parse failed, tag=%d\n", parsed.tag);
+    return;
+  }
 
   TSHashMap* map = (TSHashMap*)parsed.as.object;
   Value ifVal = ts_hashmap_get(map, ts_string_new("__if"));
@@ -410,7 +482,11 @@ static void bridge_dispatch_message(WebViewInstance* inst, const char* payload, 
   Value aVal = ts_hashmap_get(map, ts_string_new("__a"));
   Value idVal = ts_hashmap_get(map, ts_string_new("__id"));
 
+  fprintf(stderr, "WebView: dispatch fields if=%d m=%d\n",
+          ifVal.tag, mVal.tag);
+
   if (ifVal.tag != TAG_STRING || !ifVal.as.string || mVal.tag != TAG_STRING || !mVal.as.string) {
+    fprintf(stderr, "WebView: dispatch early return (bad field types)\n");
     return;
   }
 
@@ -418,11 +494,15 @@ static void bridge_dispatch_message(WebViewInstance* inst, const char* payload, 
   char* compositeKey = (char*)malloc(keyLen);
   if (!compositeKey) return;
   snprintf(compositeKey, keyLen, "%s.%s", ifVal.as.string->data, mVal.as.string->data);
+  fprintf(stderr, "WebView: dispatch lookup '%s'\n", compositeKey);
   Value cb = ts_hashmap_get(inst->interfaceMethods, ts_string_new(compositeKey));
   free(compositeKey);
 
+  fprintf(stderr, "WebView: dispatch cb tag=%d\n", cb.tag);
+
   if ((cb.tag != TAG_FUNCTION || !cb.as.function) &&
       !(cb.tag == TAG_OBJECT && cb.as.object && *(int32_t*)cb.as.object == BOUND_FN_TAG)) {
+    fprintf(stderr, "WebView: dispatch early return (cb not callable)\n");
     return;
   }
 
@@ -433,7 +513,10 @@ static void bridge_dispatch_message(WebViewInstance* inst, const char* payload, 
     callArgs[i] = ts_array_get(argsArr, i);
   }
 
+  fprintf(stderr, "WebView: dispatch calling '%s.%s' argc=%d\n",
+          ifVal.as.string->data, mVal.as.string->data, argc);
   Value result = ts_value_call(cb, callArgs, argc);
+  fprintf(stderr, "WebView: dispatch result tag=%d\n", result.tag);
 
   if (idVal.tag == TAG_STRING && idVal.as.string && idVal.as.string->data &&
       inst->bridge && inst->bridge->client_fd >= 0 && inst->bridge->handshake_done) {
@@ -442,7 +525,11 @@ static void bridge_dispatch_message(WebViewInstance* inst, const char* payload, 
     int respLen = snprintf(resp, sizeof(resp), "{\"__id\":\"%s\",\"__res\":%s}",
                            idVal.as.string->data, resultJson ? resultJson->data : "null");
     if (resultJson) ts_string_free(resultJson);
-    bridge_send_frame(inst->bridge->client_fd, resp, respLen);
+    fprintf(stderr, "WebView: dispatch sending response '%s'\n", resp);
+    int sendRes = bridge_send_frame(inst->bridge->client_fd, resp, respLen);
+    fprintf(stderr, "WebView: dispatch send result=%d\n", sendRes);
+  } else {
+    fprintf(stderr, "WebView: dispatch skip response (no id or no conn)\n");
   }
 
   fflush(stdout);
@@ -476,6 +563,7 @@ static void bridge_poll(WebViewInstance* inst) {
   char temp[4096];
   int n = recv(b->client_fd, temp, sizeof(temp), 0);
   if (n > 0) {
+    fprintf(stderr, "WebView: Bridge recv %d bytes\n", n);
     bridge_append_recv(b, temp, n);
   } else if (n == 0) {
     bridge_close_client(b);
@@ -492,6 +580,7 @@ static void bridge_poll(WebViewInstance* inst) {
     char* payload = NULL;
     int payload_len = 0;
     int opcode = bridge_try_parse_frame(b, &payload, &payload_len);
+    fprintf(stderr, "WebView: Bridge parsed frame opcode=%d\n", opcode);
     if (opcode == 0) break;
     if (opcode < 0) {
       bridge_close_client(b);
