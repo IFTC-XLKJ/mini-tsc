@@ -1,0 +1,30 @@
+1 ICON "E:/project/mini-tsc/test/my_app/icon.ico"
+1 VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "IFTC"
+      VALUE "FileDescription", "Sample mini-tsc application"
+      VALUE "FileVersion", "1.0.0"
+      VALUE "InternalName", "my_app"
+      VALUE "LegalCopyright", "Copyright (c) 2020-2026 IFTC"
+      VALUE "OriginalFilename", "my_app.exe"
+      VALUE "ProductName", "my_app"
+      VALUE "ProductVersion", "1.0.0"
+      VALUE "Author", "IFTC"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

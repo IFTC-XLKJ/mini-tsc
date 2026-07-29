@@ -4,7 +4,7 @@ import { BUILTIN_MODULES } from "../builtins/registry.js";
 /** Node built-in module names we can tree-shake. */
 export const BUILTIN_MODULE_NAMES = [
   "fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto",
-  "worker_threads", "chalk", "sqlite", "ffi",
+  "worker_threads", "chalk", "sqlite", "ffi", "webview",
 ] as const;
 
 export type BuiltinModuleName = (typeof BUILTIN_MODULE_NAMES)[number];
@@ -445,6 +445,18 @@ export function analyzeFeatureUsage(
             addMethod(usage, "node_sqlite_Database");
             addMethod(usage, "node_sqlite_open");
           }
+          if (name === "WebView" ||
+              (typeof className === "string" &&
+               (className === "WebView" || className.includes(".WebView")))) {
+            usage.modules.add("webview");
+            addMethod(usage, "node_webview_WebView");
+            addMethod(usage, "node_webview_isAvailable");
+            addMethod(usage, "node_webview_run");
+            addMethod(usage, "node_webview_loadURL");
+            addMethod(usage, "node_webview_on");
+            addMethod(usage, "node_webview_show");
+            addMethod(usage, "node_webview_close");
+          }
         }
 
         // ee.on / ee.emit / … instance methods (when events module in use or name matches)
@@ -543,7 +555,8 @@ export function analyzeFeatureUsage(
         // worker.threadId / worker.threadName property access on Worker instances
         if (node.kind === "property_access" &&
             node.object?.kind === "identifier" &&
-            /worker|parentPort/i.test(node.object.name || "")) {
+            /worker|parentPort/i.test(node.object.name || "") &&
+            !/webview|wv/i.test(node.object.name || "")) {
           const prop = node.property as string;
           if (prop === "threadId") {
             usage.modules.add("worker_threads");
@@ -551,6 +564,40 @@ export function analyzeFeatureUsage(
           } else if (prop === "threadName") {
             usage.modules.add("worker_threads");
             addMethod(usage, "node_worker_threads_get_threadName");
+          }
+        }
+
+        // webview instance methods / getters
+        if (node.kind === "call_expression" &&
+            node.callee?.kind === "property_access" &&
+            node.callee.object?.kind === "identifier") {
+          const m = node.callee.property as string;
+          const obj = node.callee.object.name as string;
+          const wvMethods = [
+            "loadURL", "navigate", "loadHTML", "evaluate", "executeJavaScript",
+            "setTitle", "setSize", "setIcon", "setPosition", "center",
+            "show", "hide", "focus", "minimize", "maximize", "unmaximize",
+            "close", "run", "on", "once", "off",
+          ];
+          if (wvMethods.includes(m) &&
+              (/webview|^wv$|window/i.test(obj) ||
+               m === "loadURL" || m === "loadHTML" || m === "navigate" ||
+               m === "evaluate" || m === "executeJavaScript")) {
+            usage.modules.add("webview");
+            addMethod(usage, "node_webview_WebView");
+            addMethod(usage, `node_webview_${m}`);
+          }
+        }
+        if (node.kind === "property_access" &&
+            node.object?.kind === "identifier" &&
+            /webview|^wv$|window/i.test(node.object.name || "")) {
+          const prop = node.property as string;
+          if (prop === "ready") {
+            usage.modules.add("webview");
+            addMethod(usage, "node_webview_get_ready");
+          } else if (prop === "url") {
+            usage.modules.add("webview");
+            addMethod(usage, "node_webview_get_url");
           }
         }
 
@@ -637,7 +684,7 @@ export function analyzeFeatureUsage(
   }
   const modulesNeedingHashArray = [
     "fs", "path", "http", "net", "events", "child_process",
-    "crypto", "assert", "readline", "os", "worker_threads", "sqlite",
+    "crypto", "assert", "readline", "os", "worker_threads", "sqlite", "webview", "ffi",
   ];
   for (const m of modulesNeedingHashArray) {
     if (usage.modules.has(m)) {

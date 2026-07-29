@@ -90,6 +90,7 @@ export class CompilerDriver {
   async compile(options: CompilerOptions): Promise<CompilerResult> {
     const diagnostics: string[] = [];
     const verbose: string[] = [];
+    const projectRoot = options.projectRoot || process.cwd();
 
     // 1. Parse TypeScript
     const entryPath = path.resolve(options.entry);
@@ -152,7 +153,7 @@ export class CompilerDriver {
           usedBuiltins.add(builtin);
         }
       }
-      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi"];
+      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview"];
       for (const builtin of globalBuiltins) {
         if (cEmitter.unitUsesBuiltin(unit, builtin)) {
           usedBuiltins.add(builtin);
@@ -255,7 +256,7 @@ export class CompilerDriver {
       }
       const builtin = getBuiltinModule(builtinName);
       if (builtin) {
-        allFiles.push(...this.generateBuiltinFiles(builtin, featureUsage));
+        allFiles.push(...this.generateBuiltinFiles(builtin, featureUsage, projectRoot));
       }
     }
 
@@ -826,15 +827,18 @@ extern TsErrorContext _ts_current_error;
 `;
   }
 
-  private generateBuiltinFiles(builtin: BuiltinModule, usage: FeatureUsage): EmitFile[] {
+  private generateBuiltinFiles(builtin: BuiltinModule, usage: FeatureUsage, projectRoot: string): EmitFile[] {
     const files: EmitFile[] = [];
 
     // Read the pre-written C source file
-    const srcPath = path.join("runtime", "src", "builtins", builtin.cSourceFile);
-    const headerPath = path.join("runtime", "src", "builtins", builtin.headerFile);
+    const srcPath = path.join(projectRoot, "runtime", "src", "builtins", builtin.cSourceFile);
+    const headerPath = path.join(projectRoot, "runtime", "src", "builtins", builtin.headerFile);
 
     try {
-      if (fs.existsSync(srcPath)) {
+      const srcExists = fs.existsSync(srcPath);
+      const headerExists = fs.existsSync(headerPath);
+
+      if (srcExists) {
         let content = fs.readFileSync(srcPath, "utf-8") as string;
         // Ensure ts_features.h is included for method-level guards
         if (!content.includes("ts_features.h")) {
@@ -850,13 +854,27 @@ extern TsErrorContext _ts_current_error;
           content,
           kind: "c",
         });
+      } else {
+        // Generate stubs when source file doesn't exist (e.g. running from subdirectory)
+        files.push({
+          path: builtin.cSourceFile,
+          content: this.generateBuiltinStub(builtin, usage),
+          kind: "c",
+        });
       }
-      if (fs.existsSync(headerPath)) {
+      if (headerExists) {
         // Header: only declare methods that are used (smaller + clearer)
         const original = fs.readFileSync(headerPath, "utf-8") as string;
         files.push({
           path: builtin.headerFile,
           content: this.filterBuiltinHeader(original, builtin, usage),
+          kind: "h",
+        });
+      } else {
+        // Generate header stub when header doesn't exist
+        files.push({
+          path: builtin.headerFile,
+          content: this.generateBuiltinHeaderStub(builtin, usage),
           kind: "h",
         });
       }
@@ -1178,10 +1196,11 @@ extern TsErrorContext _ts_current_error;
     files: EmitFile[],
     options: CompilerOptions,
     usage?: FeatureUsage,
+    projectRoot?: string,
   ): Promise<void> {
     const outDir = options.outDir || "./out";
     const outputFile = options.output || "output";
-    const projectRoot = options.projectRoot || process.cwd();
+    const resolvedProjectRoot = projectRoot || options.projectRoot || process.cwd();
 
     // Handle absolute output path - extract directory and filename
     let outputDir = outDir;
@@ -1217,7 +1236,7 @@ extern TsErrorContext _ts_current_error;
     // Core runtime always linked; optional units only when feature analysis needs them.
     // Feature-heavy code in runtime.c / builtins.c is also gated via TS_NEED_*.
     const runtimeSrcFiles: string[] = [];
-    const runtimeDir = path.join(projectRoot, "runtime/src");
+    const runtimeDir = path.join(resolvedProjectRoot, "runtime/src");
     // Scan ALL emitted C (user + node_* builtins) for runtime deps.
     // Feature analysis can miss internal calls inside node_fs.c etc.
     const allC = files.filter(f => f.kind === "c").map(f => f.content).join("\n");
@@ -1257,6 +1276,7 @@ extern TsErrorContext _ts_current_error;
     const needWorkerThreads = usage?.modules.has("worker_threads") ?? false;
     const needSqlite = usage?.modules.has("sqlite") ?? false;
     const needFfi = usage?.modules.has("ffi") ?? false;
+    const needWebview = usage?.modules.has("webview") ?? false;
     const coreRuntime: string[] = [];
     if (needsTsRuntime) {
       // string_ops holds core strings + indexOf/substring/replace/… (linker GC drops unused)
@@ -1285,6 +1305,7 @@ extern TsErrorContext _ts_current_error;
       if (needFfi) {
         coreRuntime.push("node_ffi.c");
       }
+      // node_webview.c is emitted via generateBuiltinFiles (featureUsage.modules)
     }
     // Automatic GC is always linked: main() always calls ts_gc_init / set_stack_bottom
     coreRuntime.push("gc.c");
@@ -1299,9 +1320,9 @@ extern TsErrorContext _ts_current_error;
       .map(f => path.join(outDir, f.path));
 
     const includeDir = path.resolve(outDir);
-    const runtimeInclude = path.join(projectRoot, "runtime/include");
-    const builtinInclude = path.join(projectRoot, "runtime/src/builtins");
-    const sqliteInclude = path.join(projectRoot, "runtime/src/sqlite");
+    const runtimeInclude = path.join(resolvedProjectRoot, "runtime/include");
+    const builtinInclude = path.join(resolvedProjectRoot, "runtime/src/builtins");
+    const sqliteInclude = path.join(resolvedProjectRoot, "runtime/src/sqlite");
 
     const isWindows = (options.target || process.platform) === "win32" || options.target === "windows";
     // Android/Termux reports process.platform === "android" (or linux) — not win32
@@ -1376,6 +1397,9 @@ extern TsErrorContext _ts_current_error;
       `-I${runtimeInclude}`,
       `-I${builtinInclude}`,
       ...(needSqlite ? [`-I${sqliteInclude}`] : []),
+      ...(needWebview && isWindows
+        ? [`-I${path.join(resolvedProjectRoot, "runtime/third_party/webview2_sdk/build/native/include")}`]
+        : []),
       `-o${outExe}`,
       // Math/pthread only when needed on Unix
       ...(isUnix && needMathLib ? ["-lm"] : []),
@@ -1389,6 +1413,37 @@ extern TsErrorContext _ts_current_error;
       ...(needSqlite && isUnix ? ["-lm"] : []),
       // ffi needs dl library on Unix
       ...(needFfi && isUnix ? ["-ldl"] : []),
+      // webview: WebView2 loader + system libs (Win) / WebKitGTK (Linux)
+      ...(needWebview && isWindows
+        ? [
+            path.join(
+              resolvedProjectRoot,
+              "runtime/third_party/webview2_sdk/build/native/x64/WebView2Loader.dll.lib",
+            ),
+            "-lole32",
+            "-loleaut32",
+            "-luser32",
+            "-lgdi32",
+            "-lshell32",
+            "-lshlwapi",
+            "-ladvapi32",
+            "-luuid",
+            "-lcomdlg32",
+          ]
+        : []),
+      ...(needWebview && isUnix
+        ? (() => {
+            try {
+              const flags = execSync(
+                "pkg-config --cflags --libs webkit2gtk-4.1 2>/dev/null || pkg-config --cflags --libs webkit2gtk-4.0",
+                { encoding: "utf-8" },
+              ).trim();
+              return flags ? flags.split(/\s+/).filter(Boolean) : ["-lwebkit2gtk-4.0", "-lgtk-3", "-lgobject-2.0"];
+            } catch {
+              return ["-lwebkit2gtk-4.0", "-lgtk-3", "-lgobject-2.0"];
+            }
+          })()
+        : []),
       ...gcFlags,
       "-Wno-implicit-function-declaration",
       "-Wno-deprecated-non-prototype",
@@ -1399,6 +1454,20 @@ extern TsErrorContext _ts_current_error;
       execSync(cmd, { stdio: "pipe", cwd: process.cwd() });
     } catch (e: any) {
       throw new Error(`clang failed: ${e.stderr?.toString() || e.message}`);
+    }
+
+    // WebView2: copy loader DLL next to the exe
+    if (needWebview && isWindows) {
+      const dllSrc = path.join(
+        resolvedProjectRoot,
+        "runtime/third_party/webview2_sdk/build/native/x64/WebView2Loader.dll",
+      );
+      const dllDst = path.join(path.dirname(outExe), "WebView2Loader.dll");
+      try {
+        if (fs.existsSync(dllSrc)) fs.copyFileSync(dllSrc, dllDst);
+      } catch {
+        /* ignore copy failures */
+      }
     }
 
     // Strip unneeded symbols when a strip tool is available (skip for shared libraries)

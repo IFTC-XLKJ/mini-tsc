@@ -1774,7 +1774,7 @@ export class ExpressionEmitter {
     if (callee.kind === "property_access" &&
         callee.object.kind === "identifier") {
       const moduleName = callee.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview"];
       if (builtinModules.includes(moduleName)) {
         const funcName = `node_${moduleName}_${callee.property}`;
         // Wrap each argument in Value constructors
@@ -2122,7 +2122,7 @@ export class ExpressionEmitter {
         (objType === "Value" &&
           (methodName === "run" || methodName === "get" || methodName === "all" ||
            methodName === "iterate" || methodName === "finalize") &&
-          !/hash|hmac|server|socket|req|res|child|proc|readline|rl|emitter|ee|worker|port|db$|database/i.test(objName));
+          !/hash|hmac|server|socket|req|res|child|proc|readline|rl|emitter|ee|worker|port|db$|database|webview|wv|window/i.test(objName));
       const wrapArg = (a: CNode): string => {
         const emitted = this.emit(a);
         if (emitted.startsWith("ts_value_") || a.kind === "function_ref" ||
@@ -2736,6 +2736,54 @@ export class ExpressionEmitter {
         // on / once / off / addListener / removeListener / prepend*
         while (callArgs.length < 2) callArgs.push("ts_value_null()");
         return `node_events_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]})`;
+      }
+
+      // webview.WebView instance methods
+      {
+        const wvMethods = new Set([
+          "loadURL", "navigate", "loadHTML", "evaluate", "executeJavaScript",
+          "setTitle", "setSize", "setIcon", "setPosition", "center",
+          "show", "hide", "focus", "minimize", "maximize", "unmaximize",
+          "close", "run", "on", "once", "off",
+        ]);
+        const looksLikeWebView =
+          /webview|^wv$|window/i.test(objectName || "") ||
+          (callee.object?.kind === "identifier" &&
+            (this.importedSymbols.get(callee.object.name) || "").includes("node_webview_"));
+        // Prefer webview for distinctive methods even on loosely named Value vars
+        const distinctiveWv =
+          methodName === "loadURL" || methodName === "loadHTML" || methodName === "navigate" ||
+          methodName === "evaluate" || methodName === "executeJavaScript";
+        if (wvMethods.has(methodName) && callee.object?.kind === "identifier" &&
+            (looksLikeWebView || (distinctiveWv && varType === "Value"))) {
+          const self = this.emit(callee.object);
+          const wrapArg = (a: CNode): string => {
+            const emitted = this.emit(a);
+            if (emitted.startsWith("ts_value_") || a.kind === "function_ref" ||
+                a.kind === "arrow_function" || a.kind === "function_expression" ||
+                a.kind === "object_literal" || a.kind === "array_literal") return emitted;
+            if (a.kind === "string_literal") return `ts_value_string(${emitted})`;
+            if (a.kind === "number_literal") return `ts_value_number(${emitted})`;
+            if (a.kind === "boolean_literal") return `ts_value_boolean(${emitted})`;
+            return emitted;
+          };
+          const callArgs = (node.arguments || []).map(wrapArg);
+          if (methodName === "setSize" || methodName === "setPosition") {
+            while (callArgs.length < 2) callArgs.push("ts_value_number(0)");
+            return `node_webview_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]})`;
+          }
+          if (methodName === "on" || methodName === "once" || methodName === "off") {
+            while (callArgs.length < 2) callArgs.push("ts_value_null()");
+            return `node_webview_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]})`;
+          }
+          if (methodName === "center" || methodName === "show" || methodName === "hide" ||
+              methodName === "focus" || methodName === "minimize" || methodName === "maximize" ||
+              methodName === "unmaximize" || methodName === "close" || methodName === "run") {
+            return `node_webview_${methodName}(${self})`;
+          }
+          while (callArgs.length < 1) callArgs.push("ts_value_null()");
+          return `node_webview_${methodName}(${self}, ${callArgs[0]})`;
+        }
       }
 
       // worker_threads: worker/port.postMessage, worker.on, worker.terminate, port.close/start
@@ -3803,6 +3851,7 @@ export class ExpressionEmitter {
             "isMainThread", "parentPort", "workerData", "threadId", "threadName",
             "isInternalThread", "SHARE_ENV", "resourceLimits", "locks",
             "level", "enabled",
+            "isAvailable",
           ]);
           if (zeroArgGetters.has(node.property)) {
             return `${funcName}()`;
@@ -3812,7 +3861,8 @@ export class ExpressionEmitter {
               (node.property === "MessageChannel" && mod === "worker_threads") ||
               (node.property === "MessagePort" && mod === "worker_threads") ||
               (node.property === "BroadcastChannel" && mod === "worker_threads") ||
-              (node.property === "Database" && mod === "sqlite")) {
+              (node.property === "Database" && mod === "sqlite") ||
+              (node.property === "WebView" && mod === "webview")) {
             return funcName;
           }
           return funcName;
@@ -3829,7 +3879,7 @@ export class ExpressionEmitter {
     // must emit as function calls: node_process_argv()
     if (node.object.kind === "identifier") {
       const moduleName = node.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview"];
       if (builtinModules.includes(moduleName)) {
         const funcName = `node_${moduleName}_${node.property}`;
         this._lastBuiltinCall = funcName;
@@ -3843,6 +3893,7 @@ export class ExpressionEmitter {
           "isMainThread", "parentPort", "workerData", "threadId", "threadName",
           "isInternalThread", "SHARE_ENV", "resourceLimits", "locks",
           "level", "enabled",
+          "isAvailable",
         ]);
         if (zeroArgGetters.has(node.property)) {
           return `${funcName}()`;
@@ -3855,6 +3906,9 @@ export class ExpressionEmitter {
         if (moduleName === "worker_threads" &&
             (node.property === "Worker" || node.property === "MessageChannel" ||
              node.property === "MessagePort" || node.property === "BroadcastChannel")) {
+          return funcName;
+        }
+        if (moduleName === "webview" && node.property === "WebView") {
           return funcName;
         }
         return funcName;
@@ -4133,7 +4187,8 @@ export class ExpressionEmitter {
     // Must come before the generic Value hashmap handler below
     // Only match variables whose names suggest they are Worker instances (not MessageChannel hashmaps)
     if (node.object.kind === "identifier" && this.varTypes.get(node.object.name) === "Value" &&
-        /worker|parentPort/i.test(node.object.name || "")) {
+        /worker|parentPort/i.test(node.object.name || "") &&
+        !/webview|wv/i.test(node.object.name || "")) {
       const getterMap: Record<string, string> = {
         threadId: "node_worker_threads_get_threadId",
         threadName: "node_worker_threads_get_threadName",
@@ -4141,6 +4196,17 @@ export class ExpressionEmitter {
       const getter = getterMap[node.property];
       if (getter) {
         return `${getter}(${object})`;
+      }
+    }
+
+    // webview.WebView instance getters: ready / url
+    if (node.object.kind === "identifier" && this.varTypes.get(node.object.name) === "Value" &&
+        /webview|wv|view|win|window/i.test(node.object.name || "")) {
+      if (node.property === "ready") {
+        return `node_webview_get_ready(${object})`;
+      }
+      if (node.property === "url") {
+        return `node_webview_get_url(${object})`;
       }
     }
 
@@ -4243,6 +4309,20 @@ export class ExpressionEmitter {
         className === "events.EventEmitter" ||
         className.endsWith(".EventEmitter")) {
       return `node_events_EventEmitter()`;
+    }
+
+    // webview.WebView / WebView
+    if (className === "WebView" ||
+        className === "webview.WebView" ||
+        className.endsWith(".WebView")) {
+      const a0 = node.arguments?.[0]
+        ? (() => {
+            const e = this.emit(node.arguments![0]);
+            if (e.startsWith("ts_value_") || node.arguments![0].kind === "object_literal") return e;
+            return e;
+          })()
+        : "ts_value_null()";
+      return `node_webview_WebView(${a0})`;
     }
 
     // sqlite.Database / Database

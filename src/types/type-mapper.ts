@@ -99,6 +99,11 @@ export class TypeMapper {
           return { kind: "any", cType: "Value", cHeader: "ts_runtime.h" };
         }
 
+        // webview.WebView → Value (native handle wrapped as object)
+        if (name === "WebView") {
+          return { kind: "any", cType: "Value", cHeader: "ts_runtime.h" };
+        }
+
         // sqlite Database / Statement / RunResult → Value
         if (name === "Database" || name === "Statement" || name === "RunResult") {
           return { kind: "any", cType: "Value", cHeader: "ts_runtime.h" };
