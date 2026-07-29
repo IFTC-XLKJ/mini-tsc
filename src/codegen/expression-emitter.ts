@@ -2686,7 +2686,7 @@ export class ExpressionEmitter {
       const looksLikeEmitter =
         !!objectName &&
         (/ee|emitter|event/i.test(objectName) ||
-          this.varTypes.get(objectName) === "Value" && !/child|spawn|fork|dir|proc|cp|server|req|res|rl|readline|worker|port|parent|channel|bc/i.test(objectName));
+          this.varTypes.get(objectName) === "Value" && !/child|spawn|fork|dir|proc|cp|server|req|res|rl|readline|worker|port|parent|channel|bc|webview|wv|window/i.test(objectName));
       if (eeMethods.has(methodName) && callee.object?.kind === "identifier" && looksLikeEmitter) {
         const self = this.emit(callee.object);
         const wrap = (a: CNode): string => {
