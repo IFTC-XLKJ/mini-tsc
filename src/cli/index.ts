@@ -32,6 +32,7 @@ program
   .option("-v, --verbose", "Print intermediate C code")
   .option("--keep-c", "Keep generated .c/.h files")
   .option("--clang-args <args>", "Extra args to pass to clang")
+  .option("--zip", "Create a zip archive of the build output after linking")
   .action(async (entry: string, opts: any) => {
     // Load app.json build metadata (name / icon / author / …) when present
     const entryDir = path.dirname(path.resolve(entry));
@@ -53,6 +54,8 @@ program
         copyright: resolved.copyright,
         version: resolved.version,
         appDir: found.dir,
+        assetsDir: resolved.assetsDir,
+        gui: resolved.gui,
       };
       // Default -o to productName when user left the CLI default
       if (!opts.output || opts.output === "output") {
@@ -72,6 +75,7 @@ program
       clangArgs: opts.clangArgs?.split(" "),
       projectRoot: PROJECT_ROOT,
       appBuild,
+      zip: opts.zip,
     };
 
     const driver = new CompilerDriver();
@@ -109,6 +113,9 @@ program
       if (result.outputPath) {
         const absPath = path.resolve(result.outputPath);
         console.log(`  ${absPath}`);
+      }
+      if (result.zipPath) {
+        console.log(`  ${path.resolve(result.zipPath)}`);
       }
     } else {
       console.log(`\n✗ Compilation failed`);

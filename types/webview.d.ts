@@ -22,6 +22,10 @@ declare module "webview" {
     resizable?: boolean;
     /** Transparent window background (default false). */
     transparent?: boolean;
+    /** Enable native window shadow (default false). Effective on frameless windows. */
+    shadow?: boolean;
+    /** Enable window rounded corners (default false). Windows 11 native DWM round; on older versions it falls back to clipping via SetWindowRgn. */
+    roundedCorners?: boolean;
     /** Initial page URL. */
     url?: string;
     /** Initial HTML document (used when `url` is omitted). */

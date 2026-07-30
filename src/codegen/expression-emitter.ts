@@ -62,6 +62,15 @@ export class ExpressionEmitter {
     return this.varTypes.get(name);
   }
 
+  /** Determine whether an identifier should be treated as a builtin module access
+   *  rather than a local variable. Prevents collisions like `const webview = ...; webview.run()`
+   *  being compiled as a module-level call missing the `self` argument. */
+  private canTreatAsBuiltinModule(name: string): boolean {
+    if (!this.varTypes.has(name)) return true;
+    // Namespace imports (e.g. `import * as fs from "fs"`) are still modules
+    return this.namespaceModulePaths.has(name);
+  }
+
   /** Register an imported symbol mapping */
   declareImport(originalName: string, mangledName: string): void {
     this.importedSymbols.set(originalName, mangledName);
@@ -1775,7 +1784,7 @@ export class ExpressionEmitter {
         callee.object.kind === "identifier") {
       const moduleName = callee.object.name;
       const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview"];
-      if (builtinModules.includes(moduleName)) {
+      if (builtinModules.includes(moduleName) && this.canTreatAsBuiltinModule(moduleName)) {
         const funcName = `node_${moduleName}_${callee.property}`;
         // Wrap each argument in Value constructors
         let args = (node.arguments || []).map((a: CNode) => {
@@ -2112,7 +2121,7 @@ export class ExpressionEmitter {
       const looksLikeDb =
         /^(db|database|conn|sqlite)$/i.test(objName) ||
         /db|database|sqlite|conn/i.test(objName) ||
-        (objType === "Value" && !/stmt|statement|hash|hmac|server|socket|req|res|child|proc|readline|rl|emitter|ee|worker|port/i.test(objName) &&
+        (objType === "Value" && !/stmt|statement|hash|hmac|server|socket|req|res|child|proc|readline|rl|emitter|ee|worker|port|webview|wv|window/i.test(objName) &&
           (dbSqlMethods.has(methodName) || dbCrudMethods.has(methodName)));
       const looksLikeStmt =
         /stmt|statement|query|select|prepared|q\d*/i.test(objName) ||
@@ -2766,6 +2775,11 @@ export class ExpressionEmitter {
             if (a.kind === "string_literal") return `ts_value_string(${emitted})`;
             if (a.kind === "number_literal") return `ts_value_number(${emitted})`;
             if (a.kind === "boolean_literal") return `ts_value_boolean(${emitted})`;
+            // Template string interpolation emits ts_string_* expressions returning TSString*;
+            // wrap them into Value for APIs expecting a Value argument.
+            if (/(^|[^a-zA-Z0-9_])ts_string_[a-zA-Z]|ts_to_string\(/.test(emitted)) {
+              return `ts_value_string(${emitted})`;
+            }
             return emitted;
           };
           const callArgs = (node.arguments || []).map(wrapArg);
@@ -3885,7 +3899,7 @@ export class ExpressionEmitter {
     if (node.object.kind === "identifier") {
       const moduleName = node.object.name;
       const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview"];
-      if (builtinModules.includes(moduleName)) {
+      if (builtinModules.includes(moduleName) && this.canTreatAsBuiltinModule(moduleName)) {
         const funcName = `node_${moduleName}_${node.property}`;
         this._lastBuiltinCall = funcName;
         // Properties that are zero-arg C functions — call them immediately

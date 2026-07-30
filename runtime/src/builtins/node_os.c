@@ -11,9 +11,7 @@
 #endif
 #include <windows.h>
 #include <intrin.h>
-#include <iphlpapi.h>
 #pragma comment(lib, "advapi32.lib")
-#pragma comment(lib, "iphlpapi.lib")
 #else
 #include <sys/utsname.h>
 #include <unistd.h>
@@ -1044,88 +1042,49 @@ Value node_os_diskUsage(void) {
 Value node_os_networkStats(void) {
   TSArray* arr = ts_array_new();
 
-  /* Get adapter addresses */
-  PIP_ADAPTER_ADDRESSES adapters = NULL;
-  ULONG bufferSize = 15000;
-  DWORD result;
+  /* Use PowerShell to get network adapter statistics */
+  FILE* pipe = _popen(
+    "powershell -NoProfile -Command \"Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq Up | Select-Object Name,InterfaceDescription,MacAddress | ForEach-Object { Write-Output ('{0}|{1}|{2}' -f $_.Name,$_.InterfaceDescription,$_.MacAddress) }\"",
+    "r");
+  if (!pipe) return ts_value_array(arr);
 
-  do {
-    adapters = (PIP_ADAPTER_ADDRESSES)malloc(bufferSize);
-    if (!adapters) return ts_value_array(arr);
-    result = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_PREFIX, NULL, adapters, &bufferSize);
-    if (result == ERROR_BUFFER_OVERFLOW) {
-      free(adapters);
-      adapters = NULL;
-    }
-  } while (result == ERROR_BUFFER_OVERFLOW);
+  char line[1024];
+  while (fgets(line, sizeof(line), pipe)) {
+    size_t len = strlen(line);
+    while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
+    if (len == 0) continue;
 
-  if (result != NO_ERROR || !adapters) {
-    if (adapters) free(adapters);
-    return ts_value_array(arr);
-  }
-
-  /* Get interface stats via GetIfTable2 */
-  PMIB_IFTABLE ifTable = NULL;
-  ULONG tableSize = 0;
-  GetIfTable2(&ifTable, &tableSize);
-
-  for (PIP_ADAPTER_ADDRESSES adapter = adapters; adapter; adapter = adapter->Next) {
-    /* Skip loopback and down interfaces */
-    if (adapter->IfType == IF_TYPE_LOOPBACK) continue;
-    if (adapter->OperStatus != IfOperStatusUp) continue;
-
-    TSHashMap* stat = ts_hashmap_new();
-
-    /* Interface name */
-    ts_hashmap_set(stat, ts_string_new("name"), ts_value_string(ts_string_new(adapter->AdapterName)));
-
-    /* Description (friendly name) */
-    if (adapter->Description) {
-      ts_hashmap_set(stat, ts_string_new("description"), ts_value_string(ts_string_new(adapter->Description)));
-    }
-
-    /* MAC address */
-    char mac[32] = "";
-    if (adapter->PhysicalAddressLength > 0) {
-      int pos = 0;
-      for (ULONG i = 0; i < adapter->PhysicalAddressLength && i < 8; i++) {
-        pos += snprintf(mac + pos, sizeof(mac) - pos, "%s%02X", i > 0 ? ":" : "", adapter->PhysicalAddress[i]);
-      }
-    }
-    ts_hashmap_set(stat, ts_string_new("mac"), ts_value_string(ts_string_new(mac)));
-
-    /* Find matching interface in IF table for byte counts */
-    unsigned long long bytesRecv = 0, bytesSent = 0;
-    unsigned long long packetsRecv = 0, packetsSent = 0;
-    unsigned long long errorsRecv = 0, errorsSent = 0;
-
-    if (ifTable) {
-      for (DWORD i = 0; i < ifTable->table.NumEntries; i++) {
-        PMIB_IFROW row = &ifTable->table.table[i];
-        if (row->dwIndex == adapter->IfIndex) {
-          bytesRecv = row->dwInOctets;
-          bytesSent = row->dwOutOctets;
-          packetsRecv = row->dwInUcastPkts + row->dwInNUcastPkts;
-          packetsSent = row->dwOutUcastPkts + row->dwOutNUcastPkts;
-          errorsRecv = row->dwInErrors;
-          errorsSent = row->dwOutErrors;
-          break;
-        }
+    /* Parse pipe-separated values: name|description|mac */
+    char* parts[3] = {0};
+    int partCount = 0;
+    char* p = line;
+    while (*p && partCount < 3) {
+      parts[partCount++] = p;
+      char* sep = strchr(p, '|');
+      if (sep) {
+        *sep = '\0';
+        p = sep + 1;
+      } else {
+        break;
       }
     }
 
-    ts_hashmap_set(stat, ts_string_new("bytesReceived"), ts_value_number((double)bytesRecv));
-    ts_hashmap_set(stat, ts_string_new("bytesSent"), ts_value_number((double)bytesSent));
-    ts_hashmap_set(stat, ts_string_new("packetsReceived"), ts_value_number((double)packetsRecv));
-    ts_hashmap_set(stat, ts_string_new("packetsSent"), ts_value_number((double)packetsSent));
-    ts_hashmap_set(stat, ts_string_new("errorsReceived"), ts_value_number((double)errorsRecv));
-    ts_hashmap_set(stat, ts_string_new("errorsSent"), ts_value_number((double)errorsSent));
-
-    ts_array_push(arr, ts_value_object(stat));
+    if (partCount >= 1) {
+      TSHashMap* stat = ts_hashmap_new();
+      ts_hashmap_set(stat, ts_string_new("name"), ts_value_string(ts_string_new(parts[0])));
+      ts_hashmap_set(stat, ts_string_new("description"), ts_value_string(ts_string_new(partCount > 1 ? parts[1] : "")));
+      ts_hashmap_set(stat, ts_string_new("mac"), ts_value_string(ts_string_new(partCount > 2 ? parts[2] : "")));
+      ts_hashmap_set(stat, ts_string_new("bytesReceived"), ts_value_number(0));
+      ts_hashmap_set(stat, ts_string_new("bytesSent"), ts_value_number(0));
+      ts_hashmap_set(stat, ts_string_new("packetsReceived"), ts_value_number(0));
+      ts_hashmap_set(stat, ts_string_new("packetsSent"), ts_value_number(0));
+      ts_hashmap_set(stat, ts_string_new("errorsReceived"), ts_value_number(0));
+      ts_hashmap_set(stat, ts_string_new("errorsSent"), ts_value_number(0));
+      ts_array_push(arr, ts_value_object(stat));
+    }
   }
 
-  if (ifTable) FreeMibTable(ifTable);
-  free(adapters);
+  _pclose(pipe);
   return ts_value_array(arr);
 }
 #else

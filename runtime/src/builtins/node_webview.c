@@ -1,6 +1,10 @@
 #include "node_webview.h"
 #include <stdio.h>
 #include <string.h>
+#define strdup _strdup
+#define CINTERFACE
+#define COBJMACROS
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -13,13 +17,33 @@
 
 typedef int socklen_t;
 
-#define CINTERFACE
-#define COBJMACROS
 #include "WebView2.h"
+
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
 
 #pragma comment(lib, "WebView2Loader.dll.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
+
+/* DWM window corner preference (Windows 11 / newer SDK) */
+#ifndef _DWMAPI_H_
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+typedef enum {
+  DWMWCP_DEFAULT = 0,
+  DWMWCP_DONOTROUND = 1,
+  DWMWCP_ROUND = 2,
+  DWMWCP_ROUNDSMALL = 3
+} DWM_WINDOW_CORNER_PREFERENCE;
+#endif
+
+/* DWM border color attribute (Windows 11 22H2+ / newer SDK) */
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#ifndef DWMWA_COLOR_NONE
+#define DWMWA_COLOR_NONE 0xFFFFFFFE
+#endif
+#endif
 
 /* WebSocket bridge for async addJavaScriptInterface */
 typedef struct {
@@ -45,9 +69,11 @@ typedef struct {
   int show;
   int center;
   int ready;
-  int frame;        /* 1 = show window frame (default), 0 = frameless */
-  int transparent;  /* 1 = transparent background, 0 = opaque (default) */
-  int devTools;     /* 1 = open devtools (default), 0 = hide devtools */
+  int frame;           /* 1 = show window frame (default), 0 = frameless */
+  int transparent;     /* 1 = transparent background, 0 = opaque (default) */
+  int devTools;        /* 1 = open devtools (default), 0 = hide devtools */
+  int shadow;          /* 1 = enable window shadow on frameless windows */
+  int roundedCorners;  /* 1 = enable DWM rounded corners (Windows 11) */
   /* Event listeners: map eventName → array of functions */
   TSHashMap* listeners;
   /* COM event tokens for cleanup */
@@ -103,6 +129,54 @@ static char* from_wide(const wchar_t* wstr) {
   char* str = (char*)malloc(len);
   if (str) WideCharToMultiByte(CP_UTF8, 0, wstr, -1, str, len, NULL, NULL);
   return str;
+}
+
+/* Try loading icon at requested size, then fallback to first available image in the file. */
+static HICON try_load_icon(const wchar_t* path, int cx, int cy) {
+  HICON h = (HICON)LoadImageW(NULL, path, IMAGE_ICON, cx, cy, LR_LOADFROMFILE);
+  if (!h) h = (HICON)LoadImageW(NULL, path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE);
+  return h;
+}
+
+/* Set window icon (BIG 32x32 and SMALL 16x16).
+   Falls back to executable directory if the path is relative and not found. */
+static void webview_apply_icon(HWND hwnd, const char* iconPath) {
+  if (!iconPath || !hwnd) return;
+  wchar_t* wicon = to_wide(iconPath);
+  if (!wicon) return;
+
+  HICON hIconBig = try_load_icon(wicon, 32, 32);
+  HICON hIconSmall = try_load_icon(wicon, 16, 16);
+
+  if (!hIconBig && !hIconSmall) {
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    wchar_t* lastSlash = wcsrchr(exePath, L'\\');
+    if (lastSlash) {
+      *(lastSlash + 1) = L'\0';
+      wcscat_s(exePath, MAX_PATH, wicon);
+      hIconBig = try_load_icon(exePath, 32, 32);
+      hIconSmall = try_load_icon(exePath, 16, 16);
+      if (hIconBig || hIconSmall) {
+        fprintf(stderr, "WebView: Loaded icon from exe dir: %ls\n", exePath);
+      }
+    }
+  }
+
+  if (hIconBig) {
+    SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+  }
+  if (hIconSmall) {
+    SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
+  }
+
+  if (hIconBig || hIconSmall) {
+    fprintf(stderr, "WebView: Set window icon: %s\n", iconPath);
+  } else {
+    fprintf(stderr, "WebView: Failed to load icon: %s\n", iconPath);
+  }
+
+  free(wicon);
 }
 
 /* ==================== WebSocket Bridge ==================== */
@@ -616,6 +690,30 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
       return 0;
     }
+    case WM_NCCALCSIZE:
+      /* Remove caption but keep frame borders so DWM still draws shadow. */
+      if (wParam == TRUE && inst && !inst->frame && inst->shadow) {
+        NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lParam;
+        if (IsZoomed(hwnd)) {
+          HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
+          if (hMon) {
+            MONITORINFO mi;
+            mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoW(hMon, &mi)) {
+              p->rgrc[0] = mi.rcWork;
+              return 0;
+            }
+          }
+        } else {
+          int border = GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+          p->rgrc[0].left += border;
+          p->rgrc[0].right -= border;
+          p->rgrc[0].top += border;
+          p->rgrc[0].bottom -= border;
+          return 0;
+        }
+      }
+      break;
     case WM_ERASEBKGND:
       /* Suppress background erase when WebView2 is active to avoid flashing over content */
       if (inst && inst->controller) return 1;
@@ -656,7 +754,22 @@ static void navigate_to_url(WebViewInstance* inst) {
             inst->webview, inst->url ? inst->url : "(null)");
     return;
   }
-  wchar_t* wurl = to_wide(inst->url);
+  const char* url = inst->url;
+  char rewrite_buf[1024];
+  /* Rewrite local asset paths (file:///…/assets/… or E:\…\assets\…) to
+     https://assets.mini-tsc/… so WebView2 treats them as a single origin. */
+  if (strncmp(url, "http", 4) != 0) {
+    const char* assetsPos = strstr(url, "assets/");
+    if (!assetsPos) assetsPos = strstr(url, "assets\\");
+    if (assetsPos) {
+      const char* rest = assetsPos + strlen("assets");
+      if (*rest == '/' || *rest == '\\') rest++;
+      snprintf(rewrite_buf, sizeof(rewrite_buf), "https://assets.mini-tsc/%s", rest);
+      url = rewrite_buf;
+      fprintf(stderr, "WebView: Rewrote local asset URL to %s\n", url);
+    }
+  }
+  wchar_t* wurl = to_wide(url);
   if (wurl) {
     HRESULT hr = ICoreWebView2_Navigate(inst->webview, wurl);
     fprintf(stderr, "WebView: ICoreWebView2_Navigate result: 0x%08lx\n", hr);
@@ -950,6 +1063,35 @@ static HRESULT STDMETHODCALLTYPE ControllerCreatedHandler_Invoke(
   ICoreWebView2Controller_get_CoreWebView2(result, &inst->webview);
   inst->ready = 1;
 
+  /* Map exeDir/assets directory to https://assets.mini-tsc (avoids file:// origin restrictions) */
+  if (inst->webview) {
+    ICoreWebView2_3* v3 = NULL;
+    static const IID IID_ICoreWebView2_3_local = {
+      0xA0D6DF20, 0x3B92, 0x416D,
+      {0xAA, 0x0C, 0x43, 0x7A, 0x9C, 0x72, 0x78, 0x57}
+    };
+    if (SUCCEEDED(IUnknown_QueryInterface((IUnknown*)inst->webview, &IID_ICoreWebView2_3_local, (void**)&v3))) {
+      WCHAR exePath[MAX_PATH];
+      DWORD len = GetModuleFileNameW(NULL, exePath, MAX_PATH);
+      if (len > 0 && len < MAX_PATH) {
+        /* Strip exe name, keep directory */
+        for (int i = (int)len - 1; i >= 0; i--) {
+          if (exePath[i] == L'\\' || exePath[i] == L'/') {
+            exePath[i] = L'\0';
+            break;
+          }
+        }
+        WCHAR assetsPath[MAX_PATH];
+        swprintf(assetsPath, MAX_PATH, L"%s\\assets", exePath);
+        fprintf(stderr, "WebView: SetVirtualHostNameToFolderMapping assets.mini-tsc -> %ls\n", assetsPath);
+        ICoreWebView2_3_SetVirtualHostNameToFolderMapping(
+          v3, L"assets.mini-tsc", assetsPath,
+          COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS);
+      }
+      ICoreWebView2_3_Release(v3);
+    }
+  }
+
   /* Set bounds */
   RECT bounds;
   GetClientRect(inst->hwnd, &bounds);
@@ -1204,11 +1346,22 @@ Value node_webview_WebView(Value options) {
     v = ts_hashmap_get(map, ts_string_new("frame"));
     inst->frame = ts_to_boolean(v);
 
+    v = ts_hashmap_get(map, ts_string_new("frameless"));
+    if (v.tag != TAG_NULL) {
+      inst->frame = ts_to_boolean(v) ? 0 : 1;
+    }
+
     v = ts_hashmap_get(map, ts_string_new("transparent"));
     inst->transparent = ts_to_boolean(v);
 
     v = ts_hashmap_get(map, ts_string_new("devTools"));
     inst->devTools = ts_to_boolean(v);
+
+    v = ts_hashmap_get(map, ts_string_new("shadow"));
+    inst->shadow = ts_to_boolean(v);
+
+    v = ts_hashmap_get(map, ts_string_new("roundedCorners"));
+    inst->roundedCorners = ts_to_boolean(v);
   }
 
   /* Register window class */
@@ -1225,7 +1378,16 @@ Value node_webview_WebView(Value options) {
   }
 
   /* Set window style based on frame option */
-  DWORD dwStyle = (inst->frame ? WS_OVERLAPPEDWINDOW : WS_POPUP) | WS_CLIPCHILDREN;
+  DWORD dwStyle;
+  if (inst->frame) {
+    dwStyle = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+  } else if (inst->shadow) {
+    /* Use overlapped window so DWM draws shadow; caption area is removed
+       later via WM_NCCALCSIZE while keeping frame borders. */
+    dwStyle = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+  } else {
+    dwStyle = WS_POPUP | WS_CLIPCHILDREN;
+  }
   DWORD dwExStyle = 0;
 
   /* Note: transparent option is reserved for future use */
@@ -1253,33 +1415,21 @@ Value node_webview_WebView(Value options) {
 
   /* Set window icon if provided */
   if (inst->icon) {
-    wchar_t* wicon = to_wide(inst->icon);
-    if (wicon) {
-      HICON hIcon = (HICON)LoadImageW(NULL, wicon, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
-      if (!hIcon) {
-        /* Try relative to executable directory */
-        wchar_t exePath[MAX_PATH];
-        GetModuleFileNameW(NULL, exePath, MAX_PATH);
-        /* Find last backslash and replace with icon filename */
-        wchar_t* lastSlash = wcsrchr(exePath, L'\\');
-        if (lastSlash) {
-          *(lastSlash + 1) = L'\0';
-          wcscat_s(exePath, MAX_PATH, wicon);
-          hIcon = (HICON)LoadImageW(NULL, exePath, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
-          if (hIcon) {
-            fprintf(stderr, "WebView: Loaded icon from exe dir: %ls\n", exePath);
-          }
-        }
-      }
-      if (hIcon) {
-        SendMessage(inst->hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
-        SendMessage(inst->hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
-        fprintf(stderr, "WebView: Set window icon: %s\n", inst->icon);
-      } else {
-        fprintf(stderr, "WebView: Failed to load icon: %s\n", inst->icon);
-      }
-      free(wicon);
-    }
+    webview_apply_icon(inst->hwnd, inst->icon);
+  }
+
+  /* Force a WM_NCCALCSIZE recalculation so the shadow/frameless logic is applied
+     before the window becomes visible. */
+  if (inst->shadow && !inst->frame) {
+    SetWindowPos(inst->hwnd, NULL, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    MARGINS margins = {0, 0, 0, 0};
+    DwmExtendFrameIntoClientArea(inst->hwnd, &margins);
+  }
+
+  if (inst->roundedCorners) {
+    DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_ROUND;
+    DwmSetWindowAttribute(inst->hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
   }
 
   /* Note: transparent option is reserved for future use with WebView2 background transparency */
@@ -1401,8 +1551,13 @@ Value node_webview_setSize(Value self, Value width, Value height) {
 }
 
 Value node_webview_setIcon(Value self, Value iconPath) {
-  (void)self; (void)iconPath;
-  /* TODO: Implement icon setting */
+  WebViewInstance* inst = (WebViewInstance*)self.as.object;
+  if (!inst || !inst->hwnd) return ts_value_undefined();
+  if (iconPath.tag == TAG_STRING && iconPath.as.string && iconPath.as.string->data) {
+    free(inst->icon);
+    inst->icon = strdup(iconPath.as.string->data);
+    webview_apply_icon(inst->hwnd, inst->icon);
+  }
   return ts_value_undefined();
 }
 

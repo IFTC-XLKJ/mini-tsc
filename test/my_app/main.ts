@@ -14,6 +14,8 @@ function main(): void {
         center: true,
         frame: false,
         transparent: true,
+        shadow: true,
+        roundedCorners: true,
         devTools: true,
     });
     webView.addJavaScriptInterface("miniTscBridge", {
@@ -66,8 +68,18 @@ function main(): void {
         transparent: true,
         devTools: true,
     });
+    webView2.on("load", () => {
+        console.log("WebView2 loaded");
+        webView2.executeJavaScript(`
+            if (!document.getElementById('mini-tsc-drag-style')) {
+                const s = document.createElement('style');
+                s.id = 'mini-tsc-drag-style';
+                s.textContent = 'body { -webkit-app-region: drag; } button, input, select, textarea, a, [role="button"], iframe { -webkit-app-region: no-drag; }';
+                document.head.appendChild(s);
+            }
+        `);
+    });
     webView2.run();
-    webView2.executeJavaScript("console.log('Hello from my_app!');");
 }
 
 main();

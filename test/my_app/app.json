@@ -15,7 +15,8 @@
     "author": "IFTC",
     "company": "IFTC",
     "copyright": "Copyright (c) 2020-2026 IFTC",
-    "version": "1.0.0"
+    "version": "1.0.0",
+    "assetsDir": "assets"
   },
   "scripts": {
     "build": "mini-tsc compile main.ts -o my_app",

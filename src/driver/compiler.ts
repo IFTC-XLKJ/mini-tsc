@@ -1,6 +1,7 @@
 import * as ts from "typescript";
 import * as path from "path";
 import * as fs from "fs";
+import { execSync } from "child_process";
 import { parseTypeScript } from "../parser/ts-parser.js";
 import { TypeMapper } from "../types/type-mapper.js";
 import { ModuleResolver, type ModuleGraph, type ModuleInfo } from "../modules/module-resolver.js";
@@ -33,6 +34,10 @@ export interface AppBuildMetadata {
   version?: string;
   /** Directory containing app.json (for resolving relative icon paths). */
   appDir?: string;
+  /** Static assets directory to bundle next to the executable. */
+  assetsDir?: string;
+  /** Hide the terminal / console window (Windows GUI subsystem). */
+  gui?: boolean;
 }
 
 export interface CompilerOptions {
@@ -48,6 +53,8 @@ export interface CompilerOptions {
   projectRoot?: string;
   /** From app.json `build` — embedded into the native binary when supported. */
   appBuild?: AppBuildMetadata;
+  /** Compile a zip archive of the build output after linking. */
+  zip?: boolean;
 }
 
 export interface CompilerResult {
@@ -56,6 +63,7 @@ export interface CompilerResult {
   diagnostics: string[];
   verbose: string[];
   outputPath?: string;
+  zipPath?: string;
 }
 
 /** Simple scope stack for variable resolution */
@@ -290,28 +298,45 @@ export class CompilerDriver {
 
     // Compute output executable path
     let outputPath: string | undefined;
-    if (options.output) {
-      const outDir = options.outDir || "./out";
-      const isWindows = (options.target || process.platform) === "win32" || options.target === "windows";
-      let ext: string;
-      if (options.shared) {
-        ext = isWindows ? ".dll" : ".so";
-      } else {
-        ext = isWindows ? ".exe" : "";
-      }
-      // Prefer productName from app.json when CLI still uses default "output"
-      const outBase =
-        options.appBuild?.productName && (options.output === "output")
-          ? options.appBuild.productName
-          : options.output;
+    const outBase = options.output
+      ? (options.appBuild?.productName && (options.output === "output")
+        ? options.appBuild.productName
+        : options.output)
+      : undefined;
+    const outDir = options.outDir || "./out";
+    const isWindows = (options.target || process.platform) === "win32" || options.target === "windows";
+    const outExt = options.shared
+      ? (isWindows ? ".dll" : ".so")
+      : (isWindows ? ".exe" : "");
+    if (outBase) {
       if (path.isAbsolute(outBase)) {
-        outputPath = outBase + ext;
+        outputPath = outBase + outExt;
       } else {
-        outputPath = path.join(outDir, outBase + ext);
+        outputPath = path.join(outDir, outBase + outExt);
       }
     }
 
-    return { success: diagnostics.length === 0, files: allFiles, diagnostics, verbose, outputPath };
+    // 10. Optionally zip the build output
+    let zipPath: string | undefined;
+    if (options.zip && outputPath) {
+      const outDirAbs = path.resolve(outDir);
+      zipPath = path.join(path.dirname(outDirAbs), (outBase || "output") + ".zip");
+      // Remove stale zip so tools don't fail with "file in use"
+      if (fs.existsSync(zipPath)) {
+        try {
+          fs.unlinkSync(zipPath);
+        } catch {
+          // Ignore — zip tool may overwrite; failing here is non-fatal
+        }
+      }
+      try {
+        this.zipDirectory(outDirAbs, zipPath);
+      } catch (e: any) {
+        diagnostics.push(`zip error: ${e.message || e}`);
+      }
+    }
+
+    return { success: diagnostics.length === 0, files: allFiles, diagnostics, verbose, outputPath, zipPath };
   }
 
   private generateRuntimeFiles(usage: FeatureUsage): EmitFile[] {
@@ -1352,6 +1377,12 @@ extern TsErrorContext _ts_current_error;
         ? ["-Wl,/OPT:REF", "-Wl,/OPT:ICF"]
         : ["-Wl,--gc-sections", "-Wl,--as-needed"];
 
+    // Windows GUI subsystem: hide console window when gui=true
+    // MSVC target: use /SUBSYSTEM:WINDOWS linker flag (not -mwindows)
+    const guiFlags = isWindows && !options.shared && options.appBuild?.gui
+      ? ["-Wl,/SUBSYSTEM:WINDOWS", "-Wl,/ENTRY:mainCRTStartup"]
+      : [];
+
     const outExe = options.shared
       ? path.join(outputDir, outputName + (isWindows ? ".dll" : ".so"))
       : path.join(outputDir, outputName + (isWindows ? ".exe" : ""));
@@ -1445,6 +1476,7 @@ extern TsErrorContext _ts_current_error;
           })()
         : []),
       ...gcFlags,
+      ...guiFlags,
       "-Wno-implicit-function-declaration",
       "-Wno-deprecated-non-prototype",
       ...(options.clangArgs || []),
@@ -1467,6 +1499,42 @@ extern TsErrorContext _ts_current_error;
         if (fs.existsSync(dllSrc)) fs.copyFileSync(dllSrc, dllDst);
       } catch {
         /* ignore copy failures */
+      }
+    }
+
+    // Copy static assets directory next to the executable
+    if (options.appBuild?.assetsDir) {
+      const srcDir = path.isAbsolute(options.appBuild.assetsDir)
+        ? options.appBuild.assetsDir
+        : path.resolve(options.appBuild.appDir || process.cwd(), options.appBuild.assetsDir);
+      if (fs.existsSync(srcDir)) {
+        const dstDir = path.join(path.dirname(outExe), path.basename(srcDir));
+        try {
+          if (typeof (fs as any).cpSync === "function") {
+            (fs as any).cpSync(srcDir, dstDir, { recursive: true, force: true });
+          } else {
+            this.copyDirSync(srcDir, dstDir);
+          }
+        } catch (e: any) {
+          console.warn(`Warning: failed to copy assetsDir: ${e.message || e}`);
+        }
+      } else {
+        console.warn(`Warning: assetsDir not found: ${srcDir}`);
+      }
+    }
+
+    // Copy icon next to the executable so relative paths resolve at runtime
+    if (options.appBuild?.icon) {
+      const iconSrc = path.isAbsolute(options.appBuild.icon)
+        ? options.appBuild.icon
+        : path.resolve(options.appBuild.appDir || process.cwd(), options.appBuild.icon);
+      if (fs.existsSync(iconSrc)) {
+        const iconDst = path.join(path.dirname(outExe), path.basename(options.appBuild.icon));
+        try {
+          fs.copyFileSync(iconSrc, iconDst);
+        } catch (e: any) {
+          console.warn(`Warning: failed to copy icon to output: ${e.message || e}`);
+        }
       }
     }
 
@@ -1590,6 +1658,61 @@ END
       }
     }
     return undefined;
+  }
+
+  /** Recursively copy a directory tree (fallback when fs.cpSync is unavailable). */
+  private copyDirSync(src: string, dst: string): void {
+    if (!fs.existsSync(dst)) fs.mkdirSync(dst, { recursive: true });
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+      const srcPath = path.join(src, entry.name);
+      const dstPath = path.join(dst, entry.name);
+      if (entry.isDirectory()) {
+        this.copyDirSync(srcPath, dstPath);
+      } else {
+        fs.copyFileSync(srcPath, dstPath);
+      }
+    }
+  }
+
+  /** Create a zip archive of `sourceDir` at `zipFile` using system tools,
+   *  excluding generated .c / .h source files and WebView2 runtime dirs. */
+  private zipDirectory(sourceDir: string, zipFile: string): void {
+    // 1. Try `zip` command (common on Unix and MSYS on Windows)
+    try {
+      execSync(
+        `zip -r "${zipFile}" . -x "*.c" "*.h" "*.WebView2/*"`,
+        { cwd: sourceDir, stdio: "pipe" },
+      );
+      return;
+    } catch { /* ignore — zip not available */ }
+
+    // 2. Try `tar` with zip auto-detection (available on Windows 10+ and Unix)
+    try {
+      execSync(
+        `tar -caf "${zipFile}" --exclude="*.c" --exclude="*.h" --exclude="*.WebView2/*" -C "${sourceDir}" .`,
+        { stdio: "pipe" },
+      );
+      return;
+    } catch { /* ignore */ }
+
+    // 3. PowerShell Compress-Archive fallback
+    if (process.platform === "win32") {
+      const psScript =
+        `Compress-Archive -Path (Get-ChildItem -Path '${sourceDir}' -Exclude '*.c','*.h' | ` +
+        `Where-Object { $_.Name -notlike '*.WebView2' } | ` +
+        `Select-Object -ExpandProperty FullName) ` +
+        `-DestinationPath '${zipFile}' -Force`;
+      for (const shell of ["pwsh", "powershell"]) {
+        try {
+          execSync(`${shell} -NoProfile -Command "${psScript}"`, { stdio: "pipe" });
+          return;
+        } catch { /* ignore — try next shell */ }
+      }
+    }
+
+    throw new Error(
+      "No zip tool available. Install `zip` (Unix), `tar` (Windows 10+), or ensure PowerShell is available (Windows).",
+    );
   }
 
   private static _lldCached: boolean | undefined;

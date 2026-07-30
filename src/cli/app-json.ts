@@ -34,6 +34,13 @@ export interface AppBuildOptions {
   copyright?: string;
   /** Version string for the binary (e.g. "1.0.0"); falls back to app.version. */
   version?: string;
+  /**
+   * Static assets directory to bundle next to the executable.
+   * Relative to app.json or absolute. Copied recursively at build time.
+   */
+  assetsDir?: string;
+  /** Hide the terminal / console window (Windows GUI subsystem). */
+  gui?: boolean;
 }
 
 export interface AppJson {
@@ -56,6 +63,8 @@ export interface ResolvedBuildOptions {
   company: string;
   copyright: string;
   version: string;
+  assetsDir?: string;
+  gui?: boolean;
 }
 
 export function loadAppJson(dir: string): AppJson | null {
@@ -119,6 +128,12 @@ export function resolveBuildOptions(
 ): ResolvedBuildOptions {
   const b = app.build || {};
   const productName = b.productName || app.name || "output";
+  // Resolve assetsDir path
+  let assetsDir: string | undefined;
+  if (b.assetsDir) {
+    assetsDir = b.assetsDir.trim();
+  }
+
   return {
     name: b.name || app.name || productName,
     productName,
@@ -128,6 +143,8 @@ export function resolveBuildOptions(
     company: b.company || b.author || app.author || "",
     copyright: b.copyright || "",
     version: b.version || app.version || "1.0.0",
+    assetsDir,
+    gui: b.gui ?? false,
   };
 }
 
