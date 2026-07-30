@@ -16,7 +16,7 @@ function main(): void {
         transparent: true,
         shadow: true,
         roundedCorners: true,
-        devTools: true,
+        devTools: true
     });
     webView.addJavaScriptInterface("miniTscBridge", {
         greet: (name: string): any => {
@@ -54,7 +54,6 @@ function main(): void {
     webView.on("close", () => {
         console.log("WebView closed");
     });
-    webView.run();
 
     const webView2 = new WebView({
         url: "https://iftc.koyeb.app/mini-tsc",
@@ -70,16 +69,10 @@ function main(): void {
     });
     webView2.on("load", () => {
         console.log("WebView2 loaded");
-        webView2.executeJavaScript(`
-            if (!document.getElementById('mini-tsc-drag-style')) {
-                const s = document.createElement('style');
-                s.id = 'mini-tsc-drag-style';
-                s.textContent = 'body { -webkit-app-region: drag; } button, input, select, textarea, a, [role="button"], iframe { -webkit-app-region: no-drag; }';
-                document.head.appendChild(s);
-            }
-        `);
     });
-    webView2.run();
+
+    /* 只启动一次全局消息循环，所有 WebView 共用它 */
+    webView.run();
 }
 
 main();

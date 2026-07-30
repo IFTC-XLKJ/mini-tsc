@@ -56,6 +56,11 @@ typedef struct {
   int recv_cap;
 } WsBridge;
 
+/* Drag region rectangle (client area coordinates from frontend) */
+typedef struct {
+  int x, y, w, h;
+} DragRect;
+
 /* WebView2 instance data */
 typedef struct {
   HWND hwnd;
@@ -88,9 +93,47 @@ typedef struct {
   /* Async WebSocket bridge */
   WsBridge* bridge;
   int wsa_inited;
+  /* Drag regions received from frontend */
+  DragRect* dragRegions;
+  int dragRegionCount;
+  DragRect* dragExcludes;
+  int dragExcludeCount;
+  int closing;          /* 1 = WM_DESTROY already processed */
 } WebViewInstance;
 
 static const wchar_t* CLASS_NAME = L"MiniTscWebView";
+
+/* Global WebView instance table (shared message loop) */
+#define MAX_INSTANCES 32
+static WebViewInstance* g_instances[MAX_INSTANCES] = {0};
+static int g_instanceCount = 0;
+static int g_loopRunning = 0;
+
+static void webview_register_instance(WebViewInstance* inst) {
+  if (!inst) return;
+  inst->closing = 0;
+  for (int i = 0; i < MAX_INSTANCES; i++) {
+    if (!g_instances[i]) {
+      g_instances[i] = inst;
+      g_instanceCount++;
+      fprintf(stderr, "WebView: Registered instance %p, count=%d\n", (void*)inst, g_instanceCount);
+      return;
+    }
+  }
+  fprintf(stderr, "WebView: Too many instances!\n");
+}
+
+static void webview_unregister_instance(WebViewInstance* inst) {
+  if (!inst) return;
+  for (int i = 0; i < MAX_INSTANCES; i++) {
+    if (g_instances[i] == inst) {
+      g_instances[i] = NULL;
+      g_instanceCount--;
+      fprintf(stderr, "WebView: Unregistered instance %p, count=%d\n", (void*)inst, g_instanceCount);
+      return;
+    }
+  }
+}
 
 /* Forward declarations */
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -708,12 +751,39 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
           int border = GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
           p->rgrc[0].left += border;
           p->rgrc[0].right -= border;
-          p->rgrc[0].top += border;
+          p->rgrc[0].top += border - 8;
           p->rgrc[0].bottom -= border;
           return 0;
         }
       }
       break;
+    case WM_NCHITTEST: {
+      /* Fallback hit-test using stored drag regions (works when message reaches parent) */
+      if (inst && !inst->frame) {
+        LRESULT hit = DefWindowProcW(hwnd, msg, wParam, lParam);
+        if (hit == HTCLIENT) {
+          POINT pt = { LOWORD(lParam), HIWORD(lParam) };
+          ScreenToClient(hwnd, &pt);
+          if (inst->dragRegions) {
+            for (int i = 0; i < inst->dragRegionCount; i++) {
+              DragRect* r = &inst->dragRegions[i];
+              if (pt.x >= r->x && pt.x < r->x + r->w && pt.y >= r->y && pt.y < r->y + r->h) {
+                int excluded = 0;
+                for (int j = 0; j < inst->dragExcludeCount; j++) {
+                  DragRect* e = &inst->dragExcludes[j];
+                  if (pt.x >= e->x && pt.x < e->x + e->w && pt.y >= e->y && pt.y < e->y + e->h) {
+                    excluded = 1; break;
+                  }
+                }
+                if (!excluded) return HTCAPTION;
+              }
+            }
+          }
+        }
+        return hit;
+      }
+      break;
+    }
     case WM_ERASEBKGND:
       /* Suppress background erase when WebView2 is active to avoid flashing over content */
       if (inst && inst->controller) return 1;
@@ -731,9 +801,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
       }
       return 0;
-    case WM_DESTROY:
-      PostQuitMessage(0);
+    case WM_DESTROY: {
+      if (inst && !inst->closing) {
+        inst->closing = 1;
+        webview_unregister_instance(inst);
+      }
+      if (g_instanceCount <= 0) {
+        PostQuitMessage(0);
+      }
       return 0;
+    }
     case WM_CLOSE:
       if (inst) {
         webview_emit(inst, "close", NULL, 0);
@@ -745,6 +822,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       return 0;
   }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+/* Drag region injection script (MutationObserver + mousedown listener) */
+static const char DRAG_SCRIPT[] =
+"(function(){\n"
+"  if(window.__minitscDragInit)return;\n"
+"  window.__minitscDragInit=true;\n"
+"  function getRects(sel){var r=[],els=document.querySelectorAll(sel);for(var i=0;i<els.length;i++){var c=els[i].getBoundingClientRect();r.push({x:Math.round(c.x),y:Math.round(c.y),w:Math.round(c.width),h:Math.round(c.height)});}return r;}\n"
+"  function report(){var a=getRects('[data-minitsc-drag-region]:not([data-minitsc-drag-region=\"false\"])');var b=getRects('[data-minitsc-drag-region=\"false\"]');if(window.chrome&&window.chrome.webview&&window.chrome.webview.postMessage){window.chrome.webview.postMessage(JSON.stringify({__minitsc_drag_regions:a,__minitsc_drag_excludes:b}));}}\n"
+"  var ob=new MutationObserver(function(ms){var need=false;for(var i=0;i<ms.length;i++){var m=ms[i];if(m.type==='attributes'&&m.attributeName==='data-minitsc-drag-region'){need=true;break;}if(m.type==='childList'){for(var j=0;j<m.addedNodes.length;j++){var n=m.addedNodes[j];if(n.nodeType===1&&((n.getAttribute&&n.getAttribute('data-minitsc-drag-region'))||(n.querySelector&&n.querySelector('[data-minitsc-drag-region]')))){need=true;break;}}if(need)break;for(var j=0;j<m.removedNodes.length;j++){var n=m.removedNodes[j];if(n.nodeType===1&&((n.getAttribute&&n.getAttribute('data-minitsc-drag-region'))||(n.querySelector&&n.querySelector('[data-minitsc-drag-region]')))){need=true;break;}}}}if(need){clearTimeout(window.__minitscDragTimer);window.__minitscDragTimer=setTimeout(report,50);}});\n"
+"  ob.observe(document.documentElement||document,{attributes:true,attributeFilter:['data-minitsc-drag-region'],childList:true,subtree:true});\n"
+"  report();\n"
+"  window.addEventListener('scroll',report,true);\n"
+"  window.addEventListener('resize',report);\n"
+"  window.__minitscDragInterval=setInterval(report,200);\n"
+"  function isFalseRegion(t,x,y){var el=t;while(el&&el!==document.documentElement){if(el.getAttribute&&el.getAttribute('data-minitsc-drag-region')==='false'){var r=el.getBoundingClientRect();if(x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom)return true;}el=el.parentElement;}return false;}\n"
+"  document.addEventListener('mousedown',function(e){if(e.button!==0)return;var el=e.target;while(el&&el!==document.documentElement){var attr=el.getAttribute?el.getAttribute('data-minitsc-drag-region'):null;if(attr!==null&&attr!=='false'){if(isFalseRegion(e.target,e.clientX,e.clientY))return;if(window.chrome&&window.chrome.webview&&window.chrome.webview.postMessage){e.preventDefault();window.chrome.webview.postMessage(JSON.stringify({__minitsc_drag_start:true}));}return;}if(attr==='false')return;el=el.parentElement;}});\n"
+"})();";
+
+static void webview_inject_drag_script(WebViewInstance* inst) {
+  if (!inst || !inst->webview) return;
+  wchar_t* wcode = to_wide(DRAG_SCRIPT);
+  if (wcode) {
+    ICoreWebView2_ExecuteScript(inst->webview, wcode, NULL);
+    free(wcode);
+  }
 }
 
 /* Navigate to URL */
@@ -821,6 +924,7 @@ static HRESULT STDMETHODCALLTYPE NavCompleted_Invoke(
       }
     }
   }
+  webview_inject_drag_script(h->inst);
   webview_emit(h->inst, "load", NULL, 0);
   return S_OK;
 }
@@ -905,7 +1009,76 @@ static HRESULT STDMETHODCALLTYPE WebMsg_Invoke(
     }
   }
   int interfaceDispatched = 0;
-  if (msg && h->inst && h->inst->interfaceMethods) {
+  /* Handle internal __minitsc_* messages before interface dispatch */
+  if (msg && h->inst) {
+    TSString* msgStr = ts_string_new(msg);
+    Value parsed = ts_json_parse(msgStr);
+    ts_string_free(msgStr);
+    if (parsed.tag == TAG_OBJECT && parsed.as.object) {
+      TSHashMap* map = (TSHashMap*)parsed.as.object;
+      Value dragStart = ts_hashmap_get(map, ts_string_new("__minitsc_drag_start"));
+      if (dragStart.tag == TAG_BOOLEAN && dragStart.as.boolean) {
+        if (h->inst->hwnd) {
+          ReleaseCapture();
+          SendMessage(h->inst->hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        }
+        interfaceDispatched = 1;
+      } else {
+        Value regionsVal = ts_hashmap_get(map, ts_string_new("__minitsc_drag_regions"));
+        Value excludesVal = ts_hashmap_get(map, ts_string_new("__minitsc_drag_excludes"));
+        if (regionsVal.tag == TAG_ARRAY || excludesVal.tag == TAG_ARRAY) {
+          if (h->inst->dragRegions) { free(h->inst->dragRegions); h->inst->dragRegions = NULL; }
+          h->inst->dragRegionCount = 0;
+          if (h->inst->dragExcludes) { free(h->inst->dragExcludes); h->inst->dragExcludes = NULL; }
+          h->inst->dragExcludeCount = 0;
+          TSArray* regArr = (regionsVal.tag == TAG_ARRAY && regionsVal.as.array) ? regionsVal.as.array : NULL;
+          if (regArr && regArr->length > 0) {
+            h->inst->dragRegions = (DragRect*)calloc(regArr->length, sizeof(DragRect));
+            if (h->inst->dragRegions) {
+              h->inst->dragRegionCount = regArr->length;
+              for (int i = 0; i < regArr->length; i++) {
+                Value item = ts_array_get(regArr, i);
+                if (item.tag == TAG_OBJECT && item.as.object) {
+                  TSHashMap* itemMap = (TSHashMap*)item.as.object;
+                  Value vx = ts_hashmap_get(itemMap, ts_string_new("x"));
+                  Value vy = ts_hashmap_get(itemMap, ts_string_new("y"));
+                  Value vw = ts_hashmap_get(itemMap, ts_string_new("w"));
+                  Value vh = ts_hashmap_get(itemMap, ts_string_new("h"));
+                  h->inst->dragRegions[i].x = (vx.tag == TAG_NUMBER) ? (int)vx.as.number : 0;
+                  h->inst->dragRegions[i].y = (vy.tag == TAG_NUMBER) ? (int)vy.as.number : 0;
+                  h->inst->dragRegions[i].w = (vw.tag == TAG_NUMBER) ? (int)vw.as.number : 0;
+                  h->inst->dragRegions[i].h = (vh.tag == TAG_NUMBER) ? (int)vh.as.number : 0;
+                }
+              }
+            }
+          }
+          TSArray* exArr = (excludesVal.tag == TAG_ARRAY && excludesVal.as.array) ? excludesVal.as.array : NULL;
+          if (exArr && exArr->length > 0) {
+            h->inst->dragExcludes = (DragRect*)calloc(exArr->length, sizeof(DragRect));
+            if (h->inst->dragExcludes) {
+              h->inst->dragExcludeCount = exArr->length;
+              for (int i = 0; i < exArr->length; i++) {
+                Value item = ts_array_get(exArr, i);
+                if (item.tag == TAG_OBJECT && item.as.object) {
+                  TSHashMap* itemMap = (TSHashMap*)item.as.object;
+                  Value vx = ts_hashmap_get(itemMap, ts_string_new("x"));
+                  Value vy = ts_hashmap_get(itemMap, ts_string_new("y"));
+                  Value vw = ts_hashmap_get(itemMap, ts_string_new("w"));
+                  Value vh = ts_hashmap_get(itemMap, ts_string_new("h"));
+                  h->inst->dragExcludes[i].x = (vx.tag == TAG_NUMBER) ? (int)vx.as.number : 0;
+                  h->inst->dragExcludes[i].y = (vy.tag == TAG_NUMBER) ? (int)vy.as.number : 0;
+                  h->inst->dragExcludes[i].w = (vw.tag == TAG_NUMBER) ? (int)vw.as.number : 0;
+                  h->inst->dragExcludes[i].h = (vh.tag == TAG_NUMBER) ? (int)vh.as.number : 0;
+                }
+              }
+            }
+          }
+          interfaceDispatched = 1;
+        }
+      }
+    }
+  }
+  if (!interfaceDispatched && msg && h->inst && h->inst->interfaceMethods) {
     TSString* msgStr = ts_string_new(msg);
     Value parsed = ts_json_parse(msgStr);
     ts_string_free(msgStr);
@@ -1189,6 +1362,8 @@ static HRESULT STDMETHODCALLTYPE ControllerCreatedHandler_Invoke(
     }
   }
 
+  webview_inject_drag_script(inst);
+
   /* Emit ready event */
   webview_emit(inst, "ready", NULL, 0);
 
@@ -1412,6 +1587,9 @@ Value node_webview_WebView(Value options) {
   }
 
   fprintf(stderr, "WebView: Window created successfully, hwnd=%p\n", inst->hwnd);
+
+  /* Register into global instance table */
+  webview_register_instance(inst);
 
   /* Set window icon if provided */
   if (inst->icon) {
@@ -1642,6 +1820,12 @@ Value node_webview_close(Value self) {
   /* Shutdown WebSocket bridge */
   bridge_shutdown(inst);
 
+  /* Cleanup drag regions */
+  if (inst->dragRegions) { free(inst->dragRegions); inst->dragRegions = NULL; }
+  inst->dragRegionCount = 0;
+  if (inst->dragExcludes) { free(inst->dragExcludes); inst->dragExcludes = NULL; }
+  inst->dragExcludeCount = 0;
+
   /* Cleanup C strings (but leave inst itself — runtime/GC owns the object pointer) */
   free(inst->url);
   free(inst->title);
@@ -1657,30 +1841,41 @@ Value node_webview_run(Value self) {
     return ts_value_undefined();
   }
 
-  fprintf(stderr, "WebView: Starting message loop, hwnd=%p\n", inst->hwnd);
+  /* If the global loop is already running, just return – this instance
+     will be serviced by that loop. */
+  if (g_loopRunning) {
+    fprintf(stderr, "WebView: Global message loop already running, skipping block\n");
+    return ts_value_undefined();
+  }
 
+  fprintf(stderr, "WebView: Starting global message loop, %d instance(s)\n", g_instanceCount);
+
+  g_loopRunning = 1;
   MSG msg;
-  int running = 1;
-  while (running) {
+  while (g_instanceCount > 0) {
     while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
       if (msg.message == WM_QUIT) {
-        running = 0;
         break;
       }
       TranslateMessage(&msg);
       DispatchMessage(&msg);
     }
-    if (!running) break;
 
-    /* Poll WebSocket bridge for async interface messages */
-    if (inst && inst->bridge) {
-      bridge_poll(inst);
+    if (g_instanceCount <= 0) break;
+
+    /* Poll WebSocket bridges for all instances */
+    for (int i = 0; i < MAX_INSTANCES; i++) {
+      WebViewInstance* w = g_instances[i];
+      if (w && w->bridge) {
+        bridge_poll(w);
+      }
     }
 
     Sleep(5);
   }
 
-  fprintf(stderr, "WebView: Message loop ended\n");
+  fprintf(stderr, "WebView: Global message loop ended\n");
+  g_loopRunning = 0;
   return ts_value_undefined();
 }
 
