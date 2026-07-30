@@ -368,8 +368,8 @@ export class CompilerDriver {
 #include <setjmp.h>
 
 /* CommonJS module globals (defined in generated main.c) */
-extern const char* __ts_dirname;
-extern const char* __ts_filename;
+extern char* __ts_dirname;
+extern char* __ts_filename;
 
 /* Value type — tagged union */
 typedef enum {
@@ -1067,16 +1067,37 @@ extern TsErrorContext _ts_current_error;
       lines.push('extern int ts_worker_poll(void);');
     }
     lines.push('');
-    // CommonJS __dirname / __filename — absolute path of the entry source file
-    const entryAbs = path.isAbsolute(entryFile)
-      ? entryFile
-      : path.resolve(options.projectRoot || process.cwd(), entryFile);
-    const entryDir = path.dirname(entryAbs);
-    // Escape for C string literals (Windows backslashes)
-    const escC = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    lines.push(`/* CommonJS module globals for entry: ${escC(entryAbs)} */`);
-    lines.push(`const char* __ts_dirname = "${escC(entryDir)}";`);
-    lines.push(`const char* __ts_filename = "${escC(entryAbs)}";`);
+    // CommonJS __dirname / __filename — runtime-resolved exe paths
+    lines.push('/* CommonJS module globals (runtime-resolved exe paths) */');
+    lines.push('char* __ts_dirname;');
+    lines.push('char* __ts_filename;');
+    lines.push('#ifdef _WIN32');
+    lines.push('#include <windows.h>');
+    lines.push('#endif');
+    lines.push('static void __ts_init_paths(void) {');
+    lines.push('#ifdef _WIN32');
+    lines.push('  wchar_t wbuf[MAX_PATH];');
+    lines.push('  DWORD n = GetModuleFileNameW(NULL, wbuf, MAX_PATH);');
+    lines.push('  if (n > 0 && n < MAX_PATH) {');
+    lines.push('    static char buf[MAX_PATH];');
+    lines.push('    WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, buf, MAX_PATH, NULL, NULL);');
+    lines.push('    __ts_filename = strdup(buf);');
+    lines.push('    { char* p = buf; char* last = NULL; while (*p) { if (*p == \'\\\\\' || *p == \'/\') last = p; p++; }');
+    lines.push('      if (last) *last = \'\\0\'; }');
+    lines.push('    __ts_dirname = strdup(buf);');
+    lines.push('  } else { __ts_dirname = strdup("."); __ts_filename = strdup(""); }');
+    lines.push('#else');
+    lines.push('  char buf[4096];');
+    lines.push('  ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);');
+    lines.push('  if (n > 0) {');
+    lines.push('    buf[n] = \'\\0\';');
+    lines.push('    __ts_filename = strdup(buf);');
+    lines.push('    { char* p = buf; char* last = NULL; while (*p) { if (*p == \'/\' || *p == \'\\\\\') last = p; p++; }');
+    lines.push('      if (last) *last = \'\\0\'; }');
+    lines.push('    __ts_dirname = strdup(buf);');
+    lines.push('  } else { __ts_dirname = strdup("."); __ts_filename = strdup(""); }');
+    lines.push('#endif');
+    lines.push('}');
     lines.push('');
 
     // Shared library mode: export init + entry functions, no main()
@@ -1133,6 +1154,7 @@ extern TsErrorContext _ts_current_error;
 
     lines.push('int main(int argc, char* argv[]) {');
     lines.push('  node_process_set_argv(argc, argv);');
+    lines.push('  __ts_init_paths();');
     lines.push('  /* GC: stack bottom for conservative mark + init */');
     lines.push('  ts_gc_init();');
     lines.push('  ts_gc_set_stack_bottom((void*)&argc);');

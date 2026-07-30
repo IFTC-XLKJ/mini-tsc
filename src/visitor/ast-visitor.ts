@@ -1806,11 +1806,90 @@ export class AstVisitor {
       body: { kind: "block", statements: bodyNodes },
     });
 
+    // Generate a Value-ABI wrapper so closures work through ts_value_call
+    const wrapperName = `${fnName}_tsv`;
+    const wrapperCallArgs: any[] = [];
+    for (let i = 0; i < params.length && i < 4; i++) {
+      const p = params[i];
+      if (p.type === "Value") {
+        wrapperCallArgs.push({ kind: "identifier", name: `a${i}` });
+      } else if (p.type === "TSString*" || p.type === "string") {
+        wrapperCallArgs.push({
+          kind: "call_expression",
+          callee: { kind: "identifier", name: "ts_to_string" },
+          arguments: [{ kind: "identifier", name: `a${i}` }],
+        });
+      } else if (p.type === "double" || p.type === "number" || p.type === "float") {
+        wrapperCallArgs.push({
+          kind: "call_expression",
+          callee: { kind: "identifier", name: "ts_to_number" },
+          arguments: [{ kind: "identifier", name: `a${i}` }],
+        });
+      } else if (p.type === "int" || p.type === "int32_t" || p.type === "boolean") {
+        wrapperCallArgs.push({
+          kind: "call_expression",
+          callee: { kind: "identifier", name: "ts_to_boolean" },
+          arguments: [{ kind: "identifier", name: `a${i}` }],
+        });
+      } else {
+        wrapperCallArgs.push({ kind: "identifier", name: `a${i}` });
+      }
+    }
+
+    const innerCall: any = {
+      kind: "call_expression",
+      callee: { kind: "identifier", name: fnName },
+      arguments: wrapperCallArgs,
+    };
+
+    let returnExpr: any;
+    if (returnType === "Value") {
+      returnExpr = innerCall;
+    } else if (returnType === "TSString*" || returnType === "string") {
+      returnExpr = {
+        kind: "call_expression",
+        callee: { kind: "identifier", name: "ts_value_string" },
+        arguments: [innerCall],
+      };
+    } else if (returnType === "double" || returnType === "number" || returnType === "float") {
+      returnExpr = {
+        kind: "call_expression",
+        callee: { kind: "identifier", name: "ts_value_number" },
+        arguments: [innerCall],
+      };
+    } else if (returnType === "int" || returnType === "int32_t" || returnType === "boolean") {
+      returnExpr = {
+        kind: "call_expression",
+        callee: { kind: "identifier", name: "ts_value_number" },
+        arguments: [innerCall],
+      };
+    } else {
+      returnExpr = innerCall;
+    }
+
+    this.hoistedClosures.push({
+      kind: "function_decl",
+      name: wrapperName,
+      params: [
+        { name: "a0", type: "Value" },
+        { name: "a1", type: "Value" },
+        { name: "a2", type: "Value" },
+        { name: "a3", type: "Value" },
+      ],
+      returnType: "Value",
+      body: {
+        kind: "block",
+        statements: [
+          { kind: "return_statement", value: returnExpr },
+        ],
+      },
+    });
+
     return {
       kind: "function_ref",
-      name: fnName,
-      freeVars, // outer names captured
-      captures, // { outerName, captureName, type }[] for emission-site assign
+      name: wrapperName,
+      freeVars,
+      captures,
     };
   }
 
