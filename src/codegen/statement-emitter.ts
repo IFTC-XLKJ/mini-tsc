@@ -587,6 +587,11 @@ ${body}
       if (ret === "Value" && emitted.startsWith("((Value){.tag = TAG_OBJECT, .as.object = self->_opts})")) {
         emitted = `self->_opts`;
       }
+      // Coerce TSString* -> Value when function returns Value
+      if (ret === "Value" &&
+          (emitted.startsWith("ts_string_") || emitted.startsWith("ts_to_string("))) {
+        emitted = `ts_value_string(${emitted})`;
+      }
       // int-returning functions should not return Value expressions without coerce
       if ((ret === "int" || ret === "boolean") &&
           (emitted.startsWith("ts_value_") || emitted.startsWith("ts_hashmap_get("))) {

@@ -1,5 +1,6 @@
 // my_app - mini-tsc project
 import { WebView } from "webview";
+import * as process from "process";
 
 function main(): void {
     console.log("Hello from my_app!");
@@ -16,10 +17,14 @@ function main(): void {
         devTools: true,
     });
     webView.addJavaScriptInterface("miniTscBridge", {
-        greet: (name: string) => {
+        greet: (name: string): any => {
             console.log("Native greet called:", name);
             return `Hello, ${name}!`;
-        }
+        },
+        getEnv: (): any => {
+            console.log("Native getEnv called");
+            return process.env;
+        },
     });
     webView.on("ready", () => {
         console.log("WebView ready");

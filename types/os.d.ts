@@ -29,9 +29,15 @@ declare module "os" {
   function tmpdir(): string;
   function version(): string;
   function machine(): string;
+  function manufacturer(): string;
+  function model(): string;
+  function serial(): string;
+  function biosVersion(): string;
+  function biosReleaseDate(): string;
 
   const EOL: string;
   const devNull: string;
+  const defaultEncoding: string;
 
   export {
     platform,
@@ -49,8 +55,14 @@ declare module "os" {
     tmpdir,
     version,
     machine,
+    manufacturer,
+    model,
+    serial,
+    biosVersion,
+    biosReleaseDate,
     EOL,
     devNull,
+    defaultEncoding,
     CpuInfo,
     UserInfo,
   };

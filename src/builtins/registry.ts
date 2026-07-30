@@ -115,6 +115,12 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "machine", cName: "node_os_machine", signature: "Value node_os_machine(void)" },
       { tsName: "EOL", cName: "node_os_EOL", signature: "Value node_os_EOL(void)" },
       { tsName: "devNull", cName: "node_os_devNull", signature: "Value node_os_devNull(void)" },
+      { tsName: "defaultEncoding", cName: "node_os_defaultEncoding", signature: "Value node_os_defaultEncoding(void)" },
+      { tsName: "manufacturer", cName: "node_os_manufacturer", signature: "Value node_os_manufacturer(void)" },
+      { tsName: "model", cName: "node_os_model", signature: "Value node_os_model(void)" },
+      { tsName: "serial", cName: "node_os_serial", signature: "Value node_os_serial(void)" },
+      { tsName: "biosVersion", cName: "node_os_biosVersion", signature: "Value node_os_biosVersion(void)" },
+      { tsName: "biosReleaseDate", cName: "node_os_biosReleaseDate", signature: "Value node_os_biosReleaseDate(void)" },
     ],
   }],
   ["http", {

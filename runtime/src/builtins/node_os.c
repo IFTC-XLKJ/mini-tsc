@@ -15,6 +15,41 @@
 #include <unistd.h>
 #endif
 
+#ifdef _WIN32
+/* Helper: run a WMI query via PowerShell and extract a single value */
+static Value wmi_query(const char* wmiClass, const char* property) {
+  char cmd[512];
+  snprintf(cmd, sizeof(cmd),
+    "powershell -NoProfile -Command \"(Get-CimInstance -ClassName %s).%s\" 2>NUL",
+    wmiClass, property);
+  FILE* pipe = _popen(cmd, "r");
+  if (!pipe) return ts_value_string(ts_string_new(""));
+  char buf[512] = "";
+  if (fgets(buf, sizeof(buf), pipe)) {
+    /* Trim trailing newline */
+    size_t len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
+  }
+  _pclose(pipe);
+  return ts_value_string(ts_string_new(buf));
+}
+#else
+/* Helper: read a DMI sysfs file */
+static Value dmi_read(const char* field) {
+  char path[256];
+  snprintf(path, sizeof(path), "/sys/class/dmi/id/%s", field);
+  FILE* f = fopen(path, "r");
+  if (!f) return ts_value_string(ts_string_new(""));
+  char buf[512] = "";
+  if (fgets(buf, sizeof(buf), f)) {
+    size_t len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
+  }
+  fclose(f);
+  return ts_value_string(ts_string_new(buf));
+}
+#endif
+
 Value node_os_platform(void) {
 #ifdef _WIN32
   return ts_value_string(ts_string_new("win32"));
@@ -375,5 +410,89 @@ Value node_os_devNull(void) {
   return ts_value_string(ts_string_new("\\\\.\\nul"));
 #else
   return ts_value_string(ts_string_new("/dev/null"));
+#endif
+}
+
+Value node_os_defaultEncoding(void) {
+#ifdef _WIN32
+  /* Get the active code page and map to encoding name */
+  UINT codePage = GetACP();
+  switch (codePage) {
+    case 65001: return ts_value_string(ts_string_new("utf8"));
+    case 936:   return ts_value_string(ts_string_new("gbk"));
+    case 950:   return ts_value_string(ts_string_new("big5"));
+    case 932:   return ts_value_string(ts_string_new("shift_jis"));
+    case 949:   return ts_value_string(ts_string_new("euc-kr"));
+    case 1252:  return ts_value_string(ts_string_new("latin1"));
+    case 1250:  return ts_value_string(ts_string_new("windows-1250"));
+    case 1251:  return ts_value_string(ts_string_new("windows-1251"));
+    case 1253:  return ts_value_string(ts_string_new("windows-1253"));
+    case 1254:  return ts_value_string(ts_string_new("windows-1254"));
+    case 1255:  return ts_value_string(ts_string_new("windows-1255"));
+    case 1256:  return ts_value_string(ts_string_new("windows-1256"));
+    case 1257:  return ts_value_string(ts_string_new("windows-1257"));
+    case 1258:  return ts_value_string(ts_string_new("windows-1258"));
+    case 28591: return ts_value_string(ts_string_new("latin1"));
+    case 28592: return ts_value_string(ts_string_new("iso-8859-2"));
+    case 28593: return ts_value_string(ts_string_new("iso-8859-3"));
+    case 28594: return ts_value_string(ts_string_new("iso-8859-4"));
+    case 28595: return ts_value_string(ts_string_new("iso-8859-5"));
+    case 28596: return ts_value_string(ts_string_new("iso-8859-6"));
+    case 28597: return ts_value_string(ts_string_new("iso-8859-7"));
+    case 28598: return ts_value_string(ts_string_new("iso-8859-8"));
+    case 28605: return ts_value_string(ts_string_new("iso-8859-15"));
+    default:    return ts_value_string(ts_string_new("utf8"));
+  }
+#else
+  /* POSIX: check locale, default to utf8 */
+  const char* lang = getenv("LANG");
+  if (lang && lang[0]) {
+    /* Extract encoding from LANG like "en_US.UTF-8" */
+    const char* dot = strrchr(lang, '.');
+    if (dot && dot[1]) {
+      return ts_value_string(ts_string_new(dot + 1));
+    }
+  }
+  return ts_value_string(ts_string_new("utf8"));
+#endif
+}
+
+Value node_os_manufacturer(void) {
+#ifdef _WIN32
+  return wmi_query("Win32_ComputerSystem", "Manufacturer");
+#else
+  return dmi_read("sys_vendor");
+#endif
+}
+
+Value node_os_model(void) {
+#ifdef _WIN32
+  return wmi_query("Win32_ComputerSystem", "Model");
+#else
+  return dmi_read("product_name");
+#endif
+}
+
+Value node_os_serial(void) {
+#ifdef _WIN32
+  return wmi_query("Win32_BIOS", "SerialNumber");
+#else
+  return dmi_read("product_serial");
+#endif
+}
+
+Value node_os_biosVersion(void) {
+#ifdef _WIN32
+  return wmi_query("Win32_BIOS", "SMBIOSBIOSVersion");
+#else
+  return dmi_read("bios_version");
+#endif
+}
+
+Value node_os_biosReleaseDate(void) {
+#ifdef _WIN32
+  return wmi_query("Win32_BIOS", "ReleaseDate");
+#else
+  return dmi_read("bios_date");
 #endif
 }

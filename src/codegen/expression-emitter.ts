@@ -3851,7 +3851,7 @@ export class ExpressionEmitter {
           this._lastBuiltinCall = funcName;
           const zeroArgGetters = new Set([
             "argv", "env", "pid", "platform", "hostname", "totalmem", "freemem", "arch",
-            "EOL", "devNull", "stdin", "stdout", "stderr",
+            "EOL", "devNull", "defaultEncoding", "stdin", "stdout", "stderr",
             "defaultMaxListeners",
             "isMainThread", "parentPort", "workerData", "threadId", "threadName",
             "isInternalThread", "SHARE_ENV", "resourceLimits", "locks",
@@ -3893,7 +3893,7 @@ export class ExpressionEmitter {
         // Zero-arg property getters (no call parens in TS, but C functions)
         const zeroArgGetters = new Set([
           "argv", "env", "pid", "platform", "hostname", "totalmem", "freemem", "arch",
-          "EOL", "devNull", "stdin", "stdout", "stderr",
+          "EOL", "devNull", "defaultEncoding", "stdin", "stdout", "stderr",
           "defaultMaxListeners",
           "isMainThread", "parentPort", "workerData", "threadId", "threadName",
           "isInternalThread", "SHARE_ENV", "resourceLimits", "locks",

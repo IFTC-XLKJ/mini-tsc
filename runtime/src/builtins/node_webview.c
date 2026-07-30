@@ -439,7 +439,6 @@ static void bridge_handle_handshake(WsBridge* b) {
     bridge_close_client(b);
     return;
   }
-  fprintf(stderr, "WebView: key='%s' accept='%s'\n", key, accept_key);
 
   char resp[512];
   int rlen = snprintf(resp,sizeof(resp),
@@ -461,20 +460,13 @@ static void bridge_handle_handshake(WsBridge* b) {
 
 static void bridge_dispatch_message(WebViewInstance* inst, const char* payload, int payload_len) {
   (void)payload_len;
-  fprintf(stderr, "WebView: Bridge dispatch '%s'\n", payload);
-  if (!inst || !inst->interfaceMethods || !payload) {
-    fprintf(stderr, "WebView: dispatch early return (null args)\n");
-    return;
-  }
+  if (!inst || !inst->interfaceMethods || !payload) return;
 
   TSString* msgStr = ts_string_new(payload);
   Value parsed = ts_json_parse(msgStr);
   ts_string_free(msgStr);
 
-  if (parsed.tag != TAG_OBJECT || !parsed.as.object) {
-    fprintf(stderr, "WebView: dispatch parse failed, tag=%d\n", parsed.tag);
-    return;
-  }
+  if (parsed.tag != TAG_OBJECT || !parsed.as.object) return;
 
   TSHashMap* map = (TSHashMap*)parsed.as.object;
   Value ifVal = ts_hashmap_get(map, ts_string_new("__if"));
@@ -482,27 +474,17 @@ static void bridge_dispatch_message(WebViewInstance* inst, const char* payload, 
   Value aVal = ts_hashmap_get(map, ts_string_new("__a"));
   Value idVal = ts_hashmap_get(map, ts_string_new("__id"));
 
-  fprintf(stderr, "WebView: dispatch fields if=%d m=%d\n",
-          ifVal.tag, mVal.tag);
-
-  if (ifVal.tag != TAG_STRING || !ifVal.as.string || mVal.tag != TAG_STRING || !mVal.as.string) {
-    fprintf(stderr, "WebView: dispatch early return (bad field types)\n");
-    return;
-  }
+  if (ifVal.tag != TAG_STRING || !ifVal.as.string || mVal.tag != TAG_STRING || !mVal.as.string) return;
 
   size_t keyLen = strlen(ifVal.as.string->data) + 1 + strlen(mVal.as.string->data) + 1;
   char* compositeKey = (char*)malloc(keyLen);
   if (!compositeKey) return;
   snprintf(compositeKey, keyLen, "%s.%s", ifVal.as.string->data, mVal.as.string->data);
-  fprintf(stderr, "WebView: dispatch lookup '%s'\n", compositeKey);
   Value cb = ts_hashmap_get(inst->interfaceMethods, ts_string_new(compositeKey));
   free(compositeKey);
 
-  fprintf(stderr, "WebView: dispatch cb tag=%d\n", cb.tag);
-
   if ((cb.tag != TAG_FUNCTION || !cb.as.function) &&
       !(cb.tag == TAG_OBJECT && cb.as.object && *(int32_t*)cb.as.object == BOUND_FN_TAG)) {
-    fprintf(stderr, "WebView: dispatch early return (cb not callable)\n");
     return;
   }
 
@@ -513,10 +495,7 @@ static void bridge_dispatch_message(WebViewInstance* inst, const char* payload, 
     callArgs[i] = ts_array_get(argsArr, i);
   }
 
-  fprintf(stderr, "WebView: dispatch calling '%s.%s' argc=%d\n",
-          ifVal.as.string->data, mVal.as.string->data, argc);
   Value result = ts_value_call(cb, callArgs, argc);
-  fprintf(stderr, "WebView: dispatch result tag=%d\n", result.tag);
 
   if (idVal.tag == TAG_STRING && idVal.as.string && idVal.as.string->data &&
       inst->bridge && inst->bridge->client_fd >= 0 && inst->bridge->handshake_done) {
@@ -525,11 +504,7 @@ static void bridge_dispatch_message(WebViewInstance* inst, const char* payload, 
     int respLen = snprintf(resp, sizeof(resp), "{\"__id\":\"%s\",\"__res\":%s}",
                            idVal.as.string->data, resultJson ? resultJson->data : "null");
     if (resultJson) ts_string_free(resultJson);
-    fprintf(stderr, "WebView: dispatch sending response '%s'\n", resp);
-    int sendRes = bridge_send_frame(inst->bridge->client_fd, resp, respLen);
-    fprintf(stderr, "WebView: dispatch send result=%d\n", sendRes);
-  } else {
-    fprintf(stderr, "WebView: dispatch skip response (no id or no conn)\n");
+    bridge_send_frame(inst->bridge->client_fd, resp, respLen);
   }
 
   fflush(stdout);
@@ -540,20 +515,27 @@ static void bridge_poll(WebViewInstance* inst) {
   if (!inst || !inst->bridge) return;
   WsBridge* b = inst->bridge;
 
-  if (b->client_fd < 0) {
+  /* Always try to accept a new connection (listen_fd is non-blocking).
+   * If a new client connects while another is still alive, replace it.
+   * This handles page reloads / re-injections that create a new WebSocket. */
+  if (b->listen_fd >= 0) {
     struct sockaddr_in addr;
     int addrlen = sizeof(addr);
     int fd = (int)accept(b->listen_fd, (struct sockaddr*)&addr, &addrlen);
     if (fd >= 0) {
+      if (b->client_fd >= 0) {
+        bridge_close_client(b);
+      }
       u_long mode = 1;
       ioctlsocket(fd, FIONBIO, &mode);
       b->client_fd = fd;
       b->handshake_done = 0;
       b->recv_len = 0;
+      if (b->recv_buf) b->recv_buf[0] = '\0';
       fprintf(stderr, "WebView: Bridge client connected\n");
     }
-    if (b->client_fd < 0) return;
   }
+  if (b->client_fd < 0) return;
 
   if (!b->handshake_done) {
     bridge_handle_handshake(b);
@@ -563,7 +545,6 @@ static void bridge_poll(WebViewInstance* inst) {
   char temp[4096];
   int n = recv(b->client_fd, temp, sizeof(temp), 0);
   if (n > 0) {
-    fprintf(stderr, "WebView: Bridge recv %d bytes\n", n);
     bridge_append_recv(b, temp, n);
   } else if (n == 0) {
     bridge_close_client(b);
@@ -580,7 +561,6 @@ static void bridge_poll(WebViewInstance* inst) {
     char* payload = NULL;
     int payload_len = 0;
     int opcode = bridge_try_parse_frame(b, &payload, &payload_len);
-    fprintf(stderr, "WebView: Bridge parsed frame opcode=%d\n", opcode);
     if (opcode == 0) break;
     if (opcode < 0) {
       bridge_close_client(b);
@@ -710,7 +690,10 @@ static HRESULT STDMETHODCALLTYPE NavCompleted_Invoke(
     ICoreWebView2* sender, ICoreWebView2NavigationCompletedEventArgs* args) {
   (void)sender; (void)args;
   NavCompletedHandler* h = (NavCompletedHandler*)This;
-  /* Re-inject interface scripts for the newly loaded document */
+  /* Re-inject interface scripts for the newly loaded document.
+   * The server-side bridge_poll auto-replaces old connections,
+   * so we do NOT close the socket here (avoids killing a connection
+   * that an iframe NavigationCompleted may otherwise destroy). */
   if (h->inst && h->inst->interfaces && h->inst->webview) {
     for (size_t i = 0; i < h->inst->interfaces->capacity; i++) {
       if (h->inst->interfaces->entries[i].occupied) {
@@ -1650,36 +1633,48 @@ static char* build_interface_script(const char* name, TSHashMap* methods, int po
   if (!sb.buf) return NULL;
 
   sb_append(&sb, "(function() {\n");
-  sb_append(&sb, "  var name = \""); sb_append(&sb, name); sb_append(&sb, "\";\n");
-  sb_append(&sb, "  var ws = null, pending = {}, queue = [], connected = false;\n");
+  sb_append(&sb, "  var NAME = \""); sb_append(&sb, name); sb_append(&sb, "\";\n");
+  sb_append(&sb, "  var PORT = "); {
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+    sb_append(&sb, port_str);
+  }
+  sb_append(&sb, ";\n");
+  sb_append(&sb, "  var G = window.__mjbBr;\n");
+  sb_append(&sb, "  if (!G) { G = {pending:{}, queue:[], port:PORT}; window.__mjbBr = G; }\n");
   sb_append(&sb, "  function gid() { return Math.random().toString(36).substring(2,11)+Date.now().toString(36); }\n");
-  sb_append(&sb, "  function flush() { while(queue.length&&ws&&ws.readyState===1){ws.send(queue.shift());} }\n");
-  sb_append(&sb, "  function onmsg(ev){var d=JSON.parse(ev.data);if(d.__id&&pending[d.__id]){if(d.__err){pending[d.__id].rej(new Error(d.__err));}else{pending[d.__id].res(d.__res);}delete pending[d.__id];}}\n");
-  sb_append(&sb, "  function conn(){connected=false;ws=new WebSocket('ws://127.0.0.1:");
-
-  char port_str[16];
-  snprintf(port_str, sizeof(port_str), "%d", port);
-  sb_append(&sb, port_str);
-
-  sb_append(&sb, "');ws.onopen=function(){connected=true;flush();};ws.onmessage=onmsg;ws.onclose=function(){setTimeout(conn,500);};ws.onerror=function(){ws.close();};}\n");
+  sb_append(&sb, "  function flush() { while(G.queue.length && G.ws && G.ws.readyState===1){ G.ws.send(G.queue.shift()); } }\n");
+  sb_append(&sb, "  function onmsg(ev){var d=JSON.parse(ev.data);if(d.__id&&G.pending[d.__id]){if(d.__err){G.pending[d.__id].rej(new Error(d.__err));}else{G.pending[d.__id].res(d.__res);}delete G.pending[d.__id];}}\n");
+  sb_append(&sb, "  function conn(){\n");
+  sb_append(&sb, "    if (G.ws && (G.ws.readyState===0||G.ws.readyState===1)) return;\n");
+  sb_append(&sb, "    if (G.ws){ try{ G.ws.close(); }catch(e){} }\n");
+  sb_append(&sb, "    G.ws = new WebSocket('ws://127.0.0.1:'+G.port);\n");
+  sb_append(&sb, "    G.ws.onopen = function(){ flush(); };\n");
+  sb_append(&sb, "    G.ws.onmessage = onmsg;\n");
+  sb_append(&sb, "    G.ws.onclose = function(){ setTimeout(conn, 500); };\n");
+  sb_append(&sb, "    G.ws.onerror = function(){ if(G.ws){ try{G.ws.close();}catch(e){} } };\n");
+  sb_append(&sb, "  }\n");
   sb_append(&sb, "  conn();\n");
-  sb_append(&sb, "  window[name] = window[name] || {};\n");
+  sb_append(&sb, "  G.gid = gid;\n");
+  sb_append(&sb, "  window[NAME] = window[NAME] || {};\n");
 
   for (int32_t i = 0; i < methods->capacity; i++) {
     if (!methods->entries[i].occupied) continue;
     TSString* key = methods->entries[i].key;
-    sb_append(&sb, "  window[name][\"");
+    sb_append(&sb, "  window[NAME][\"");
     sb_append(&sb, key->data);
     sb_append(&sb, "\"] = function() {\n");
+    sb_append(&sb, "    var args = Array.prototype.slice.call(arguments);\n");
     sb_append(&sb, "    return new Promise(function(res, rej) {\n");
-    sb_append(&sb, "      var id = gid(), args = Array.prototype.slice.call(arguments);\n");
-    sb_append(&sb, "      var msg = JSON.stringify({__if:name,__m:\"");
+    sb_append(&sb, "      var id = G.gid();\n");
+    sb_append(&sb, "      var msg = JSON.stringify({__if:NAME,__m:\"");
     sb_append(&sb, key->data);
     sb_append(&sb, "\",__a:args,__id:id});\n");
-    sb_append(&sb, "      pending[id] = {res:res, rej:rej};\n");
-    sb_append(&sb, "      if (connected && ws && ws.readyState === 1) ws.send(msg);\n");
-    sb_append(&sb, "      else queue.push(msg);\n");
-    sb_append(&sb, "      setTimeout(function(){if(pending[id]){delete pending[id];rej(new Error('Timeout'));}}, 30000);\n");
+    sb_append(&sb, "      G.pending[id] = {res:res, rej:rej};\n");
+    sb_append(&sb, "      if (!G.ws || G.ws.readyState !== 1) conn();\n");
+    sb_append(&sb, "      if (G.ws && G.ws.readyState === 1) G.ws.send(msg);\n");
+    sb_append(&sb, "      else G.queue.push(msg);\n");
+    sb_append(&sb, "      setTimeout(function(){ if(G.pending[id]){ delete G.pending[id]; rej(new Error('Timeout')); } }, 30000);\n");
     sb_append(&sb, "    });\n");
     sb_append(&sb, "  };\n");
   }

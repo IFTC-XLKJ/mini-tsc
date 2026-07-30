@@ -20,5 +20,11 @@ Value node_os_version(void);
 Value node_os_machine(void);
 Value node_os_EOL(void);
 Value node_os_devNull(void);
+Value node_os_defaultEncoding(void);
+Value node_os_manufacturer(void);
+Value node_os_model(void);
+Value node_os_serial(void);
+Value node_os_biosVersion(void);
+Value node_os_biosReleaseDate(void);
 
 #endif /* NODE_OS_H */
