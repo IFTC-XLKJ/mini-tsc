@@ -26,5 +26,7 @@ Value node_os_model(void);
 Value node_os_serial(void);
 Value node_os_biosVersion(void);
 Value node_os_biosReleaseDate(void);
+Value node_os_gpuInfo(void);
+Value node_os_cpuTemperature(void);
 
 #endif /* NODE_OS_H */

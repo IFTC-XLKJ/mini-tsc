@@ -121,6 +121,7 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "serial", cName: "node_os_serial", signature: "Value node_os_serial(void)" },
       { tsName: "biosVersion", cName: "node_os_biosVersion", signature: "Value node_os_biosVersion(void)" },
       { tsName: "biosReleaseDate", cName: "node_os_biosReleaseDate", signature: "Value node_os_biosReleaseDate(void)" },
+      { tsName: "gpuInfo", cName: "node_os_gpuInfo", signature: "Value node_os_gpuInfo(void)" },
     ],
   }],
   ["http", {

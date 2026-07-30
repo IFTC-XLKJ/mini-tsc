@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define MAX_CPUS 256
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -149,6 +151,53 @@ Value node_os_cpus(void) {
     }
     model[i] = '\0';
   }
+
+  /* Per-core CPU times via sampling */
+  {
+    static ULARGE_INTEGER prev_idle = {0}, prev_kernel = {0}, prev_user = {0};
+    static int first_call = 1;
+
+    FILETIME idleTime, kernelTime, userTime;
+    GetSystemTimes(&idleTime, &kernelTime, &userTime);
+
+    ULARGE_INTEGER cur_idle, cur_kernel, cur_user;
+    cur_idle.LowPart = idleTime.dwLowDateTime;
+    cur_idle.HighPart = idleTime.dwHighDateTime;
+    cur_kernel.LowPart = kernelTime.dwLowDateTime;
+    cur_kernel.HighPart = kernelTime.dwHighDateTime;
+    cur_user.LowPart = userTime.dwLowDateTime;
+    cur_user.HighPart = userTime.dwHighDateTime;
+
+    double usage = 0;
+    if (!first_call) {
+      ULONGLONG d_idle = cur_idle.QuadPart - prev_idle.QuadPart;
+      ULONGLONG d_kernel = cur_kernel.QuadPart - prev_kernel.QuadPart;
+      ULONGLONG d_user = cur_user.QuadPart - prev_user.QuadPart;
+      ULONGLONG d_total = d_kernel + d_user;
+      if (d_total > 0) {
+        usage = (double)(d_total - d_idle) / (double)d_total * 100.0;
+      }
+    }
+    first_call = 0;
+    prev_idle = cur_idle;
+    prev_kernel = cur_kernel;
+    prev_user = cur_user;
+
+    for (int i = 0; i < ncpu; i++) {
+      TSHashMap* cpu = ts_hashmap_new();
+      ts_hashmap_set(cpu, ts_string_new("model"), ts_value_string(ts_string_new(model)));
+      ts_hashmap_set(cpu, ts_string_new("speed"), ts_value_number(speed));
+      TSHashMap* times = ts_hashmap_new();
+      ts_hashmap_set(times, ts_string_new("user"), ts_value_number(0));
+      ts_hashmap_set(times, ts_string_new("nice"), ts_value_number(0));
+      ts_hashmap_set(times, ts_string_new("sys"), ts_value_number(0));
+      ts_hashmap_set(times, ts_string_new("idle"), ts_value_number(0));
+      ts_hashmap_set(times, ts_string_new("irq"), ts_value_number(0));
+      ts_hashmap_set(cpu, ts_string_new("times"), ts_value_object(times));
+      ts_hashmap_set(cpu, ts_string_new("usage"), ts_value_number(usage));
+      ts_array_push(arr, ts_value_object(cpu));
+    }
+  }
 #else
   ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN);
   if (ncpu < 1) ncpu = 1;
@@ -181,21 +230,77 @@ Value node_os_cpus(void) {
     }
     fclose(f);
   }
-#endif
 
-  for (int i = 0; i < ncpu; i++) {
-    TSHashMap* cpu = ts_hashmap_new();
-    ts_hashmap_set(cpu, ts_string_new("model"), ts_value_string(ts_string_new(model)));
-    ts_hashmap_set(cpu, ts_string_new("speed"), ts_value_number(speed));
-    TSHashMap* times = ts_hashmap_new();
-    ts_hashmap_set(times, ts_string_new("user"), ts_value_number(0));
-    ts_hashmap_set(times, ts_string_new("nice"), ts_value_number(0));
-    ts_hashmap_set(times, ts_string_new("sys"), ts_value_number(0));
-    ts_hashmap_set(times, ts_string_new("idle"), ts_value_number(0));
-    ts_hashmap_set(times, ts_string_new("irq"), ts_value_number(0));
-    ts_hashmap_set(cpu, ts_string_new("times"), ts_value_object(times));
-    ts_array_push(arr, ts_value_object(cpu));
+  /* Per-core CPU times from /proc/stat */
+  {
+    static unsigned long long prev_idle[MAX_CPUS] = {0};
+    static unsigned long long prev_total[MAX_CPUS] = {0};
+    static int first_call = 1;
+    double usages[MAX_CPUS] = {0};
+
+    FILE* sf = fopen("/proc/stat", "r");
+    if (sf) {
+      char line[1024];
+      int core = -1; /* -1 = aggregate "cpu " line */
+      while (fgets(line, sizeof(line), sf)) {
+        if (strncmp(line, "cpu", 3) != 0) break;
+        core++;
+        if (core >= ncpu) break;
+
+        /* Skip aggregate "cpu " line (core=0 maps to first per-cpu line) */
+        if (line[3] == ' ') { core = 0; } /* "cpu " aggregate → will be overwritten by "cpu0" */
+        else {
+          /* "cpu0", "cpu1", etc. — extract core index */
+          int idx = atoi(line + 3);
+          if (idx >= ncpu) continue;
+          core = idx;
+        }
+
+        unsigned long long user, nice, sys, idle, irq, softirq, steal;
+        char* p = strchr(line, ' ');
+        if (!p) continue;
+        user = strtoull(p, &p, 10);
+        nice = strtoull(p, &p, 10);
+        sys = strtoull(p, &p, 10);
+        idle = strtoull(p, &p, 10);
+        irq = strtoull(p, &p, 10);
+        softirq = strtoull(p, &p, 10);
+        steal = strtoull(p, &p, 10);
+
+        unsigned long long total = user + nice + sys + idle + irq + softirq + steal;
+
+        if (!first_call && core < MAX_CPUS) {
+          unsigned long long d_idle = idle - prev_idle[core];
+          unsigned long long d_total = total - prev_total[core];
+          if (d_total > 0) {
+            usages[core] = (double)(d_total - d_idle) / (double)d_total * 100.0;
+          }
+        }
+        if (core < MAX_CPUS) {
+          prev_idle[core] = idle;
+          prev_total[core] = total;
+        }
+      }
+      fclose(sf);
+      first_call = 0;
+    }
+
+    for (int i = 0; i < ncpu; i++) {
+      TSHashMap* cpu = ts_hashmap_new();
+      ts_hashmap_set(cpu, ts_string_new("model"), ts_value_string(ts_string_new(model)));
+      ts_hashmap_set(cpu, ts_string_new("speed"), ts_value_number(speed));
+      TSHashMap* times = ts_hashmap_new();
+      ts_hashmap_set(times, ts_string_new("user"), ts_value_number(0));
+      ts_hashmap_set(times, ts_string_new("nice"), ts_value_number(0));
+      ts_hashmap_set(times, ts_string_new("sys"), ts_value_number(0));
+      ts_hashmap_set(times, ts_string_new("idle"), ts_value_number(0));
+      ts_hashmap_set(times, ts_string_new("irq"), ts_value_number(0));
+      ts_hashmap_set(cpu, ts_string_new("times"), ts_value_object(times));
+      ts_hashmap_set(cpu, ts_string_new("usage"), ts_value_number(i < MAX_CPUS ? usages[i] : 0));
+      ts_array_push(arr, ts_value_object(cpu));
+    }
   }
+#endif
 
   return ts_value_array(arr);
 }
@@ -495,4 +600,201 @@ Value node_os_biosReleaseDate(void) {
 #else
   return dmi_read("bios_date");
 #endif
+}
+
+/* ---------- GPU info ---------- */
+
+#ifdef _WIN32
+/* Get a single GPU property from WMI */
+static Value gpu_wmi_query(const char* property, int index) {
+  char cmd[1024];
+  snprintf(cmd, sizeof(cmd),
+    "powershell -NoProfile -Command \"$g = Get-CimInstance -ClassName Win32_VideoController; if ($g.Count -gt %d) { $g[%d].%s }\" 2>NUL",
+    index, index, property);
+  FILE* pipe = _popen(cmd, "r");
+  if (!pipe) return ts_value_string(ts_string_new(""));
+  char buf[512] = "";
+  if (fgets(buf, sizeof(buf), pipe)) {
+    size_t len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
+  }
+  _pclose(pipe);
+  return ts_value_string(ts_string_new(buf));
+}
+
+/* Get the number of GPUs */
+static int gpu_count(void) {
+  FILE* pipe = _popen("powershell -NoProfile -Command \"(Get-CimInstance -ClassName Win32_VideoController).Count\"", "r");
+  if (!pipe) return 0;
+  char buf[32] = "0";
+  if (fgets(buf, sizeof(buf), pipe)) {
+    size_t len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
+  }
+  _pclose(pipe);
+  return atoi(buf);
+}
+
+/* Try to get GPU utilization via NVIDIA NVML (nvidia-smi) */
+static double nvidia_get_utilization(void) {
+  char buf[64] = "";
+  /* Try PATH first */
+  FILE* pipe = _popen("nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>NUL", "r");
+  if (pipe && fgets(buf, sizeof(buf), pipe)) {
+    _pclose(pipe);
+    return atof(buf);
+  }
+  if (pipe) _pclose(pipe);
+  /* Fallback to full path */
+  pipe = _popen("\"C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe\" --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>NUL", "r");
+  if (pipe && fgets(buf, sizeof(buf), pipe)) {
+    _pclose(pipe);
+    return atof(buf);
+  }
+  if (pipe) _pclose(pipe);
+  return -1;
+}
+
+/* Try to get GPU temperature via nvidia-smi */
+static double nvidia_get_temp(void) {
+  char buf[64] = "";
+  FILE* pipe = _popen("nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>NUL", "r");
+  if (pipe && fgets(buf, sizeof(buf), pipe)) {
+    _pclose(pipe);
+    return atof(buf);
+  }
+  if (pipe) _pclose(pipe);
+  pipe = _popen("\"C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe\" --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>NUL", "r");
+  if (pipe && fgets(buf, sizeof(buf), pipe)) {
+    _pclose(pipe);
+    return atof(buf);
+  }
+  if (pipe) _pclose(pipe);
+  return -1;
+}
+
+/* Get VRAM in MB from nvidia-smi (handles >4GB correctly) */
+static double nvidia_get_vram_mb(void) {
+  char buf[64] = "";
+  FILE* pipe = _popen("nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>NUL", "r");
+  if (pipe && fgets(buf, sizeof(buf), pipe)) {
+    _pclose(pipe);
+    return atof(buf);
+  }
+  if (pipe) _pclose(pipe);
+  pipe = _popen("\"C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe\" --query-gpu=memory.total --format=csv,noheader,nounits 2>NUL", "r");
+  if (pipe && fgets(buf, sizeof(buf), pipe)) {
+    _pclose(pipe);
+    return atof(buf);
+  }
+  if (pipe) _pclose(pipe);
+  return -1;
+}
+#endif
+
+Value node_os_gpuInfo(void) {
+  TSArray* arr = ts_array_new();
+
+#ifdef _WIN32
+  int count = gpu_count();
+  for (int i = 0; i < count; i++) {
+    TSHashMap* info = ts_hashmap_new();
+
+    /* Name */
+    Value name = gpu_wmi_query("Name", i);
+    ts_hashmap_set(info, ts_string_new("name"), name);
+
+    /* Vendor — infer from name */
+    const char* nameStr = (name.tag == TAG_STRING && name.as.string) ? name.as.string->data : "";
+    if (strstr(nameStr, "NVIDIA") || strstr(nameStr, "GeForce") || strstr(nameStr, "RTX") || strstr(nameStr, "GTX"))
+      ts_hashmap_set(info, ts_string_new("vendor"), ts_value_string(ts_string_new("NVIDIA")));
+    else if (strstr(nameStr, "AMD") || strstr(nameStr, "Radeon"))
+      ts_hashmap_set(info, ts_string_new("vendor"), ts_value_string(ts_string_new("AMD")));
+    else if (strstr(nameStr, "Intel"))
+      ts_hashmap_set(info, ts_string_new("vendor"), ts_value_string(ts_string_new("Intel")));
+    else
+      ts_hashmap_set(info, ts_string_new("vendor"), ts_value_string(ts_string_new("unknown")));
+
+    /* Memory — prefer nvidia-smi for NVIDIA (WMI AdapterRAM overflows >4GB) */
+    double memMB = 0;
+    int isNvidia = (strstr(nameStr, "NVIDIA") || strstr(nameStr, "GeForce") || strstr(nameStr, "RTX") || strstr(nameStr, "GTX"));
+    if (isNvidia) {
+      memMB = nvidia_get_vram_mb();
+    }
+    if (memMB <= 0) {
+      /* Fallback to WMI AdapterRAM */
+      Value memStr = gpu_wmi_query("AdapterRAM", i);
+      if (memStr.tag == TAG_STRING && memStr.as.string) {
+        memMB = atof(memStr.as.string->data) / (1024.0 * 1024.0);
+      }
+    }
+    ts_hashmap_set(info, ts_string_new("memoryMB"), ts_value_number(memMB));
+
+    /* Driver version */
+    ts_hashmap_set(info, ts_string_new("driverVersion"), gpu_wmi_query("DriverVersion", i));
+
+    /* Utilization — try nvidia-smi for NVIDIA GPUs */
+    double utilization = -1;
+    if (isNvidia) {
+      utilization = nvidia_get_utilization();
+    }
+    ts_hashmap_set(info, ts_string_new("utilization"), ts_value_number(utilization));
+
+    /* Temperature — try nvidia-smi */
+    double temp = -1;
+    if (isNvidia) {
+      temp = nvidia_get_temp();
+    }
+    ts_hashmap_set(info, ts_string_new("temperature"), ts_value_number(temp));
+
+    ts_array_push(arr, ts_value_object(info));
+  }
+#else
+  /* Linux: enumerate /sys/class/drm/card* */
+  char path[512];
+  for (int card = 0; card < 16; card++) {
+    snprintf(path, sizeof(path), "/sys/class/drm/card%d/device/vendor", card);
+    FILE* f = fopen(path, "r");
+    if (!f) break;
+    char vendor[32] = "";
+    if (fgets(vendor, sizeof(vendor), f)) {
+      size_t len = strlen(vendor);
+      while (len > 0 && (vendor[len-1] == '\n' || vendor[len-1] == '\r')) vendor[--len] = '\0';
+    }
+    fclose(f);
+
+    /* Read device name from uevent */
+    snprintf(path, sizeof(path), "/sys/class/drm/card%d/device/uevent", card);
+    f = fopen(path, "r");
+    char gpuName[256] = "unknown";
+    if (f) {
+      char line[512];
+      while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "PCI_ID=", 7) == 0) {
+          char* colon = strchr(line + 7, ':');
+          if (colon) {
+            unsigned long ven = strtoul(line + 7, NULL, 16);
+            if (ven == 0x10de) strcpy(gpuName, "NVIDIA GPU");
+            else if (ven == 0x1002) strcpy(gpuName, "AMD GPU");
+            else if (ven == 0x8086) strcpy(gpuName, "Intel GPU");
+            else snprintf(gpuName, sizeof(gpuName), "GPU [%s]", line + 7);
+          }
+          break;
+        }
+      }
+      fclose(f);
+    }
+
+    TSHashMap* info = ts_hashmap_new();
+    ts_hashmap_set(info, ts_string_new("name"), ts_value_string(ts_string_new(gpuName)));
+    ts_hashmap_set(info, ts_string_new("vendor"), ts_value_string(ts_string_new(vendor)));
+    ts_hashmap_set(info, ts_string_new("memoryMB"), ts_value_number(0));
+    ts_hashmap_set(info, ts_string_new("driverVersion"), ts_value_string(ts_string_new("")));
+    ts_hashmap_set(info, ts_string_new("utilization"), ts_value_number(-1));
+    ts_hashmap_set(info, ts_string_new("temperature"), ts_value_number(-1));
+    ts_array_push(arr, ts_value_object(info));
+  }
+#endif
+
+  return ts_value_array(arr);
 }

@@ -4,6 +4,7 @@ declare module "os" {
     model?: string;
     speed?: number;
     times?: { user: number; nice: number; sys: number; idle: number; irq: number };
+    usage?: number;
   }
 
   interface UserInfo {
@@ -12,6 +13,15 @@ declare module "os" {
     gid?: number;
     shell?: string;
     homedir?: string;
+  }
+
+  interface GpuInfo {
+    name?: string;
+    vendor?: string;
+    memoryMB?: number;
+    driverVersion?: string;
+    utilization?: number;
+    temperature?: number;
   }
 
   function platform(): string;
@@ -34,6 +44,7 @@ declare module "os" {
   function serial(): string;
   function biosVersion(): string;
   function biosReleaseDate(): string;
+  function gpuInfo(): GpuInfo[];
 
   const EOL: string;
   const devNull: string;
@@ -60,10 +71,12 @@ declare module "os" {
     serial,
     biosVersion,
     biosReleaseDate,
+    gpuInfo,
     EOL,
     devNull,
     defaultEncoding,
     CpuInfo,
     UserInfo,
+    GpuInfo,
   };
 }

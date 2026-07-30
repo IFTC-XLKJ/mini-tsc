@@ -104,8 +104,16 @@ export class AstVisitor {
                 });
               }
             }
-            // Check if it's a getter (no params)
-            if (paramTypes.length === 0 && func.signature.includes("(void)")) {
+            // Check if it's a true constant (property accessed without () in TS)
+            // vs a zero-arg function (called with () in TS like platform(), manufacturer())
+            const knownConstants = new Set([
+              "argv", "env", "pid", "EOL", "devNull", "stdin", "stdout", "stderr",
+              "defaultEncoding", "defaultMaxListeners",
+              "isMainThread", "parentPort", "workerData", "threadId", "threadName",
+              "isInternalThread", "SHARE_ENV", "resourceLimits", "locks",
+              "level", "enabled", "isAvailable",
+            ]);
+            if (paramTypes.length === 0 && func.signature.includes("(void)") && knownConstants.has(funcName)) {
               isConstant = true;
             }
           }

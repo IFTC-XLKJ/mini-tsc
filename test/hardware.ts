@@ -1,13 +1,17 @@
-import { manufacturer, model, serial, biosVersion, biosReleaseDate, cpus, arch, totalmem } from "os";
+import { gpuInfo } from "os";
 
-console.log("=== Hardware Information ===");
-console.log("Manufacturer:", manufacturer());
-console.log("Model:", model());
-console.log("Serial:", serial());
-console.log("BIOS Version:", biosVersion());
-console.log("BIOS Release Date:", biosReleaseDate());
-console.log("");
-console.log("=== Additional System Info ===");
-console.log("Architecture:", arch());
-console.log("CPU:", cpus()[0]?.model || "unknown");
-console.log("Total Memory:", Math.round(totalmem() / 1024 / 1024 / 1024 * 10) / 10, "GB");
+console.log("=== GPU Information ===");
+const gpus: any = gpuInfo();
+console.log("Found " + gpus.length + " GPU(s)");
+
+for (let i = 0; i < gpus.length; i++) {
+  const gpu: any = gpus[i];
+  console.log("");
+  console.log("GPU " + i + ":");
+  console.log("  Name: " + gpu.name);
+  console.log("  Vendor: " + gpu.vendor);
+  console.log("  Memory: " + gpu.memoryMB + " MB");
+  console.log("  Driver: " + gpu.driverVersion);
+  console.log("  Utilization: " + gpu.utilization + "%");
+  console.log("  Temperature: " + gpu.temperature + " C");
+}
