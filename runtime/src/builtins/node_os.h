@@ -28,5 +28,7 @@ Value node_os_biosVersion(void);
 Value node_os_biosReleaseDate(void);
 Value node_os_gpuInfo(void);
 Value node_os_cpuTemperature(void);
+Value node_os_diskUsage(void);
+Value node_os_networkStats(void);
 
 #endif /* NODE_OS_H */

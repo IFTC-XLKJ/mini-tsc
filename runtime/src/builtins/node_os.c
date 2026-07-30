@@ -11,10 +11,13 @@
 #endif
 #include <windows.h>
 #include <intrin.h>
+#include <iphlpapi.h>
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 #else
 #include <sys/utsname.h>
 #include <unistd.h>
+#include <sys/statvfs.h>
 #endif
 
 #ifdef _WIN32
@@ -798,3 +801,389 @@ Value node_os_gpuInfo(void) {
 
   return ts_value_array(arr);
 }
+
+/* ---------- CPU Temperature ---------- */
+
+#ifdef _WIN32
+/* Try to get CPU temperatures via WMI MSAcpi_ThermalZoneTemperature.
+   Returns values in Celsius. Requires admin privileges. */
+static int wmi_get_cpu_temps(double* temps, int maxCount) {
+  FILE* pipe = _popen(
+    "powershell -NoProfile -Command \"Get-CimInstance -Namespace root/WMI -ClassName MSAcpi_ThermalZoneTemperature 2>$null | ForEach-Object { $_.CurrentTemperature }\" 2>NUL",
+    "r");
+  if (!pipe) return 0;
+  char line[128];
+  int count = 0;
+  while (count < maxCount && fgets(line, sizeof(line), pipe)) {
+    /* Trim whitespace */
+    char* p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    size_t len = strlen(p);
+    while (len > 0 && (p[len-1] == '\n' || p[len-1] == '\r' || p[len-1] == ' '))
+      p[--len] = '\0';
+    if (len == 0) continue;
+    /* Value is in tenths of Kelvin: C = (val/10) - 273.15 */
+    double val = atof(p);
+    if (val > 0) {
+      temps[count++] = (val / 10.0) - 273.15;
+    }
+  }
+  _pclose(pipe);
+  return count;
+}
+
+/* Fallback: try OpenHardwareMonitor/LibreHardwareMonitor WMI */
+static int wmi_get_cpu_temps_ohm(double* temps, int maxCount) {
+  FILE* pipe = _popen(
+    "powershell -NoProfile -Command \"Get-CimInstance -Namespace root/LibreHardwareMonitor -ClassName Sensor 2>$null | Where-Object { $_.SensorType -eq 'Temperature' -and $_.Name -like '*CPU*' } | ForEach-Object { $_.Value }\" 2>NUL",
+    "r");
+  if (!pipe) return 0;
+  char line[128];
+  int count = 0;
+  while (count < maxCount && fgets(line, sizeof(line), pipe)) {
+    char* p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    size_t len = strlen(p);
+    while (len > 0 && (p[len-1] == '\n' || p[len-1] == '\r' || p[len-1] == ' '))
+      p[--len] = '\0';
+    if (len == 0) continue;
+    double val = atof(p);
+    if (val > 0 && val < 200) {
+      temps[count++] = val;
+    }
+  }
+  _pclose(pipe);
+  return count;
+}
+#endif
+
+Value node_os_cpuTemperature(void) {
+  TSArray* arr = ts_array_new();
+
+#ifdef _WIN32
+  double temps[256];
+  int count = 0;
+
+  /* Try MSAcpi thermal zones first */
+  count = wmi_get_cpu_temps(temps, 256);
+
+  /* Fallback to LibreHardwareMonitor */
+  if (count == 0) {
+    count = wmi_get_cpu_temps_ohm(temps, 256);
+  }
+
+  for (int i = 0; i < count; i++) {
+    ts_array_push(arr, ts_value_number(temps[i]));
+  }
+#else
+  /* Linux: read from /sys/class/thermal/thermal_zone* */
+  char path[256];
+  for (int zone = 0; zone < 64; zone++) {
+    snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/type", zone);
+    FILE* f = fopen(path, "r");
+    if (!f) break;
+    char type[128] = "";
+    if (fgets(type, sizeof(type), f)) {
+      size_t len = strlen(type);
+      while (len > 0 && (type[len-1] == '\n' || type[len-1] == '\r')) type[--len] = '\0';
+    }
+    fclose(f);
+
+    /* Only include CPU-related thermal zones */
+    if (strstr(type, "cpu") || strstr(type, "CPU") || strstr(type, "core") || strstr(type, "x86") ||
+        strstr(type, "acpi") || strstr(type, "pch") || strstr(type, "thermal")) {
+      snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", zone);
+      f = fopen(path, "r");
+      if (f) {
+        char buf[32] = "";
+        if (fgets(buf, sizeof(buf), f)) {
+          double temp = atof(buf) / 1000.0; /* millidegrees to degrees */
+          ts_array_push(arr, ts_value_number(temp));
+        }
+        fclose(f);
+      }
+    }
+  }
+
+  /* Fallback: try hwmon */
+  if (arr->length == 0) {
+    for (int hwmon = 0; hwmon < 16; hwmon++) {
+      for (int temp = 1; temp <= 8; temp++) {
+        snprintf(path, sizeof(path), "/sys/class/hwmon/hwmon%d/temp%d_input", hwmon, temp);
+        FILE* f = fopen(path, "r");
+        if (!f) continue;
+        char buf[32] = "";
+        if (fgets(buf, sizeof(buf), f)) {
+          double val = atof(buf) / 1000.0;
+          if (val > 0 && val < 200) {
+            ts_array_push(arr, ts_value_number(val));
+          }
+        }
+        fclose(f);
+      }
+    }
+  }
+#endif
+
+  return ts_value_array(arr);
+}
+
+/* ---------- Disk Usage ---------- */
+
+#ifdef _WIN32
+Value node_os_diskUsage(void) {
+  TSArray* arr = ts_array_new();
+
+  /* Get all logical drive letters */
+  char drives[256];
+  DWORD len = GetLogicalDriveStringsA(sizeof(drives) - 1, drives);
+  if (len == 0) return ts_value_array(arr);
+
+  char* p = drives;
+  while (*p) {
+    /* Get drive type */
+    UINT driveType = GetDriveTypeA(p);
+
+    /* Skip non-fixed drives (CD-ROM, network, etc.) */
+    if (driveType != DRIVE_FIXED && driveType != DRIVE_REMOVABLE) {
+      p += strlen(p) + 1;
+      continue;
+    }
+
+    ULARGE_INTEGER freeBytesAvailable, totalBytes, totalFreeBytes;
+    if (GetDiskFreeSpaceExA(p, &freeBytesAvailable, &totalBytes, &totalFreeBytes)) {
+      TSHashMap* disk = ts_hashmap_new();
+
+      /* Drive letter (e.g., "C:\") */
+      char label[4] = { p[0], ':', '\0' };
+      ts_hashmap_set(disk, ts_string_new("mount"), ts_value_string(ts_string_new(label)));
+      ts_hashmap_set(disk, ts_string_new("filesystem"), ts_value_string(ts_string_new(p)));
+
+      double total = (double)totalBytes.QuadPart;
+      double free = (double)totalFreeBytes.QuadPart;
+      double used = total - free;
+
+      ts_hashmap_set(disk, ts_string_new("total"), ts_value_number(total));
+      ts_hashmap_set(disk, ts_string_new("free"), ts_value_number(free));
+      ts_hashmap_set(disk, ts_string_new("used"), ts_value_number(used));
+      ts_hashmap_set(disk, ts_string_new("usagePercent"), ts_value_number(total > 0 ? used / total * 100.0 : 0));
+
+      ts_array_push(arr, ts_value_object(disk));
+    }
+
+    p += strlen(p) + 1;
+  }
+
+  return ts_value_array(arr);
+}
+#else
+Value node_os_diskUsage(void) {
+  TSArray* arr = ts_array_new();
+
+  FILE* f = fopen("/proc/mounts", "r");
+  if (!f) return ts_value_array(arr);
+
+  char line[1024];
+  char seen[64][256];
+  int seenCount = 0;
+
+  while (fgets(line, sizeof(line), f)) {
+    char device[256] = "", mountpoint[256] = "", fstype[64] = "";
+    if (sscanf(line, "%255s %255s %63s", device, mountpoint, fstype) != 3)
+      continue;
+
+    /* Skip virtual filesystems */
+    if (strstr(fstype, "proc") || strstr(fstype, "sysfs") || strstr(fstype, "devpts") ||
+        strstr(fstype, "tmpfs") || strstr(fstype, "cgroup") || strstr(fstype, "overlay") ||
+        strstr(fstype, "squashfs") || strstr(fstype, "iso9660"))
+      continue;
+
+    /* Skip duplicate mount points */
+    int dup = 0;
+    for (int i = 0; i < seenCount; i++) {
+      if (strcmp(seen[i], mountpoint) == 0) { dup = 1; break; }
+    }
+    if (dup) continue;
+    if (seenCount < 64) {
+      strncpy(seen[seenCount], mountpoint, 255);
+      seen[seenCount][255] = '\0';
+      seenCount++;
+    }
+
+    struct statvfs stat;
+    if (statvfs(mountpoint, &stat) != 0) continue;
+
+    unsigned long blockSize = stat.f_frsize ? stat.f_frsize : 4096;
+
+    double total = (double)stat.f_blocks * blockSize;
+    double free = (double)stat.f_bavail * blockSize;
+    double used = total - free;
+
+    if (total <= 0) continue;
+
+    TSHashMap* disk = ts_hashmap_new();
+    ts_hashmap_set(disk, ts_string_new("mount"), ts_value_string(ts_string_new(mountpoint)));
+    ts_hashmap_set(disk, ts_string_new("filesystem"), ts_value_string(ts_string_new(device)));
+    ts_hashmap_set(disk, ts_string_new("fstype"), ts_value_string(ts_string_new(fstype)));
+    ts_hashmap_set(disk, ts_string_new("total"), ts_value_number(total));
+    ts_hashmap_set(disk, ts_string_new("free"), ts_value_number(free));
+    ts_hashmap_set(disk, ts_string_new("used"), ts_value_number(used));
+    ts_hashmap_set(disk, ts_string_new("usagePercent"), ts_value_number(total > 0 ? used / total * 100.0 : 0));
+    ts_array_push(arr, ts_value_object(disk));
+  }
+
+  fclose(f);
+  return ts_value_array(arr);
+}
+#endif
+
+/* ---------- Network Stats ---------- */
+
+#ifdef _WIN32
+
+Value node_os_networkStats(void) {
+  TSArray* arr = ts_array_new();
+
+  /* Get adapter addresses */
+  PIP_ADAPTER_ADDRESSES adapters = NULL;
+  ULONG bufferSize = 15000;
+  DWORD result;
+
+  do {
+    adapters = (PIP_ADAPTER_ADDRESSES)malloc(bufferSize);
+    if (!adapters) return ts_value_array(arr);
+    result = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_PREFIX, NULL, adapters, &bufferSize);
+    if (result == ERROR_BUFFER_OVERFLOW) {
+      free(adapters);
+      adapters = NULL;
+    }
+  } while (result == ERROR_BUFFER_OVERFLOW);
+
+  if (result != NO_ERROR || !adapters) {
+    if (adapters) free(adapters);
+    return ts_value_array(arr);
+  }
+
+  /* Get interface stats via GetIfTable2 */
+  PMIB_IFTABLE ifTable = NULL;
+  ULONG tableSize = 0;
+  GetIfTable2(&ifTable, &tableSize);
+
+  for (PIP_ADAPTER_ADDRESSES adapter = adapters; adapter; adapter = adapter->Next) {
+    /* Skip loopback and down interfaces */
+    if (adapter->IfType == IF_TYPE_LOOPBACK) continue;
+    if (adapter->OperStatus != IfOperStatusUp) continue;
+
+    TSHashMap* stat = ts_hashmap_new();
+
+    /* Interface name */
+    ts_hashmap_set(stat, ts_string_new("name"), ts_value_string(ts_string_new(adapter->AdapterName)));
+
+    /* Description (friendly name) */
+    if (adapter->Description) {
+      ts_hashmap_set(stat, ts_string_new("description"), ts_value_string(ts_string_new(adapter->Description)));
+    }
+
+    /* MAC address */
+    char mac[32] = "";
+    if (adapter->PhysicalAddressLength > 0) {
+      int pos = 0;
+      for (ULONG i = 0; i < adapter->PhysicalAddressLength && i < 8; i++) {
+        pos += snprintf(mac + pos, sizeof(mac) - pos, "%s%02X", i > 0 ? ":" : "", adapter->PhysicalAddress[i]);
+      }
+    }
+    ts_hashmap_set(stat, ts_string_new("mac"), ts_value_string(ts_string_new(mac)));
+
+    /* Find matching interface in IF table for byte counts */
+    unsigned long long bytesRecv = 0, bytesSent = 0;
+    unsigned long long packetsRecv = 0, packetsSent = 0;
+    unsigned long long errorsRecv = 0, errorsSent = 0;
+
+    if (ifTable) {
+      for (DWORD i = 0; i < ifTable->table.NumEntries; i++) {
+        PMIB_IFROW row = &ifTable->table.table[i];
+        if (row->dwIndex == adapter->IfIndex) {
+          bytesRecv = row->dwInOctets;
+          bytesSent = row->dwOutOctets;
+          packetsRecv = row->dwInUcastPkts + row->dwInNUcastPkts;
+          packetsSent = row->dwOutUcastPkts + row->dwOutNUcastPkts;
+          errorsRecv = row->dwInErrors;
+          errorsSent = row->dwOutErrors;
+          break;
+        }
+      }
+    }
+
+    ts_hashmap_set(stat, ts_string_new("bytesReceived"), ts_value_number((double)bytesRecv));
+    ts_hashmap_set(stat, ts_string_new("bytesSent"), ts_value_number((double)bytesSent));
+    ts_hashmap_set(stat, ts_string_new("packetsReceived"), ts_value_number((double)packetsRecv));
+    ts_hashmap_set(stat, ts_string_new("packetsSent"), ts_value_number((double)packetsSent));
+    ts_hashmap_set(stat, ts_string_new("errorsReceived"), ts_value_number((double)errorsRecv));
+    ts_hashmap_set(stat, ts_string_new("errorsSent"), ts_value_number((double)errorsSent));
+
+    ts_array_push(arr, ts_value_object(stat));
+  }
+
+  if (ifTable) FreeMibTable(ifTable);
+  free(adapters);
+  return ts_value_array(arr);
+}
+#else
+Value node_os_networkStats(void) {
+  TSArray* arr = ts_array_new();
+
+  FILE* f = fopen("/proc/net/dev", "r");
+  if (!f) return ts_value_array(arr);
+
+  char line[1024];
+  /* Skip header lines */
+  fgets(line, sizeof(line), f);
+  fgets(line, sizeof(line), f);
+
+  while (fgets(line, sizeof(line), f)) {
+    /* Format: iface: bytes packets errs drop fifo frame compressed multicast | bytes packets errs drop fifo errs ... */
+    char iface[64] = "";
+    unsigned long long bytesRecv = 0, packetsRecv = 0, errsRecv = 0;
+    unsigned long long bytesSent = 0, packetsSent = 0, errsSent = 0;
+
+    char* colon = strchr(line, ':');
+    if (!colon) continue;
+
+    /* Extract interface name */
+    size_t ifaceLen = colon - line;
+    if (ifaceLen >= sizeof(iface)) ifaceLen = sizeof(iface) - 1;
+    memcpy(iface, line, ifaceLen);
+    iface[ifaceLen] = '\0';
+
+    /* Trim leading spaces */
+    char* p = iface;
+    while (*p == ' ' || *p == '\t') p++;
+
+    /* Parse receive stats (after colon) */
+    sscanf(colon + 1, "%llu %llu %llu",
+           &bytesRecv, &packetsRecv, &errsRecv);
+
+    /* Parse transmit stats (after 10 receive fields) */
+    char* txStart = colon + 1;
+    for (int i = 0; i < 8; i++) { /* skip remaining 7 rx fields + first tx field */
+      while (*txStart && *txStart != ' ' && *txStart != '\t') txStart++;
+      while (*txStart == ' ' || *txStart == '\t') txStart++;
+    }
+    sscanf(txStart, "%llu %llu %llu", &bytesSent, &packetsSent, &errsSent);
+
+    TSHashMap* stat = ts_hashmap_new();
+    ts_hashmap_set(stat, ts_string_new("name"), ts_value_string(ts_string_new(p)));
+    ts_hashmap_set(stat, ts_string_new("bytesReceived"), ts_value_number((double)bytesRecv));
+    ts_hashmap_set(stat, ts_string_new("bytesSent"), ts_value_number((double)bytesSent));
+    ts_hashmap_set(stat, ts_string_new("packetsReceived"), ts_value_number((double)packetsRecv));
+    ts_hashmap_set(stat, ts_string_new("packetsSent"), ts_value_number((double)packetsSent));
+    ts_hashmap_set(stat, ts_string_new("errorsReceived"), ts_value_number((double)errsRecv));
+    ts_hashmap_set(stat, ts_string_new("errorsSent"), ts_value_number((double)errsSent));
+
+    ts_array_push(arr, ts_value_object(stat));
+  }
+
+  fclose(f);
+  return ts_value_array(arr);
+}
+#endif

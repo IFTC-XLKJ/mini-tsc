@@ -24,6 +24,28 @@ declare module "os" {
     temperature?: number;
   }
 
+  interface DiskInfo {
+    mount?: string;
+    filesystem?: string;
+    fstype?: string;
+    total?: number;
+    free?: number;
+    used?: number;
+    usagePercent?: number;
+  }
+
+  interface NetworkStats {
+    name?: string;
+    description?: string;
+    mac?: string;
+    bytesReceived?: number;
+    bytesSent?: number;
+    packetsReceived?: number;
+    packetsSent?: number;
+    errorsReceived?: number;
+    errorsSent?: number;
+  }
+
   function platform(): string;
   function hostname(): string;
   function totalmem(): number;
@@ -45,6 +67,9 @@ declare module "os" {
   function biosVersion(): string;
   function biosReleaseDate(): string;
   function gpuInfo(): GpuInfo[];
+  function cpuTemperature(): number[];
+  function diskUsage(): DiskInfo[];
+  function networkStats(): NetworkStats[];
 
   const EOL: string;
   const devNull: string;
@@ -72,11 +97,16 @@ declare module "os" {
     biosVersion,
     biosReleaseDate,
     gpuInfo,
+    cpuTemperature,
+    diskUsage,
+    networkStats,
     EOL,
     devNull,
     defaultEncoding,
     CpuInfo,
     UserInfo,
     GpuInfo,
+    DiskInfo,
+    NetworkStats,
   };
 }
