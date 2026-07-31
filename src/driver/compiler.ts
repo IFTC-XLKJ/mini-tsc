@@ -1305,6 +1305,7 @@ extern TsErrorContext _ts_current_error;
       usage?.features.has("console_time") ||
       usage?.features.has("timers") ||
       usage?.features.has("dialogs") ||
+      usage?.features.has("promise") ||
       /\bts_math_|\bts_date_now\b|\bts_parse_|\bts_set_timeout\b|\bts_set_interval\b|\bts_alert\b|\bts_confirm\b|\bts_prompt\b/.test(allC)
     );
     // Pure console.log("literal") → puts() programs need zero runtime objects.

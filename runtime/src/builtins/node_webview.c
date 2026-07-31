@@ -109,6 +109,67 @@ static WebViewInstance* g_instances[MAX_INSTANCES] = {0};
 static int g_instanceCount = 0;
 static int g_loopRunning = 0;
 
+/* ---------- async Promise responses for addJavaScriptInterface ---------- */
+typedef struct PendingPromiseEntry {
+  struct PendingPromiseEntry* next;
+  char id[48];
+  WebViewInstance* inst;
+  TSPromise* promise;
+} PendingPromiseEntry;
+
+static PendingPromiseEntry* g_pending_promises = NULL;
+
+static int bridge_inst_is_alive(WebViewInstance* inst) {
+  if (!inst) return 0;
+  for (int i = 0; i < MAX_INSTANCES; i++) {
+    if (g_instances[i] == inst) return 1;
+  }
+  return 0;
+}
+
+static void bridge_poll_pending_promises(void) {
+  PendingPromiseEntry** prev = &g_pending_promises;
+  while (*prev) {
+    PendingPromiseEntry* e = *prev;
+    TSPromise* p = e->promise;
+    if (p && p->type_tag == PROMISE_TAG && p->state != PROMISE_PENDING) {
+      if (bridge_inst_is_alive(e->inst) && e->inst->bridge &&
+          e->inst->bridge->client_fd >= 0 && e->inst->bridge->handshake_done) {
+        TSString* resultJson = ts_json_stringify(p->result);
+        char resp[65536];
+        int respLen;
+        if (p->state == PROMISE_FULFILLED) {
+          respLen = snprintf(resp, sizeof(resp), "{\"__id\":\"%s\",\"__res\":%s}",
+                             e->id, resultJson ? resultJson->data : "null");
+        } else {
+          respLen = snprintf(resp, sizeof(resp), "{\"__id\":\"%s\",\"__err\":%s}",
+                             e->id, resultJson ? resultJson->data : "null");
+        }
+        if (respLen > 0 && respLen < (int)sizeof(resp)) {
+          bridge_send_frame(e->inst->bridge->client_fd, resp, respLen);
+        }
+        if (resultJson) ts_string_free(resultJson);
+      }
+      *prev = e->next;
+      free(e);
+    } else {
+      prev = &e->next;
+    }
+  }
+}
+
+static void bridge_promise_pending(WebViewInstance* inst, const char* id, TSPromise* p) {
+  PendingPromiseEntry* e = (PendingPromiseEntry*)malloc(sizeof(PendingPromiseEntry));
+  if (!e) return;
+  memset(e, 0, sizeof(*e));
+  strncpy(e->id, id, sizeof(e->id) - 1);
+  e->id[sizeof(e->id) - 1] = '\0';
+  e->inst = inst;
+  e->promise = p;
+  e->next = g_pending_promises;
+  g_pending_promises = e;
+}
+
 static void webview_register_instance(WebViewInstance* inst) {
   if (!inst) return;
   inst->closing = 0;
@@ -614,6 +675,35 @@ static void bridge_dispatch_message(WebViewInstance* inst, const char* payload, 
 
   Value result = ts_value_call(cb, callArgs, argc);
 
+  /* If the handler returns a Promise, handle it specially.
+   * Already-settled promises resolve immediately; pending ones
+   * are polled by bridge_poll_pending_promises().            */
+  if (ts_value_is_promise(result)) {
+    TSPromise* p = (TSPromise*)result.as.object;
+    if (p && p->type_tag == PROMISE_TAG) {
+      if (p->state == PROMISE_FULFILLED) {
+        result = p->result;
+      } else if (p->state == PROMISE_REJECTED) {
+        if (idVal.tag == TAG_STRING && idVal.as.string && idVal.as.string->data &&
+            inst->bridge && inst->bridge->client_fd >= 0 && inst->bridge->handshake_done) {
+          TSString* resultJson = ts_json_stringify(p->result);
+          char resp[65536];
+          int respLen = snprintf(resp, sizeof(resp), "{\"__id\":\"%s\",\"__err\":%s}",
+                                 idVal.as.string->data, resultJson ? resultJson->data : "null");
+          if (resultJson) ts_string_free(resultJson);
+          bridge_send_frame(inst->bridge->client_fd, resp, respLen);
+        }
+        return;
+      } else {
+        /* PENDING: enqueue for later delivery */
+        if (idVal.tag == TAG_STRING && idVal.as.string && idVal.as.string->data) {
+          bridge_promise_pending(inst, idVal.as.string->data, p);
+        }
+        return;
+      }
+    }
+  }
+
   if (idVal.tag == TAG_STRING && idVal.as.string && idVal.as.string->data &&
       inst->bridge && inst->bridge->client_fd >= 0 && inst->bridge->handshake_done) {
     TSString* resultJson = ts_json_stringify(result);
@@ -700,6 +790,7 @@ static void bridge_poll(WebViewInstance* inst) {
     }
     free(payload);
   }
+  bridge_poll_pending_promises();
 }
 
 static void webview_emit(WebViewInstance* inst, const char* event, Value* args, int argc) {

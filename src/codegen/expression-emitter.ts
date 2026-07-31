@@ -42,6 +42,8 @@ function filePathToMangledPrefix(filePath: string): string {
 export class ExpressionEmitter {
   /** Map of variable names to their C types */
   private varTypes: Map<string, string> = new Map();
+  /** Set of names that are declared as local variables / parameters (shadows imports) */
+  private localSymbols: Set<string> = new Set();
   /** Map of original names to mangled names for imported symbols */
   private importedSymbols: Map<string, string> = new Map();
   /** Tracks the last builtin module function call for special argument handling */
@@ -52,9 +54,13 @@ export class ExpressionEmitter {
   /** Register a variable and its type */
   declareVar(name: string, type: string): void {
     this.varTypes.set(name, type);
+    this.localSymbols.add(name);
     // Also register sanitized form for lookups after rename
     const san = sanitizeCIdentifier(name);
-    if (san !== name) this.varTypes.set(san, type);
+    if (san !== name) {
+      this.varTypes.set(san, type);
+      this.localSymbols.add(san);
+    }
   }
 
   /** Get the type of a variable */
@@ -107,9 +113,10 @@ export class ExpressionEmitter {
           return `ts_value_string(ts_string_new(__ts_filename))`;
         }
         // Check if this is an imported symbol that needs mangled name
+        // Local variables / parameters shadow imported symbols
         {
           const imported = this.importedSymbols.get(node.name);
-          if (imported) return imported;
+          if (imported && !this.localSymbols.has(node.name)) return imported;
           return sanitizeCIdentifier(node.name);
         }
       case "number_literal":
@@ -152,6 +159,9 @@ export class ExpressionEmitter {
           return `ts_value_function((void*)${node.name})`;
         }
         const wrapCap = (outer: string): string => {
+          // Imported functions captured as free vars need mangled name + function wrap
+          const importedCap = this.importedSymbols.get(outer);
+          if (importedCap) return `ts_value_function((void*)${importedCap})`;
           const t = this.varTypes.get(outer);
           if (t === "Value" || t === "any" || t === "unknown" || !t) return outer;
           if (t === "double" || t === "number" || t === "int") return `ts_value_number(${outer})`;
@@ -3689,7 +3699,10 @@ export class ExpressionEmitter {
         if (e.startsWith("ts_array_") || e.includes("ts_array_new") || e.includes("__sp_dst") || e.includes("__sl_dst")) {
           return `ts_value_array(${e})`;
         }
-        if (e.startsWith("ts_string_") || e.startsWith("ts_to_string(")) return `ts_value_string(${e})`;
+        if (e.startsWith("ts_string_") || e.startsWith("ts_to_string(") ||
+            e.startsWith("ts_buffer_toString_utf8(") || e.startsWith("ts_number_to_string(")) {
+          return `ts_value_string(${e})`;
+        }
         return e;
       });
       // writeOut/writeErr style: void(*)(TSString*) — pass TSString*, not Value
@@ -3710,23 +3723,27 @@ export class ExpressionEmitter {
         }
         return `(((void(*)(TSString*))(${calleeStr}).as.function)(${a0}))`;
       }
-      // Zero-arg: TAG_FUNCTION call, or StreamBody identity (destructured getWriter)
+      /* Value-typed callee: use runtime ts_value_call so BoundFn / PromiseResolver
+       * and TAG_FUNCTION are all handled correctly. */
       if (rawArgs.length === 0) {
         return `ts_value_call0(${calleeStr})`;
       }
-      // ActionHandler: Value(*)(TSArray*) roughly — use variadic cast
-      return `(((Value(*)())(${calleeStr}).as.function)(${rawArgs.join(", ")}))`;
+      return `ts_value_call(${calleeStr}, (Value[]){${rawArgs.join(", ")}}, ${rawArgs.length})`;
     }
     // Imported function call with optional args (formatHelp(cmd) → pad config)
     if (callee.kind === "identifier") {
       let callName = calleeStr;
-      // Resolve imported symbol mangled name
+      // Resolve imported symbol mangled name (local variables shadow imports)
       const imported = this.importedSymbols.get(callee.name);
-      if (imported) callName = imported;
+      if (imported && !this.localSymbols.has(callee.name)) callName = imported;
       // Wrap arguments for imported Node builtin function calls (e.g. dlopen from ffi)
-      const isBuiltinImport = imported && /^(node_(?:fs|path|process|os|http|net|child_process|events|readline|assert|crypto|worker_threads|chalk|sqlite|ffi)_)/.test(imported);
+      const isBuiltinImport = imported && !this.localSymbols.has(callee.name) &&
+        /^(node_(?:fs|path|process|os|http|net|child_process|events|readline|assert|crypto|worker_threads|chalk|sqlite|ffi)_)/.test(imported);
+      const calleeVarType = this.varTypes.get(callee.name) || this.varTypes.get(sanitizeCIdentifier(callee.name));
+      const calleeIsLocalValue = this.localSymbols.has(callee.name) &&
+        (calleeVarType === "Value" || calleeVarType === "any" || calleeVarType === "unknown");
       let args: string[];
-      if (isBuiltinImport) {
+      if (isBuiltinImport || calleeIsLocalValue) {
         args = (node.arguments || []).map((a: CNode) => {
           const emitted = this.emit(a);
           if (emitted.startsWith("ts_value_") ||
@@ -3778,6 +3795,46 @@ export class ExpressionEmitter {
       if (callee.name === "call" && imported?.startsWith("node_ffi_call") && args.length >= 3) {
         args[2] = args[2].replace(/^ts_value_object\(ts_array_new\(\)\)$/, "ts_value_array(ts_array_new())");
       }
+      // child_process builtins: pad optional args when called directly as imported identifiers
+      if (isBuiltinImport && imported?.startsWith("node_child_process_")) {
+        if (callee.name === "spawn" || callee.name === "fork") {
+          while (args.length < 3) args.push("ts_value_null()");
+        } else if (callee.name === "execSync") {
+          while (args.length < 2) args.push("ts_value_null()");
+        } else if (callee.name === "exec") {
+          if (args.length === 1) args.push("ts_value_null()", "ts_value_null()");
+          else if (args.length === 2) {
+            if (node.arguments?.[1]?.kind === "function_ref" ||
+                node.arguments?.[1]?.kind === "arrow_function" ||
+                node.arguments?.[1]?.kind === "function_expression" ||
+                args[1].startsWith("ts_value_function(")) {
+              args = [args[0], "ts_value_null()", args[1]];
+            }
+          }
+          while (args.length < 3) args.push("ts_value_null()");
+        } else if (callee.name === "execFile") {
+          if (args.length === 1) {
+            args.push("ts_value_null()", "ts_value_null()", "ts_value_null()");
+          } else if (args.length === 2) {
+            if (node.arguments?.[1]?.kind === "function_ref" ||
+                node.arguments?.[1]?.kind === "arrow_function" ||
+                node.arguments?.[1]?.kind === "function_expression" ||
+                args[1].startsWith("ts_value_function(")) {
+              args = [args[0], "ts_value_null()", "ts_value_null()", args[1]];
+            } else {
+              args = [args[0], args[1], "ts_value_null()", "ts_value_null()"];
+            }
+          } else if (args.length === 3) {
+            if (node.arguments?.[2]?.kind === "function_ref" ||
+                node.arguments?.[2]?.kind === "arrow_function" ||
+                node.arguments?.[2]?.kind === "function_expression" ||
+                args[2].startsWith("ts_value_function(")) {
+              args = [args[0], args[1], "ts_value_null()", args[2]];
+            }
+          }
+          while (args.length < 4) args.push("ts_value_null()");
+        }
+      }
       // formatHelp(command, config?) — pad missing config
       if (callName.includes("formatHelp") || callee.name === "formatHelp") {
         while (args.length < 2) args.push("ts_value_undefined()");
@@ -3812,6 +3869,11 @@ export class ExpressionEmitter {
               a.includes("/*__ts_str*/") || a.startsWith("ts_string_replace(")) return a;
           return a;
         });
+      }
+      // Value-typed local callee: use runtime dispatch (handles TAG_FUNCTION / BoundFn / PromiseResolver)
+      if (calleeIsLocalValue) {
+        if (args.length === 0) return `ts_value_call0(${callName})`;
+        return `ts_value_call(${callName}, (Value[]){${args.join(", ")}}, ${args.length})`;
       }
       return `${callName}(${args.join(", ")})`;
     }

@@ -319,6 +319,20 @@ export function analyzeFeatureUsage(
             if (cName) addMethod(usage, cName);
           }
 
+          // Direct imported builtin calls: e.g. import { spawn } from "child_process"; spawn(...)
+          if (cal.kind === "identifier" && cal.name && unit.importedSymbols) {
+            const imported = unit.importedSymbols.get(cal.name);
+            if (imported && imported.mangledName.startsWith("node_")) {
+              for (const modName of BUILTIN_MODULE_NAMES) {
+                if (imported.mangledName.startsWith(`node_${modName}_`)) {
+                  usage.modules.add(modName);
+                  addMethod(usage, imported.mangledName);
+                  break;
+                }
+              }
+            }
+          }
+
           // Chalk chaining: chalk.red.bold("text") — detect the inner style
           if (cal.kind === "property_access" &&
               cal.object?.kind === "property_access" &&
@@ -402,6 +416,9 @@ export function analyzeFeatureUsage(
             : className;
           if (name && GLOBAL_CTOR_FEATURES[name]) {
             usage.features.add(GLOBAL_CTOR_FEATURES[name]);
+          }
+          if (name === "Promise") {
+            usage.features.add("promise");
           }
           if (name === "EventEmitter" ||
               (typeof className === "string" && className.includes("EventEmitter"))) {

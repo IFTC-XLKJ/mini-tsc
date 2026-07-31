@@ -411,9 +411,9 @@ Value node_child_process_exec(Value command, Value options, Value callback) {
   Value stdoutVal = ts_value_string(r.stdout_str ? r.stdout_str : ts_string_new(""));
   Value stderrVal = ts_value_string(r.stderr_str ? r.stderr_str : ts_string_new(""));
 
-  if (callback.tag == TAG_FUNCTION && callback.as.function) {
-    ExecCallback cb = (ExecCallback)callback.as.function;
-    cb(err, stdoutVal, stderrVal);
+  if (is_callable(callback)) {
+    Value cbargs[3] = { err, stdoutVal, stderrVal };
+    ts_value_call(callback, cbargs, 3);
   }
   return stdoutVal;
 }
@@ -431,9 +431,9 @@ Value node_child_process_execFile(Value file, Value args, Value options, Value c
   Value stdoutVal = ts_value_string(r.stdout_str ? r.stdout_str : ts_string_new(""));
   Value stderrVal = ts_value_string(r.stderr_str ? r.stderr_str : ts_string_new(""));
 
-  if (callback.tag == TAG_FUNCTION && callback.as.function) {
-    ExecCallback cb = (ExecCallback)callback.as.function;
-    cb(err, stdoutVal, stderrVal);
+  if (is_callable(callback)) {
+    Value cbargs[3] = { err, stdoutVal, stderrVal };
+    ts_value_call(callback, cbargs, 3);
   }
   return stdoutVal;
 }
@@ -484,6 +484,11 @@ Value node_child_process_fork(Value modulePath, Value args, Value options) {
   return child;
 }
 
+static int is_callable(Value v) {
+  return (v.tag == TAG_FUNCTION && v.as.function) ||
+         (v.tag == TAG_OBJECT && v.as.object && *(int32_t*)v.as.object == BOUND_FN_TAG);
+}
+
 Value node_child_process_on(Value child, Value event, Value callback) {
   if (child.tag != TAG_OBJECT || !child.as.object) return ts_value_undefined();
   TSHashMap* map = (TSHashMap*)child.as.object;
@@ -493,25 +498,21 @@ Value node_child_process_on(Value child, Value event, Value callback) {
   if (strcmp(ev->data, "close") == 0 || strcmp(ev->data, "exit") == 0) {
     Value status = ts_hashmap_get(map, ts_string_new("status"));
     Value signal = ts_hashmap_get(map, ts_string_new("signalCode"));
-    if (callback.tag == TAG_FUNCTION && callback.as.function) {
-      CloseCallback cb = (CloseCallback)callback.as.function;
-      cb(status, signal.tag == TAG_NULL ? ts_value_null() : signal);
+    if (is_callable(callback)) {
+      Value args[2] = { status, signal.tag == TAG_NULL ? ts_value_null() : signal };
+      ts_value_call(callback, args, 2);
     }
   } else if (strcmp(ev->data, "message") == 0) {
     ts_hashmap_set(map, ts_string_new("_message_cb"), callback);
-    if (ts_hashmap_has(map, ts_string_new("_message")) &&
-        callback.tag == TAG_FUNCTION && callback.as.function) {
+    if (ts_hashmap_has(map, ts_string_new("_message")) && is_callable(callback)) {
       Value msg = ts_hashmap_get(map, ts_string_new("_message"));
-      MessageCallback cb = (MessageCallback)callback.as.function;
-      cb(msg);
+      ts_value_call(callback, &msg, 1);
     }
   } else if (strcmp(ev->data, "error") == 0) {
     /* fire only if error stored */
-    if (ts_hashmap_has(map, ts_string_new("_error")) &&
-        callback.tag == TAG_FUNCTION && callback.as.function) {
+    if (ts_hashmap_has(map, ts_string_new("_error")) && is_callable(callback)) {
       Value err = ts_hashmap_get(map, ts_string_new("_error"));
-      MessageCallback cb = (MessageCallback)callback.as.function;
-      cb(err);
+      ts_value_call(callback, &err, 1);
     }
   }
   return ts_value_undefined();
@@ -527,10 +528,9 @@ Value node_child_process_stream_on(Value child, Value streamName, Value event, V
 
   const char* key = (strcmp(stream->data, "stderr") == 0) ? "_stderr" : "_stdout";
   Value data = ts_hashmap_get(map, ts_string_new(key));
-  if (callback.tag == TAG_FUNCTION && callback.as.function) {
-    DataCallback cb = (DataCallback)callback.as.function;
+  if (is_callable(callback)) {
     if (data.tag == TAG_STRING && data.as.string && data.as.string->length > 0) {
-      cb(data);
+      ts_value_call(callback, &data, 1);
     }
   }
   return ts_value_undefined();

@@ -69,6 +69,10 @@ function main(): void {
     });
     webView2.on("load", () => {
         console.log("WebView2 loaded");
+        // Set body as drag region using mini-tsc's custom mechanism
+        webView2.executeJavaScript(`
+            document.body.setAttribute('data-minitsc-drag-region', 'true');
+        `);
     });
 
     /* 只启动一次全局消息循环，所有 WebView 共用它 */
