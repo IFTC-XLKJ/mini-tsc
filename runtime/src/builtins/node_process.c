@@ -327,3 +327,23 @@ Value node_process_stdout_clearLine(Value dir) {
 Value node_process_stderr_clearLine(Value dir) {
   return stream_clear_line(stderr, dir);
 }
+
+Value node_process_openUrl(Value url) {
+  TSString* urlStr = ts_to_string(url);
+  if (!urlStr || !urlStr->data) return ts_value_boolean(0);
+#ifdef _WIN32
+  /* Use ShellExecuteA to open URL in default browser */
+  ShellExecuteA(NULL, "open", urlStr->data, NULL, NULL, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+  /* macOS: use "open" command */
+  char cmd[4096];
+  snprintf(cmd, sizeof(cmd), "open '%s'", urlStr->data);
+  system(cmd);
+#else
+  /* Linux/Unix: use "xdg-open" command */
+  char cmd[4096];
+  snprintf(cmd, sizeof(cmd), "xdg-open '%s' &", urlStr->data);
+  system(cmd);
+#endif
+  return ts_value_boolean(1);
+}

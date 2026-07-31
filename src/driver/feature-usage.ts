@@ -85,6 +85,7 @@ const PROCESS_PROPS: Record<string, string> = {
   memoryUsage: "node_process_memoryUsage",
   uptime: "node_process_uptime",
   nextTick: "node_process_nextTick",
+  openUrl: "node_process_openUrl",
 };
 
 const PROCESS_STREAM_METHODS: Record<string, string> = {
@@ -596,7 +597,7 @@ export function analyzeFeatureUsage(
             "loadURL", "navigate", "loadHTML", "evaluate", "executeJavaScript",
             "setTitle", "setSize", "setIcon", "setPosition", "center",
             "show", "hide", "focus", "minimize", "maximize", "unmaximize",
-            "close", "run", "on", "once", "off",
+            "close", "restart", "run", "on", "once", "off",
             "addJavaScriptInterface", "removeJavaScriptInterface",
           ];
           if (wvMethods.includes(m) &&

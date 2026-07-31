@@ -91,6 +91,7 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "stderr_clearScreenDown", cName: "node_process_stderr_clearScreenDown", signature: "Value node_process_stderr_clearScreenDown(void)" },
       { tsName: "stdout_clearLine", cName: "node_process_stdout_clearLine", signature: "Value node_process_stdout_clearLine(Value dir)" },
       { tsName: "stderr_clearLine", cName: "node_process_stderr_clearLine", signature: "Value node_process_stderr_clearLine(Value dir)" },
+      { tsName: "openUrl", cName: "node_process_openUrl", signature: "Value node_process_openUrl(Value url)" },
     ],
   }],
   ["os", {
@@ -405,6 +406,7 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "maximize", cName: "node_webview_maximize", signature: "Value node_webview_maximize(Value self)" },
       { tsName: "unmaximize", cName: "node_webview_unmaximize", signature: "Value node_webview_unmaximize(Value self)" },
       { tsName: "close", cName: "node_webview_close", signature: "Value node_webview_close(Value self)" },
+      { tsName: "restart", cName: "node_webview_restart", signature: "Value node_webview_restart(Value self)" },
       { tsName: "run", cName: "node_webview_run", signature: "Value node_webview_run(Value self)" },
       { tsName: "on", cName: "node_webview_on", signature: "Value node_webview_on(Value self, Value event, Value callback)" },
       { tsName: "once", cName: "node_webview_once", signature: "Value node_webview_once(Value self, Value event, Value callback)" },

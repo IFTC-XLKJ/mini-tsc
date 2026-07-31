@@ -27,6 +27,7 @@ Value node_webview_minimize(Value self);
 Value node_webview_maximize(Value self);
 Value node_webview_unmaximize(Value self);
 Value node_webview_close(Value self);
+Value node_webview_restart(Value self);
 Value node_webview_run(Value self);
 Value node_webview_on(Value self, Value event, Value callback);
 Value node_webview_once(Value self, Value event, Value callback);

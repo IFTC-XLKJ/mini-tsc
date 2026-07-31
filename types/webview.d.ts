@@ -86,6 +86,8 @@ declare module "webview" {
     maximize(): void;
     unmaximize(): void;
     close(): void;
+    /** Restart the WebView: close and re-create the underlying WebView2 controller, preserving the same window and URL. */
+    restart(): void;
 
     /** Whether the native WebView controller is ready. */
     readonly ready: boolean;

@@ -32,6 +32,7 @@ declare module "process" {
     on(event: "message", listener: (message: any) => void): this;
     on(event: string, listener: (...args: any[]) => void): this;
     send(message: any): boolean;
+    openUrl(url: string): boolean;
   }
 
   const process: Process;
@@ -45,6 +46,7 @@ declare module "process" {
   function cwd(): string;
   function chdir(directory: string): void;
   function exit(code?: number): never;
+  function openUrl(url: string): boolean;
 
   export {
     process,
@@ -58,6 +60,7 @@ declare module "process" {
     cwd,
     chdir,
     exit,
+    openUrl,
     Process,
     ProcessStream,
     ProcessEnv,

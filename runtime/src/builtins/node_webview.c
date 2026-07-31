@@ -1924,6 +1924,65 @@ Value node_webview_close(Value self) {
   return ts_value_undefined();
 }
 
+Value node_webview_restart(Value self) {
+  WebViewInstance* inst = (WebViewInstance*)self.as.object;
+  if (!inst || !inst->hwnd) return ts_value_undefined();
+
+  /* Remove old COM event handlers */
+  if (inst->webview) {
+    ICoreWebView2_remove_NavigationCompleted(inst->webview, inst->token_nav_completed);
+    ICoreWebView2_remove_SourceChanged(inst->webview, inst->token_source_changed);
+    ICoreWebView2_remove_WebMessageReceived(inst->webview, inst->token_web_message);
+    ICoreWebView2_remove_DocumentTitleChanged(inst->webview, inst->token_title_changed);
+  }
+
+  /* Close existing controller */
+  if (inst->controller) {
+    ICoreWebView2Controller_Close(inst->controller);
+    ICoreWebView2Controller_Release(inst->controller);
+    inst->controller = NULL;
+  }
+
+  /* Release webview reference */
+  if (inst->webview) {
+    ICoreWebView2_Release(inst->webview);
+    inst->webview = NULL;
+  }
+
+  /* Close old WebSocket client connection (the old page's connection is now
+     invalid). The bridge server itself stays alive so that the injected
+     interface scripts keep the same port after re-injection. */
+  if (inst->bridge) {
+    bridge_close_client(inst->bridge);
+  }
+
+  /* Reset ready state */
+  inst->ready = 0;
+
+  /* Re-create WebView2 environment (triggers controller creation callback
+     which re-injects interface scripts and navigates to the URL) */
+  EnvCompletedHandler* envHandler = (EnvCompletedHandler*)malloc(sizeof(EnvCompletedHandler));
+  if (!envHandler) {
+    fprintf(stderr, "WebView: Failed to allocate env handler for restart\n");
+    return ts_value_undefined();
+  }
+  envHandler->handler.lpVtbl = &envVtbl;
+  envHandler->inst = inst;
+
+  HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
+    NULL, NULL, NULL,
+    &envHandler->handler);
+
+  if (FAILED(hr)) {
+    fprintf(stderr, "WebView2: Failed to create environment for restart: 0x%08lx\n", hr);
+    free(envHandler);
+    return ts_value_undefined();
+  }
+
+  fprintf(stderr, "WebView: Restart initiated\n");
+  return ts_value_undefined();
+}
+
 Value node_webview_run(Value self) {
   fprintf(stderr, "WebView: node_webview_run called, self.tag=%d, self.as.object=%p\n", self.tag, self.as.object);
   WebViewInstance* inst = (WebViewInstance*)self.as.object;

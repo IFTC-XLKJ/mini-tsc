@@ -28,5 +28,6 @@ Value node_process_stdout_clearScreenDown(void);
 Value node_process_stderr_clearScreenDown(void);
 Value node_process_stdout_clearLine(Value dir);
 Value node_process_stderr_clearLine(Value dir);
+Value node_process_openUrl(Value url);
 
 #endif /* NODE_PROCESS_H */

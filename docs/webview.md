@@ -34,6 +34,7 @@ interface WebView {
   maximize(): void;
   unmaximize(): void;
   close(): void;
+  restart(): void;
   run(): void;
   
   on(event: string, callback: Function): this;
@@ -296,6 +297,24 @@ w.setSize(1024, 768);
 关闭窗口。
 
 **返回值**: `void`
+
+---
+
+#### `w.restart()`
+
+重启 WebView：关闭并重新创建底层 WebView2 控件，保持窗口和 URL 不变。
+
+**返回值**: `void`
+
+**示例**:
+```typescript
+// 在页面出现错误时重启 WebView
+w.on('load', (url) => {
+  if (url.includes('error')) {
+    w.restart();
+  }
+});
+```
 
 ---
 

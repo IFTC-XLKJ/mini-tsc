@@ -1378,8 +1378,8 @@ extern TsErrorContext _ts_current_error;
 
     const needFetch = usage?.features.has("fetch") ?? false;
     const needNet = !!(usage?.modules.has("http") || usage?.modules.has("net") || needFetch || needWebsocket);
-    // shell32 only for process.argv (CommandLineToArgvW) on Windows
-    const needShell32 = !!(usage?.methods.has("node_process_argv"));
+    // shell32 only for process.argv (CommandLineToArgvW) and process.openUrl (ShellExecuteA) on Windows
+    const needShell32 = !!(usage?.methods.has("node_process_argv") || usage?.methods.has("node_process_openUrl"));
     const needOs = usage?.modules.has("os") ?? false;
     const needMathLib = usage?.features.has("math") ?? false;
 
