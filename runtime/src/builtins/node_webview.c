@@ -298,41 +298,78 @@ static void bridge_ensure_wsa(WebViewInstance* inst) {
   }
 }
 
+/* Check if port is in Chromium's restricted/unsafe port list.
+ * Chromium blocks WebSocket and other connections to these ports. */
+static int bridge_is_unsafe_port(int port) {
+  /* Ports restricted by Chromium (see net/base/unsafe_ports.cc) */
+  static const int restricted[] = {
+    1,7,9,11,13,15,17,19,20,21,22,23,25,37,42,43,53,
+    77,79,87,95,101,102,103,104,109,110,111,113,115,117,119,
+    123,135,139,143,179,389,427,465,512,513,514,515,526,530,
+    531,532,540,548,556,563,587,601,636,993,995,2049,3659,
+    4045,6000,6665,6666,6667,6668,6669,6697,7000,7100,
+    8000,8001,8002,8008,8009,8080,8081,8082,8083,8084,
+    8085,8086,8087,8088,8089,8090,8888,9000,9001,9090,9091,
+    9441,9999,10000,10001,10002,10003,10004,10005,10006,
+    10007,10008,10009,50000,50001,50002,50003,50004,50005,
+    10080, /* WebSphere — blocked in some Chromium versions */
+    -1
+  };
+  for (int i = 0; restricted[i] != -1; i++) {
+    if (port == restricted[i]) return 1;
+  }
+  return 0;
+}
+
 static int bridge_init(WebViewInstance* inst) {
   if (inst->bridge) return inst->bridge->port;
   bridge_ensure_wsa(inst);
-  WsBridge* b = (WsBridge*)calloc(1, sizeof(WsBridge));
-  if (!b) return -1;
-  b->listen_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
-  if (b->listen_fd < 0) { free(b); return -1; }
-  int opt = 1;
-  setsockopt(b->listen_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-  struct sockaddr_in addr = {0};
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = INADDR_ANY;
-  addr.sin_port = 0; /* dynamic */
-  if (bind(b->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-    closesocket(b->listen_fd); free(b); return -1;
+
+  for (int attempt = 0; attempt < 50; attempt++) {
+    WsBridge* b = (WsBridge*)calloc(1, sizeof(WsBridge));
+    if (!b) return -1;
+    b->listen_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (b->listen_fd < 0) { free(b); return -1; }
+    int opt = 1;
+    setsockopt(b->listen_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = 0; /* dynamic */
+    if (bind(b->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+      closesocket(b->listen_fd); free(b); return -1;
+    }
+    socklen_t addrlen = sizeof(addr);
+    if (getsockname(b->listen_fd, (struct sockaddr*)&addr, &addrlen) < 0) {
+      closesocket(b->listen_fd); free(b); return -1;
+    }
+    b->port = (int)ntohs(addr.sin_port);
+
+    /* Reject ports that Chromium will block */
+    if (bridge_is_unsafe_port(b->port)) {
+      fprintf(stderr, "WebView: Port %d is unsafe for Chromium, retrying...\n", b->port);
+      closesocket(b->listen_fd);
+      free(b);
+      continue;
+    }
+
+    if (listen(b->listen_fd, 1) < 0) {
+      closesocket(b->listen_fd); free(b); return -1;
+    }
+    u_long mode = 1;
+    ioctlsocket(b->listen_fd, FIONBIO, &mode);
+    b->client_fd = -1;
+    b->handshake_done = 0;
+    b->recv_cap = 4096;
+    b->recv_buf = (char*)malloc(b->recv_cap);
+    if (b->recv_buf) b->recv_buf[0] = '\0';
+    b->recv_len = 0;
+    inst->bridge = b;
+    fprintf(stderr, "WebView: Bridge server listening on port %d\n", b->port);
+    return b->port;
   }
-  socklen_t addrlen = sizeof(addr);
-  if (getsockname(b->listen_fd, (struct sockaddr*)&addr, &addrlen) < 0) {
-    closesocket(b->listen_fd); free(b); return -1;
-  }
-  b->port = (int)ntohs(addr.sin_port);
-  if (listen(b->listen_fd, 1) < 0) {
-    closesocket(b->listen_fd); free(b); return -1;
-  }
-  u_long mode = 1;
-  ioctlsocket(b->listen_fd, FIONBIO, &mode);
-  b->client_fd = -1;
-  b->handshake_done = 0;
-  b->recv_cap = 4096;
-  b->recv_buf = (char*)malloc(b->recv_cap);
-  if (b->recv_buf) b->recv_buf[0] = '\0';
-  b->recv_len = 0;
-  inst->bridge = b;
-  fprintf(stderr, "WebView: Bridge server listening on port %d\n", b->port);
-  return b->port;
+  fprintf(stderr, "WebView: Failed to find a safe port after 50 attempts\n");
+  return -1;
 }
 
 static void bridge_close_client(WsBridge* b) {

@@ -518,9 +518,22 @@ static void* http_accept_thread(void* arg) {
 #endif
     http_set_nodelay(client_fd);
 
-    /* Read request */
+    /* Read request — may need multiple recv calls for large headers */
     char buf[4096];
-    int n = recv(client_fd, buf, sizeof(buf) - 1, 0);
+    int n = 0;
+    for (int attempt = 0; attempt < 20; attempt++) {
+      int r = recv(client_fd, buf + n, (int)(sizeof(buf) - 1 - n), 0);
+      if (r > 0) {
+        n += r;
+        buf[n] = '\0';
+        /* Check if we have complete headers (ends with \r\n\r\n) */
+        if (strstr(buf, "\r\n\r\n")) break;
+      } else if (r == 0) {
+        break; /* client closed */
+      } else {
+        break; /* error */
+      }
+    }
     if (n <= 0) {
       CLOSE_SOCKET(client_fd);
       continue;
@@ -532,6 +545,7 @@ static void* http_accept_thread(void* arg) {
     pr->client_fd = client_fd;
     pr->req_obj = req_obj;
     memcpy(pr->raw_buf, buf, (size_t)n);
+    pr->raw_buf[n] = '\0';
     pr->raw_len = n;
     pq_push(&g_pending, pr);
   }
@@ -629,7 +643,9 @@ void node_http_server_poll(void) {
     Value result;
     if (g_server->callback.tag == TAG_FUNCTION && g_server->callback.as.function) {
       HttpRequestHandler handler = (HttpRequestHandler)g_server->callback.as.function;
+      fprintf(stderr, "[HTTP] Calling handler for fd=%d\n", pr->client_fd);
       result = handler(pr->req_obj);
+      fprintf(stderr, "[HTTP] Handler returned: tag=%d\n", result.tag);
 #if defined(TS_NEED_PROMISE)
       if (ts_value_is_promise(result)) {
         result = ts_await(result);
@@ -646,7 +662,15 @@ void node_http_server_poll(void) {
       if (fr->stream && !fr->body_complete) {
         int32_t st = *((int32_t*)fr->stream);
         if (st == WEBSOCKET_SERVER_TAG || st == WEBSOCKET_TAG) {
+          fprintf(stderr, "[HTTP] WebSocket upgrade: fd=%d raw_len=%d\n",
+                  pr->client_fd, pr->raw_len);
+          /* Print first 200 chars of raw request for debugging */
+          {
+            int show = pr->raw_len < 200 ? pr->raw_len : 200;
+            fprintf(stderr, "[HTTP] raw_buf: %.*s\n", show, pr->raw_buf);
+          }
           ts_websocket_http_upgrade(pr->client_fd, fr, pr->raw_buf, pr->raw_len);
+          fprintf(stderr, "[HTTP] WebSocket upgrade done\n");
           ts_hashmap_free((TSHashMap*)pr->req_obj.as.object);
           free(pr);
           continue;
@@ -667,6 +691,13 @@ void node_http_server_poll(void) {
     ts_timers_poll();
   }
 #endif
+
+  /* Poll WebSocket connections for incoming messages */
+  extern int ts_websocket_pending(void);
+  extern void ts_websocket_poll(void);
+  if (ts_websocket_pending()) {
+    ts_websocket_poll();
+  }
 }
 
 int node_http_server_active(void) {

@@ -1,10 +1,12 @@
 import * as http from "http";
 import * as fs from "fs/promises";
 import * as path from "path";
+import * as process from "process";
 
 function main(): void {
     console.log(__dirname, __filename);
     console.log("Starting server...");
+    console.log(process.pid);
     const server = http.createServer(async (req: Request) => {
         console.log(req.url);
         const host = req.headers.get("host") || "localhost";

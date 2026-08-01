@@ -137,8 +137,10 @@ static void ws_sha1_final(WsSha1* h, uint8_t digest[20]) {
   h->buffer[idx++] = 0x80;
   if (idx > 56) { while (idx < 64) h->buffer[idx++] = 0; sha1_transform(h->state, h->buffer); idx = 0; }
   while (idx < 56) h->buffer[idx++] = 0;
-  h->buffer[56]=(uint8_t)(bits>>24); h->buffer[57]=(uint8_t)(bits>>16);
-  h->buffer[58]=(uint8_t)(bits>>8);  h->buffer[59]=(uint8_t)bits;
+  h->buffer[56]=(uint8_t)(bits>>56); h->buffer[57]=(uint8_t)(bits>>48);
+  h->buffer[58]=(uint8_t)(bits>>40); h->buffer[59]=(uint8_t)(bits>>32);
+  h->buffer[60]=(uint8_t)(bits>>24); h->buffer[61]=(uint8_t)(bits>>16);
+  h->buffer[62]=(uint8_t)(bits>>8);  h->buffer[63]=(uint8_t)bits;
   sha1_transform(h->state, h->buffer);
   for (int i = 0; i < 5; i++) {
     digest[i*4]=(uint8_t)(h->state[i]>>24); digest[i*4+1]=(uint8_t)(h->state[i]>>16);
@@ -558,14 +560,22 @@ void ts_websocket_http_upgrade(int client_fd, FetchResponse* fr,
   TSString* ws_key = ts_string_new(key);
   TSString* accept_key = compute_accept_key(ws_key);
 
-  /* Build Sec-WebSocket-Protocol from response headers if set */
+  /* Build Sec-WebSocket-Protocol from response headers only if the client
+   * requested one.  RFC 6455 §4.2.2: the server MUST NOT send back a
+   * Sec-WebSocket-Protocol header if the client didn't include one. */
   char proto_buf[512] = {0};
   const char* proto = NULL;
   if (fr->headers) {
-    Value pv = ts_hashmap_get(fr->headers, ts_string_new("Sec-WebSocket-Protocol"));
-    if (pv.tag == TAG_STRING && pv.as.string && pv.as.string->data) {
-      proto = pv.as.string->data;
-      snprintf(proto_buf, sizeof(proto_buf), "Sec-WebSocket-Protocol: %s\r\n", proto);
+    /* Check that the client actually offered a subprotocol */
+    char client_proto_buf[256] = {0};
+    const char* client_proto = ws_get_header(initial_req, "Sec-WebSocket-Protocol",
+                                             client_proto_buf, sizeof(client_proto_buf));
+    if (client_proto) {
+      Value pv = ts_hashmap_get(fr->headers, ts_string_new("Sec-WebSocket-Protocol"));
+      if (pv.tag == TAG_STRING && pv.as.string && pv.as.string->data) {
+        proto = pv.as.string->data;
+        snprintf(proto_buf, sizeof(proto_buf), "Sec-WebSocket-Protocol: %s\r\n", proto);
+      }
     }
   }
 
