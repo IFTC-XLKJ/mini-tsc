@@ -4,7 +4,7 @@ import { BUILTIN_MODULES } from "../builtins/registry.js";
 /** Node built-in module names we can tree-shake. */
 export const BUILTIN_MODULE_NAMES = [
   "fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto",
-  "worker_threads", "chalk", "sqlite", "ffi", "webview",
+  "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid",
 ] as const;
 
 export type BuiltinModuleName = (typeof BUILTIN_MODULE_NAMES)[number];
@@ -404,6 +404,20 @@ export function analyzeFeatureUsage(
               usage.modules.add("http");
               addMethod(usage, "node_http_server_listen");
             }
+            // http server.on / server.close
+            if ((cal.property === "on" || cal.property === "once" || cal.property === "off" || cal.property === "close") &&
+                cal.object?.kind === "identifier") {
+              const name = cal.object.name as string;
+              if (name === "server" || /server/i.test(name || "")) {
+                usage.modules.add("http");
+                addMethod(usage, "node_http_server_listen");
+                if (cal.property === "close") {
+                  addMethod(usage, "node_http_server_close");
+                } else {
+                  addMethod(usage, "node_http_server_on");
+                }
+              }
+            }
           }
         }
 
@@ -705,7 +719,7 @@ export function analyzeFeatureUsage(
   }
   const modulesNeedingHashArray = [
     "fs", "path", "http", "net", "events", "child_process",
-    "crypto", "assert", "readline", "os", "worker_threads", "sqlite", "webview", "ffi",
+    "crypto", "assert", "readline", "os", "worker_threads", "sqlite", "webview", "ffi", "uuid",
   ];
   for (const m of modulesNeedingHashArray) {
     if (usage.modules.has(m)) {

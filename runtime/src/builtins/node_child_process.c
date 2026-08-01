@@ -548,3 +548,58 @@ Value node_child_process_send(Value child, Value message) {
   }
   return ts_value_boolean(1);
 }
+
+#ifdef _WIN32
+Value node_child_process_kill(Value child, Value signal) {
+  if (child.tag != TAG_OBJECT || !child.as.object) return ts_value_undefined();
+  TSHashMap* map = (TSHashMap*)child.as.object;
+
+  Value pidValue = ts_hashmap_get(map, ts_string_new("pid"));
+  if (pidValue.tag != TAG_NUMBER) return ts_value_boolean(0);
+
+  HANDLE hProcess = (HANDLE)(size_t)pidValue.as.number;
+  if (hProcess == NULL || hProcess == INVALID_HANDLE_VALUE) return ts_value_boolean(0);
+
+  UINT32 sig = SIGTERM;
+  if (signal.tag == TAG_STRING && signal.as.string) {
+    TSString* sigStr = signal.as.string;
+    if (strcmp(sigStr->data, "SIGTERM") == 0) sig = SIGTERM;
+    else if (strcmp(sigStr->data, "SIGKILL") == 0) sig = SIGKILL;
+    else if (strcmp(sigStr->data, "SIGHUP") == 0) sig = 1;
+    else if (strcmp(sigStr->data, "SIGINT") == 0) sig = 2;
+    else if (strcmp(sigStr->data, "SIGQUIT") == 0) sig = 3;
+  }
+
+  BOOL result = TerminateProcess(hProcess, sig);
+  CloseHandle(hProcess);
+
+  return ts_value_boolean(result ? 1 : 0);
+}
+
+#else
+
+Value node_child_process_kill(Value child, Value signal) {
+  if (child.tag != TAG_OBJECT || !child.as.object) return ts_value_undefined();
+  TSHashMap* map = (TSHashMap*)child.as.object;
+
+  Value pidValue = ts_hashmap_get(map, ts_string_new("pid"));
+  if (pidValue.tag != TAG_NUMBER) return ts_value_boolean(0);
+
+  pid_t pid = (pid_t)pidValue.as.number;
+  if (pid <= 0) return ts_value_boolean(0);
+
+  int sig = SIGTERM;
+  if (signal.tag == TAG_STRING && signal.as.string) {
+    TSString* sigStr = signal.as.string;
+    if (strcmp(sigStr->data, "SIGTERM") == 0) sig = SIGTERM;
+    else if (strcmp(sigStr->data, "SIGKILL") == 0) sig = SIGKILL;
+    else if (strcmp(sigStr->data, "SIGHUP") == 0) sig = SIGHUP;
+    else if (strcmp(sigStr->data, "SIGINT") == 0) sig = SIGINT;
+    else if (strcmp(sigStr->data, "SIGQUIT") == 0) sig = SIGQUIT;
+  }
+
+  int result = kill(pid, sig);
+  return ts_value_boolean(result == 0 ? 1 : 0);
+}
+
+#endif

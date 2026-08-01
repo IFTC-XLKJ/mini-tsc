@@ -1,5 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "node_http.h"
+#include "ts_features.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -17,6 +18,9 @@ typedef int socklen_t;
 #include <unistd.h>
 #include <fcntl.h>
 #include <strings.h>
+#include <pthread.h>
+#include <errno.h>
+#include <sys/time.h>
 #define CLOSE_SOCKET close
 #define _stricmp strcasecmp
 #endif
@@ -25,7 +29,7 @@ typedef int socklen_t;
 #include <string.h>
 #include <stdlib.h>
 
-/* Server struct */
+/* ---------- Server struct ---------- */
 typedef struct {
   int type_tag;  /* 0x53525620 = 'SRV ' */
   int server_fd;
@@ -37,6 +41,107 @@ typedef struct {
 typedef Value (*HttpRequestHandler)(Value req);
 typedef Value (*HttpListenCallback)(void);
 
+/* ---------- Thread-safe pending-request queue ---------- */
+typedef struct PendingRequest {
+  int client_fd;
+  Value req_obj;
+  char raw_buf[4096];  /* original HTTP request for WebSocket upgrade */
+  int raw_len;
+  struct PendingRequest* next;
+} PendingRequest;
+
+typedef struct {
+  PendingRequest* head;
+  PendingRequest* tail;
+#ifdef _WIN32
+  CRITICAL_SECTION mu;
+  HANDLE event;  /* manual-reset event for WakeAllConditionVariable */
+#else
+  pthread_mutex_t mu;
+  pthread_cond_t cv;
+#endif
+} PendingQueue;
+
+static PendingQueue g_pending = {0};
+static HttpServer* g_server = NULL;
+static int g_server_inited = 0;
+
+#ifdef _WIN32
+static HANDLE g_accept_thread = NULL;
+#else
+static pthread_t g_accept_thread;
+static int g_accept_thread_created = 0;
+#endif
+
+static void pq_init(PendingQueue* q) {
+  q->head = q->tail = NULL;
+#ifdef _WIN32
+  InitializeCriticalSection(&q->mu);
+  q->event = CreateEvent(NULL, TRUE /* manual reset */, FALSE /* initial state */, NULL);
+#else
+  pthread_mutex_init(&q->mu, NULL);
+  pthread_cond_init(&q->cv, NULL);
+#endif
+}
+
+static void pq_push(PendingQueue* q, PendingRequest* req) {
+  req->next = NULL;
+#ifdef _WIN32
+  EnterCriticalSection(&q->mu);
+#else
+  pthread_mutex_lock(&q->mu);
+#endif
+  if (q->tail) q->tail->next = req;
+  else q->head = req;
+  q->tail = req;
+#ifdef _WIN32
+  SetEvent(q->event);
+  LeaveCriticalSection(&q->mu);
+#else
+  pthread_cond_signal(&q->cv);
+  pthread_mutex_unlock(&q->mu);
+#endif
+}
+
+static PendingRequest* pq_pop(PendingQueue* q) {
+  PendingRequest* req = NULL;
+#ifdef _WIN32
+  EnterCriticalSection(&q->mu);
+  if (q->head) {
+    req = q->head;
+    q->head = req->next;
+    if (!q->head) { q->tail = NULL; ResetEvent(q->event); }
+  }
+  LeaveCriticalSection(&q->mu);
+#else
+  pthread_mutex_lock(&q->mu);
+  if (q->head) {
+    req = q->head;
+    q->head = req->next;
+    if (!q->head) q->tail = NULL;
+  }
+  pthread_mutex_unlock(&q->mu);
+#endif
+  if (req) req->next = NULL;
+  return req;
+}
+
+static int pq_empty(PendingQueue* q) {
+  int empty;
+#ifdef _WIN32
+  EnterCriticalSection(&q->mu);
+  empty = (q->head == NULL);
+  LeaveCriticalSection(&q->mu);
+#else
+  pthread_mutex_lock(&q->mu);
+  empty = (q->head == NULL);
+  pthread_mutex_unlock(&q->mu);
+#endif
+  return empty;
+}
+
+/* ---------- HTTP helpers ---------- */
+
 static void http_send_all(int client_fd, const char* data, size_t len) {
   size_t sent = 0;
   while (sent < len) {
@@ -46,7 +151,6 @@ static void http_send_all(int client_fd, const char* data, size_t len) {
   }
 }
 
-/* Disable Nagle so each chunk is pushed to the wire immediately (true streaming). */
 static void http_set_nodelay(int fd) {
   int one = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
@@ -70,7 +174,6 @@ static void http_respond(int client_fd, int status, const char* content_type,
     body = "";
     body_len = 0;
   }
-
   int header_len = snprintf(header, sizeof(header),
     "HTTP/1.1 %d %s\r\n"
     "Content-Type: %s\r\n"
@@ -86,24 +189,12 @@ static void http_respond(int client_fd, int status, const char* content_type,
   }
 }
 
-#ifdef _WIN32
-static void http_sleep_ms(int ms) {
-  if (ms > 0) Sleep((DWORD)ms);
-}
-#else
-static void http_sleep_ms(int ms) {
-  if (ms > 0) usleep((useconds_t)ms * 1000);
-}
-#endif
-
-/* Append custom headers from FetchResponse (skip hop-by-hop / length we set). */
 static void http_append_custom_headers(char* buf, size_t cap, size_t* pos, TSHashMap* headers) {
   if (!headers) return;
   for (int32_t i = 0; i < headers->capacity; i++) {
     if (!headers->entries[i].occupied || !headers->entries[i].key) continue;
     const char* k = headers->entries[i].key->data;
     if (!k) continue;
-    /* Skip ones we manage */
     if (_stricmp(k, "Content-Length") == 0 || _stricmp(k, "content-length") == 0) continue;
     if (_stricmp(k, "Content-Type") == 0 || _stricmp(k, "content-type") == 0) continue;
     if (_stricmp(k, "Transfer-Encoding") == 0 || _stricmp(k, "transfer-encoding") == 0) continue;
@@ -118,7 +209,6 @@ static void http_append_custom_headers(char* buf, size_t cap, size_t* pos, TSHas
   }
 }
 
-/* Send one HTTP/1.1 chunk and force it onto the wire. */
 static void http_send_chunk(int client_fd, const char* data, size_t len) {
   char size_line[32];
   int sl = snprintf(size_line, sizeof(size_line), "%zx\r\n", len);
@@ -127,7 +217,6 @@ static void http_send_chunk(int client_fd, const char* data, size_t len) {
   http_send_all(client_fd, "\r\n", 2);
 }
 
-/* Send one StreamBody chunk item to the client. */
 static void http_send_stream_item(int client_fd, Value item) {
   const char* data = "";
   size_t len = 0;
@@ -147,10 +236,6 @@ static void http_send_stream_item(int client_fd, Value item) {
   http_send_chunk(client_fd, data, len);
 }
 
-/* True streaming: headers first, then body chunks.
- * Supports (1) pre-buffered chunks with X-Stream-Delay-Ms pacing, and
- * (2) live mode: setTimeout callbacks that writer.write() after Response returns —
- * we pump timers and flush new chunks as they appear. */
 static void http_respond_chunked(int client_fd, FetchResponse* fr) {
   StreamBody* sb = (StreamBody*)fr->stream;
   if (!sb || sb->type_tag != STREAM_BODY_TAG) {
@@ -206,30 +291,32 @@ static void http_respond_chunked(int client_fd, FetchResponse* fr) {
   int delay = sb->delay_ms;
   if (delay < 0) delay = 0;
 
-  /* Live stream: flush existing chunks, pump timers for deferred writer.write() */
   int32_t sent = 0;
   int idle_rounds = 0;
   for (;;) {
     TSArray* chunks = sb->chunks;
     int32_t len = chunks ? chunks->length : 0;
 
-    /* Send any newly written chunks */
     while (sent < len) {
       http_send_stream_item(client_fd, ts_array_get(chunks, sent));
       sent++;
       if (delay > 0 && sent < len) {
-        http_sleep_ms(delay);
+#ifdef _WIN32
+        Sleep((DWORD)delay);
+#else
+        usleep((useconds_t)delay * 1000);
+#endif
       }
     }
 
-    /* Deferred setTimeout writers still pending? */
+#if defined(TS_NEED_TIMERS)
     if (ts_timers_pending()) {
       ts_timers_poll();
       idle_rounds = 0;
       continue;
     }
+#endif
 
-    /* No timers, no new chunks — done (or empty stream) */
     if (sent >= (chunks ? chunks->length : 0)) {
       idle_rounds++;
       if (idle_rounds >= 1) break;
@@ -239,9 +326,6 @@ static void http_respond_chunked(int client_fd, FetchResponse* fr) {
   http_send_all(client_fd, "0\r\n\r\n", 5);
 }
 
-/* Extract body bytes + content-type from handler return value.
- * Supports: string, Buffer, FetchResponse (buffered or stream), { body, headers }.
- * Returns 1 if caller should use chunked streaming (fr filled), else 0 for buffered. */
 static int extract_response(Value result, const char** out_body, size_t* out_len,
                             const char** out_ctype, int* out_status,
                             FetchResponse** out_stream_fr) {
@@ -278,7 +362,6 @@ static int extract_response(Value result, const char** out_body, size_t* out_len
           *out_ctype = ct.as.string->data;
         }
       }
-      /* Streaming body (array chunks / StreamBody) */
       if (fr->stream && !fr->body_complete) {
         StreamBody* sb = (StreamBody*)fr->stream;
         if (sb && sb->type_tag == STREAM_BODY_TAG) {
@@ -293,7 +376,6 @@ static int extract_response(Value result, const char** out_body, size_t* out_len
       return 0;
     }
 
-    /* HashMap with body key */
     TSHashMap* map = (TSHashMap*)result.as.object;
     Value bodyVal = ts_hashmap_get(map, ts_string_new("body"));
     if (bodyVal.tag == TAG_STRING && bodyVal.as.string) {
@@ -328,6 +410,135 @@ static int extract_response(Value result, const char** out_body, size_t* out_len
   *out_len = s ? (size_t)s->length : 0;
   return 0;
 }
+
+/* ---------- Parse raw HTTP request into Request object ---------- */
+static Value http_parse_request(char* buf, int n) {
+  buf[n] = '\0';
+
+  char method[16] = {0};
+  char path[256] = {0};
+  sscanf(buf, "%15s %255s", method, path);
+
+  char hostHeader[256] = "localhost";
+  char* hostLine = strstr(buf, "Host:");
+  if (!hostLine) hostLine = strstr(buf, "host:");
+  if (hostLine) {
+    hostLine += 5;
+    while (*hostLine == ' ') hostLine++;
+    int hi = 0;
+    while (*hostLine && *hostLine != '\r' && *hostLine != '\n' && hi < 255) {
+      hostHeader[hi++] = *hostLine++;
+    }
+    hostHeader[hi] = '\0';
+  }
+
+  TSHashMap* req = ts_hashmap_new();
+  ts_hashmap_set(req, ts_string_new("method"), ts_value_string(ts_string_new(method)));
+  ts_hashmap_set(req, ts_string_new("url"), ts_value_string(ts_string_new(path)));
+  TSHashMap* headers = ts_hashmap_new();
+  ts_hashmap_set(headers, ts_string_new("host"), ts_value_string(ts_string_new(hostHeader)));
+
+  {
+    char* line = strstr(buf, "\r\n");
+    if (line) line += 2;
+    while (line && *line && !(line[0] == '\r' && line[1] == '\n')) {
+      char* next = strstr(line, "\r\n");
+      char* colon = strchr(line, ':');
+      if (colon && (!next || colon < next)) {
+        char keybuf[128];
+        char valbuf[512];
+        int klen = (int)(colon - line);
+        if (klen > 0 && klen < (int)sizeof(keybuf)) {
+          memcpy(keybuf, line, (size_t)klen);
+          keybuf[klen] = '\0';
+          for (int i = 0; keybuf[i]; i++) {
+            if (keybuf[i] >= 'A' && keybuf[i] <= 'Z') keybuf[i] = (char)(keybuf[i] + 32);
+          }
+          const char* vstart = colon + 1;
+          while (*vstart == ' ' || *vstart == '\t') vstart++;
+          int vlen = next ? (int)(next - vstart) : (int)strlen(vstart);
+          while (vlen > 0 && (vstart[vlen - 1] == ' ' || vstart[vlen - 1] == '\t')) vlen--;
+          if (vlen < 0) vlen = 0;
+          if (vlen >= (int)sizeof(valbuf)) vlen = (int)sizeof(valbuf) - 1;
+          memcpy(valbuf, vstart, (size_t)vlen);
+          valbuf[vlen] = '\0';
+          ts_hashmap_set(headers, ts_string_new(keybuf),
+                         ts_value_string(ts_string_new(valbuf)));
+        }
+      }
+      if (!next) break;
+      line = next + 2;
+    }
+  }
+  ts_hashmap_set(req, ts_string_new("headers"), ts_value_object(headers));
+  return ts_value_object(req);
+}
+
+/* ---------- Send response for a parsed request ---------- */
+static void http_handle_response(int client_fd, Value result) {
+  const char* body = "";
+  size_t body_len = 0;
+  const char* ctype = "text/plain";
+  int status = 200;
+  FetchResponse* stream_fr = NULL;
+  int is_stream = extract_response(result, &body, &body_len, &ctype, &status, &stream_fr);
+  if (is_stream && stream_fr) {
+    http_respond_chunked(client_fd, stream_fr);
+  } else {
+    http_respond(client_fd, status, ctype, body, body_len);
+  }
+}
+
+/* ---------- Accept thread ---------- */
+#ifdef _WIN32
+static DWORD WINAPI http_accept_thread(LPVOID arg) {
+  (void)arg;
+#else
+static void* http_accept_thread(void* arg) {
+  (void)arg;
+#endif
+  for (;;) {
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    int client_fd = (int)accept(g_server->server_fd, (struct sockaddr*)&client_addr, &client_len);
+    if (client_fd < 0) {
+#ifdef _WIN32
+      Sleep(10);
+#else
+      usleep(10000);
+#endif
+      continue;
+    }
+
+    /* Force blocking mode for request read */
+#ifdef _WIN32
+    { u_long mode0 = 0; ioctlsocket(client_fd, FIONBIO, &mode0); }
+#else
+    { int fl = fcntl(client_fd, F_GETFL, 0); if (fl >= 0) fcntl(client_fd, F_SETFL, fl & ~O_NONBLOCK); }
+#endif
+    http_set_nodelay(client_fd);
+
+    /* Read request */
+    char buf[4096];
+    int n = recv(client_fd, buf, sizeof(buf) - 1, 0);
+    if (n <= 0) {
+      CLOSE_SOCKET(client_fd);
+      continue;
+    }
+
+    /* Parse and enqueue for main thread */
+    Value req_obj = http_parse_request(buf, n);
+    PendingRequest* pr = (PendingRequest*)malloc(sizeof(PendingRequest));
+    pr->client_fd = client_fd;
+    pr->req_obj = req_obj;
+    memcpy(pr->raw_buf, buf, (size_t)n);
+    pr->raw_len = n;
+    pq_push(&g_pending, pr);
+  }
+  return 0;
+}
+
+/* ---------- Public API ---------- */
 
 Value node_http_createServer(Value callback) {
   HttpServer* server = (HttpServer*)malloc(sizeof(HttpServer));
@@ -372,7 +583,7 @@ Value node_http_server_listen(Value serverVal, Value portVal, Value callback) {
     return ts_value_undefined();
   }
 
-  if (listen(server->server_fd, 10) < 0) {
+  if (listen(server->server_fd, 128) < 0) {
     CLOSE_SOCKET(server->server_fd);
     TS_THROW(ts_value_string(ts_string_new("Failed to listen")));
     return ts_value_undefined();
@@ -380,175 +591,93 @@ Value node_http_server_listen(Value serverVal, Value portVal, Value callback) {
 
   printf("Server listening on port %d\n", port);
 
+  /* Store server globally for accept thread */
+  g_server = server;
+  if (!g_server_inited) {
+    pq_init(&g_pending);
+    g_server_inited = 1;
+  }
+
+  /* Launch accept thread (non-blocking — returns immediately) */
+#ifdef _WIN32
+  g_accept_thread = CreateThread(NULL, 0, http_accept_thread, NULL, 0, NULL);
+#else
+  pthread_create(&g_accept_thread, NULL, http_accept_thread, NULL);
+  g_accept_thread_created = 1;
+#endif
+
   /* Run listen callback if provided */
   if (callback.tag == TAG_FUNCTION && callback.as.function) {
     HttpListenCallback listenCb = (HttpListenCallback)callback.as.function;
     listenCb();
   }
 
-  /* Non-blocking accept so we can pump WebSocket frames between connections */
-#ifdef _WIN32
-  {
-    u_long mode = 1;
-    ioctlsocket(server->server_fd, FIONBIO, &mode);
-  }
-#else
-  {
-    int flags = fcntl(server->server_fd, F_GETFL, 0);
-    if (flags >= 0) fcntl(server->server_fd, F_SETFL, flags | O_NONBLOCK);
-  }
-#endif
+  return ts_value_undefined();
+}
 
-  /* Accept loop */
-  while (1) {
-    /* Pump active WebSocket connections (message / close events) */
-    if (ts_websocket_pending()) {
-      ts_websocket_poll();
-    }
-    if (ts_timers_pending()) {
-      ts_timers_poll();
-    }
+/* ---------- Event-loop polling (called from generated main.c) ---------- */
 
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    int client_fd = (int)accept(server->server_fd, (struct sockaddr*)&client_addr, &client_len);
-    if (client_fd < 0) {
-      /* No pending connection — brief sleep then retry (also keeps WS alive) */
-#ifdef _WIN32
-      Sleep(10);
-#else
-      usleep(10000);
-#endif
-      continue;
-    }
-    /* Accept may inherit non-blocking; force blocking for request body read */
-#ifdef _WIN32
-    {
-      u_long mode0 = 0;
-      ioctlsocket(client_fd, FIONBIO, &mode0);
-    }
-#else
-    {
-      int fl = fcntl(client_fd, F_GETFL, 0);
-      if (fl >= 0) fcntl(client_fd, F_SETFL, fl & ~O_NONBLOCK);
-    }
-#endif
-    http_set_nodelay(client_fd);
+void node_http_server_poll(void) {
+  if (!g_server || !g_server_inited) return;
 
-    /* Read request */
-    char buf[4096];
-    int n = recv(client_fd, buf, sizeof(buf) - 1, 0);
-    if (n <= 0) {
-      CLOSE_SOCKET(client_fd);
-      continue;
-    }
-    buf[n] = '\0';
+  /* Drain all pending requests from the accept thread */
+  for (;;) {
+    PendingRequest* pr = pq_pop(&g_pending);
+    if (!pr) break;
 
-    /* Parse request line */
-    char method[16] = {0};
-    char path[256] = {0};
-    sscanf(buf, "%15s %255s", method, path);
-
-    /* Parse Host header */
-    char hostHeader[256] = "localhost";
-    char* hostLine = strstr(buf, "Host:");
-    if (!hostLine) hostLine = strstr(buf, "host:");
-    if (hostLine) {
-      hostLine += 5;
-      while (*hostLine == ' ') hostLine++;
-      int hi = 0;
-      while (*hostLine && *hostLine != '\r' && *hostLine != '\n' && hi < 255) {
-        hostHeader[hi++] = *hostLine++;
-      }
-      hostHeader[hi] = '\0';
-    }
-
-    /* Create request object */
-    TSHashMap* req = ts_hashmap_new();
-    ts_hashmap_set(req, ts_string_new("method"), ts_value_string(ts_string_new(method)));
-    ts_hashmap_set(req, ts_string_new("url"), ts_value_string(ts_string_new(path)));
-    TSHashMap* headers = ts_hashmap_new();
-    ts_hashmap_set(headers, ts_string_new("host"), ts_value_string(ts_string_new(hostHeader)));
-    /* Parse remaining request headers (Upgrade, Connection, Sec-WebSocket-*, …) */
-    {
-      char* line = strstr(buf, "\r\n");
-      if (line) line += 2;
-      while (line && *line && !(line[0] == '\r' && line[1] == '\n')) {
-        char* next = strstr(line, "\r\n");
-        char* colon = strchr(line, ':');
-        if (colon && (!next || colon < next)) {
-          char keybuf[128];
-          char valbuf[512];
-          int klen = (int)(colon - line);
-          if (klen > 0 && klen < (int)sizeof(keybuf)) {
-            memcpy(keybuf, line, (size_t)klen);
-            keybuf[klen] = '\0';
-            /* lowercase header name */
-            for (int i = 0; keybuf[i]; i++) {
-              if (keybuf[i] >= 'A' && keybuf[i] <= 'Z') keybuf[i] = (char)(keybuf[i] + 32);
-            }
-            const char* vstart = colon + 1;
-            while (*vstart == ' ' || *vstart == '\t') vstart++;
-            int vlen = next ? (int)(next - vstart) : (int)strlen(vstart);
-            while (vlen > 0 && (vstart[vlen - 1] == ' ' || vstart[vlen - 1] == '\t')) vlen--;
-            if (vlen < 0) vlen = 0;
-            if (vlen >= (int)sizeof(valbuf)) vlen = (int)sizeof(valbuf) - 1;
-            memcpy(valbuf, vstart, (size_t)vlen);
-            valbuf[vlen] = '\0';
-            ts_hashmap_set(headers, ts_string_new(keybuf),
-                           ts_value_string(ts_string_new(valbuf)));
-          }
-        }
-        if (!next) break;
-        line = next + 2;
-      }
-    }
-    ts_hashmap_set(req, ts_string_new("headers"), ts_value_object(headers));
-
-    /* Call request handler */
-    if (server->callback.tag == TAG_FUNCTION && server->callback.as.function) {
-      HttpRequestHandler handler = (HttpRequestHandler)server->callback.as.function;
-      Value result = handler(ts_value_object(req));
-      /* Await Promise if handler is async */
+    /* Call the request handler */
+    Value result;
+    if (g_server->callback.tag == TAG_FUNCTION && g_server->callback.as.function) {
+      HttpRequestHandler handler = (HttpRequestHandler)g_server->callback.as.function;
+      result = handler(pr->req_obj);
+#if defined(TS_NEED_PROMISE)
       if (ts_value_is_promise(result)) {
         result = ts_await(result);
       }
-      /* WebSocket upgrade: Response body is WebSocketServer */
-      if (result.tag == TAG_OBJECT && result.as.object &&
-          *((int32_t*)result.as.object) == FETCH_RESPONSE_TAG) {
-        FetchResponse* fr = (FetchResponse*)result.as.object;
-        if (fr->stream && !fr->body_complete) {
-          int32_t st = *((int32_t*)fr->stream);
-          if (st == WEBSOCKET_SERVER_TAG || st == WEBSOCKET_TAG) {
-            ts_websocket_http_upgrade(client_fd, fr, buf, n);
-            /* upgrade owns/closes the socket */
-            ts_hashmap_free(req);
-            continue;
-          }
-        }
-      }
-      const char* body = "";
-      size_t body_len = 0;
-      const char* ctype = "text/plain";
-      int status = 200;
-      FetchResponse* stream_fr = NULL;
-      int is_stream = extract_response(result, &body, &body_len, &ctype, &status, &stream_fr);
-      if (is_stream && stream_fr) {
-        http_respond_chunked(client_fd, stream_fr);
-      } else {
-        http_respond(client_fd, status, ctype, body, body_len);
-      }
+#endif
     } else {
-      const char* fallback = "Hello, World!";
-      http_respond(client_fd, 200, "text/plain", fallback, strlen(fallback));
+      result = ts_value_string(ts_string_new("Hello, World!"));
     }
 
-    CLOSE_SOCKET(client_fd);
-    ts_hashmap_free(req);
+    /* WebSocket upgrade check */
+    if (result.tag == TAG_OBJECT && result.as.object &&
+        *((int32_t*)result.as.object) == FETCH_RESPONSE_TAG) {
+      FetchResponse* fr = (FetchResponse*)result.as.object;
+      if (fr->stream && !fr->body_complete) {
+        int32_t st = *((int32_t*)fr->stream);
+        if (st == WEBSOCKET_SERVER_TAG || st == WEBSOCKET_TAG) {
+          ts_websocket_http_upgrade(pr->client_fd, fr, pr->raw_buf, pr->raw_len);
+          ts_hashmap_free((TSHashMap*)pr->req_obj.as.object);
+          free(pr);
+          continue;
+        }
+      }
+    }
+
+    /* Send response on main thread */
+    http_handle_response(pr->client_fd, result);
+    CLOSE_SOCKET(pr->client_fd);
+    ts_hashmap_free((TSHashMap*)pr->req_obj.as.object);
+    free(pr);
   }
 
-  return ts_value_undefined();
+  /* Pump timers for deferred writers (SSE streaming, etc.) */
+#if defined(TS_NEED_TIMERS)
+  if (ts_timers_pending()) {
+    ts_timers_poll();
+  }
+#endif
 }
+
+int node_http_server_active(void) {
+  return g_server != NULL;
+}
+
+int node_http_server_pending(void) {
+  return !pq_empty(&g_pending);
+}
+
+/* ---------- HTTP client ---------- */
 
 Value node_http_request(Value options, Value callback) {
   if (options.tag != TAG_OBJECT) {

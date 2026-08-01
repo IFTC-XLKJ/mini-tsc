@@ -161,6 +161,7 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "on", cName: "node_child_process_on", signature: "Value node_child_process_on(Value child, Value event, Value callback)" },
       { tsName: "stream_on", cName: "node_child_process_stream_on", signature: "Value node_child_process_stream_on(Value child, Value streamName, Value event, Value callback)" },
       { tsName: "send", cName: "node_child_process_send", signature: "Value node_child_process_send(Value child, Value message)" },
+      { tsName: "kill", cName: "node_child_process_kill", signature: "Value node_child_process_kill(Value child, Value signal)" },
     ],
   }],
   ["events", {
@@ -413,6 +414,16 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "off", cName: "node_webview_off", signature: "Value node_webview_off(Value self, Value event, Value callback)" },
       { tsName: "get_ready", cName: "node_webview_get_ready", signature: "Value node_webview_get_ready(Value self)" },
       { tsName: "get_url", cName: "node_webview_get_url", signature: "Value node_webview_get_url(Value self)" },
+    ],
+  }],
+  ["uuid", {
+    name: "uuid",
+    headerFile: "node_uuid.h",
+    cSourceFile: "node_uuid.c",
+    functions: [
+      { tsName: "v4", cName: "node_uuid_v4", signature: "Value node_uuid_v4(void)" },
+      { tsName: "validate", cName: "node_uuid_validate", signature: "Value node_uuid_validate(TSString* uuid)" },
+      { tsName: "v7", cName: "node_uuid_v7", signature: "Value node_uuid_v7(void)" },
     ],
   }],
 ]);

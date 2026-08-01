@@ -15,6 +15,7 @@ function main(): void {
         frame: false,
         transparent: true,
         shadow: true,
+        resizable: false,
         roundedCorners: true,
         devTools: true
     });

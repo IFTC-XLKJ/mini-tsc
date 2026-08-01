@@ -212,6 +212,11 @@ export class CompilerDriver {
     // Merge import-based modules into usage
     for (const b of usedBuiltins) featureUsage.modules.add(b);
 
+    // webview.c uses ts_value_is_promise from promise.c — ensure feature flag is set
+    if (featureUsage.modules.has("webview")) {
+      featureUsage.features.add("promise");
+    }
+
     if (options.verbose) {
       verbose.push(
         `Tree-shake modules: ${[...featureUsage.modules].sort().join(", ") || "(none)"}`,
@@ -1066,6 +1071,10 @@ extern TsErrorContext _ts_current_error;
       lines.push('extern int ts_worker_pending(void);');
       lines.push('extern int ts_worker_poll(void);');
     }
+    const needHttp = usage?.modules.has("http") ?? false;
+    if (needHttp) {
+      lines.push('extern void node_http_server_poll(void);');
+    }
     lines.push('');
     // CommonJS __dirname / __filename — runtime-resolved exe paths
     lines.push('/* CommonJS module globals (runtime-resolved exe paths) */');
@@ -1201,9 +1210,23 @@ extern TsErrorContext _ts_current_error;
     const needPromise = usage?.features.has("promise") ?? false;
     const needTimers = usage?.features.has("timers") ?? false;
     const needWebsocket = usage?.features.has("websocket") ?? false;
-    if (needPromise || needTimers || needWebsocket || needWorkers) {
-      lines.push('  /* Event loop: drain async I/O + timers + websockets + workers */');
-      if (needWebsocket || needWorkers) {
+    if (needPromise || needTimers || needWebsocket || needWorkers || needHttp) {
+      lines.push('  /* Event loop: drain async I/O + timers + websockets + workers + HTTP */');
+      if (needHttp) {
+        // HTTP server present: infinite loop (server has no natural "done" state)
+        lines.push('  for (;;) {');
+        if (needWebsocket) lines.push('    ts_websocket_poll();');
+        if (needWorkers) lines.push('    ts_worker_poll();');
+        lines.push('    node_http_server_poll();');
+        if (needTimers) lines.push('    if (ts_timers_pending()) ts_timers_poll();');
+        if (needPromise) lines.push('    ts_completion_poll();');
+        lines.push('#ifdef _WIN32');
+        lines.push('    Sleep(10);');
+        lines.push('#else');
+        lines.push('    usleep(10000);');
+        lines.push('#endif');
+        lines.push('  }');
+      } else if (needWebsocket || needWorkers) {
         lines.push('  while (0');
         if (needWebsocket) lines.push('      || ts_websocket_pending()');
         if (needWorkers) lines.push('      || ts_worker_pending()');
@@ -1336,7 +1359,7 @@ extern TsErrorContext _ts_current_error;
       if (needArray) coreRuntime.push("array_ops.c");
       if (needHashmap) coreRuntime.push("hashmap.c");
       if (needClosure) coreRuntime.push("closure.c");
-      if (needPromise) {
+      if (needPromise || needWebview) {
         coreRuntime.push("promise.c", "thread_pool.c");
       }
       if (needWebsocket) {

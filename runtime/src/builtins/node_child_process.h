@@ -11,5 +11,6 @@ Value node_child_process_fork(Value modulePath, Value args, Value options);
 Value node_child_process_on(Value child, Value event, Value callback);
 Value node_child_process_stream_on(Value child, Value streamName, Value event, Value callback);
 Value node_child_process_send(Value child, Value message);
+Value node_child_process_kill(Value child, Value signal);
 
 #endif /* NODE_CHILD_PROCESS_H */

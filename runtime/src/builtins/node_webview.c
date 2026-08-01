@@ -19,6 +19,10 @@ typedef int socklen_t;
 
 #include "WebView2.h"
 
+#if defined(TS_NEED_MODULE_HTTP)
+extern void node_http_server_poll(void);
+#endif
+
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 
@@ -79,6 +83,7 @@ typedef struct {
   int devTools;        /* 1 = open devtools (default), 0 = hide devtools */
   int shadow;          /* 1 = enable window shadow on frameless windows */
   int roundedCorners;  /* 1 = enable DWM rounded corners (Windows 11) */
+  int resizable;       /* 1 = allow window resize (default), 0 = fixed size */
   /* Event listeners: map eventName → array of functions */
   TSHashMap* listeners;
   /* COM event tokens for cleanup */
@@ -1562,6 +1567,7 @@ Value node_webview_WebView(Value options) {
   printf("WebView: node_webview_WebView called\n");
   fflush(stdout);
   fprintf(stderr, "WebView: node_webview_WebView called (stderr)\n");
+  fflush(stderr);
   WebViewInstance* inst = (WebViewInstance*)calloc(1, sizeof(WebViewInstance));
   if (!inst) {
     fprintf(stderr, "WebView: Failed to allocate instance\n");
@@ -1576,6 +1582,7 @@ Value node_webview_WebView(Value options) {
   inst->frame = 1;        /* default: show frame */
   inst->transparent = 0;  /* default: opaque */
   inst->devTools = 1;     /* default: open devtools */
+  inst->resizable = 1;    /* default: resizable */
 
   /* Parse options */
   if (options.tag == TAG_OBJECT && options.as.object) {
@@ -1628,6 +1635,9 @@ Value node_webview_WebView(Value options) {
 
     v = ts_hashmap_get(map, ts_string_new("roundedCorners"));
     inst->roundedCorners = ts_to_boolean(v);
+
+    v = ts_hashmap_get(map, ts_string_new("resizable"));
+    inst->resizable = ts_to_boolean(v);
   }
 
   /* Register window class */
@@ -1653,6 +1663,10 @@ Value node_webview_WebView(Value options) {
     dwStyle = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
   } else {
     dwStyle = WS_POPUP | WS_CLIPCHILDREN;
+  }
+  /* Remove WS_THICKFRAME if not resizable */
+  if (!inst->resizable) {
+    dwStyle &= ~WS_THICKFRAME;
   }
   DWORD dwExStyle = 0;
 
@@ -1738,6 +1752,7 @@ Value node_webview_WebView(Value options) {
 
   if (FAILED(hr)) {
     fprintf(stderr, "WebView2: Failed to create environment: 0x%08lx\n", hr);
+    printf("WebView2: Failed to create environment: 0x%08lx (WebView2 Runtime may not be installed)\n", hr);
     DestroyWindow(inst->hwnd);
     free(inst->url);
     free(inst->title);
@@ -1747,6 +1762,7 @@ Value node_webview_WebView(Value options) {
   }
 
   fprintf(stderr, "WebView2: Environment creation started\n");
+  fflush(stderr);
   return ts_value_object((void*)inst);
 }
 
@@ -1988,6 +2004,8 @@ Value node_webview_run(Value self) {
   WebViewInstance* inst = (WebViewInstance*)self.as.object;
   if (!inst || !inst->hwnd) {
     fprintf(stderr, "WebView: node_webview_run returning early, inst=%p, hwnd=%p\n", inst, inst ? inst->hwnd : NULL);
+    printf("WebView: not available, keeping process alive for HTTP server. Install Microsoft Edge WebView2 Runtime for full GUI. Press Ctrl+C to stop.\n");
+    while (1) { Sleep(100); }
     return ts_value_undefined();
   }
 
@@ -2002,16 +2020,21 @@ Value node_webview_run(Value self) {
 
   g_loopRunning = 1;
   MSG msg;
+  fprintf(stderr, "WebView: entering message loop, g_instanceCount=%d\n", g_instanceCount);
   while (g_instanceCount > 0) {
     while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
       if (msg.message == WM_QUIT) {
+        fprintf(stderr, "WebView: received WM_QUIT, g_instanceCount=%d\n", g_instanceCount);
         break;
       }
       TranslateMessage(&msg);
       DispatchMessage(&msg);
     }
 
-    if (g_instanceCount <= 0) break;
+    if (g_instanceCount <= 0) {
+      fprintf(stderr, "WebView: g_instanceCount dropped to %d, exiting loop\n", g_instanceCount);
+      break;
+    }
 
     /* Poll WebSocket bridges for all instances */
     for (int i = 0; i < MAX_INSTANCES; i++) {
@@ -2021,10 +2044,15 @@ Value node_webview_run(Value self) {
       }
     }
 
+#if defined(TS_NEED_MODULE_HTTP)
+    node_http_server_poll();
+#endif
+
     Sleep(5);
   }
 
-  fprintf(stderr, "WebView: Global message loop ended\n");
+  fprintf(stderr, "WebView: Global message loop ended (g_instanceCount=%d)\n", g_instanceCount);
+  fflush(stderr);
   g_loopRunning = 0;
   return ts_value_undefined();
 }

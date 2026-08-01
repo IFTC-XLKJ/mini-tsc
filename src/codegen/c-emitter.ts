@@ -483,7 +483,7 @@ export class CEmitter {
         const recvLooksCommander =
           /\b(Command|Option|Argument|CommanderError|InvalidArgumentError)\b/.test(String(recvType)) ||
           (n.object?.kind === "identifier" &&
-            /^(cmd|command|program|opt|option|arg|argument)/i.test(n.object.name || ""));
+            /^(cmd|command|program|opt$|option$|arg$|argument)/i.test(n.object.name || ""));
         if (recvLooksCommander) {
           const prop = n.property || "";
           if (["getName", "getDescription", "getVersion", "getAlias", "version",

@@ -2827,7 +2827,7 @@ export class ExpressionEmitter {
            callee.object.object.name === "parentPort" ||
            this.importedSymbols.has(callee.object.object.name));
         const looksLikeWorker =
-          varType === "Value" ||
+          (varType === "Value" && !!objectName && !/child|spawn|fork|dir|proc|cp|server|req|res|rl|readline|webview|wv|window|emitter|ee|event/i.test(objectName)) ||
           /worker|port|parent|channel|bc|w\d*$/i.test(objectName || "") ||
           objectName === "parentPort" ||
           isPropertyAccessWorker ||
@@ -2908,7 +2908,8 @@ export class ExpressionEmitter {
       if (methodName === "on" &&
           callee.object?.kind === "identifier" &&
           (varType === "Value" || objectName === "dir" || objectName === "forked" ||
-           objectName === "child" || objectName === "proc" || /child|spawn|fork/i.test(objectName || ""))) {
+           objectName === "child" || objectName === "proc" || /child|spawn|fork/i.test(objectName || "")) &&
+          !/server|req|res/i.test(objectName || "")) {
         const childObj = this.emit(callee.object);
         const callArgs = (node.arguments || []).map((a: CNode) => {
           const emitted = this.emit(a);
@@ -3042,6 +3043,37 @@ export class ExpressionEmitter {
         });
         while (callArgs.length < 2) callArgs.push("ts_value_null()");
         return `node_http_server_listen(${serverArg}, ${callArgs.join(", ")})`;
+      }
+
+      // http.Server instance methods: on / once / off / close
+      const serverMethods = new Set(["on", "once", "off", "close"]);
+      if (serverMethods.has(methodName) && callee.object?.kind === "identifier" &&
+          (objectName === "server" || /server/i.test(objectName || ""))) {
+        const self = this.emit(callee.object);
+        const wrap = (a: CNode): string => {
+          const emitted = this.emit(a);
+          if (emitted.startsWith("ts_value_") || a.kind === "function_ref" ||
+              a.kind === "arrow_function" || a.kind === "function_expression") return emitted;
+          if (a.kind === "string_literal") return `ts_value_string(${emitted})`;
+          if (a.kind === "number_literal") return `ts_value_number(${emitted})`;
+          if (a.kind === "boolean_literal") return `ts_value_boolean(${emitted})`;
+          if (a.kind === "identifier") {
+            const t = this.varTypes.get(a.name);
+            if (t === "double" || t === "number") return `ts_value_number(${emitted})`;
+            if (t === "TSString*" || t === "string") return `ts_value_string(${emitted})`;
+            if (t === "int" || t === "boolean") return `ts_value_boolean(${emitted})`;
+            if (t === "Value") return emitted;
+          }
+          if (emitted.startsWith("node_") || emitted.startsWith("ts_")) return emitted;
+          return `ts_value_string(ts_to_string(${emitted}))`;
+        };
+        const callArgs = (node.arguments || []).map(wrap);
+        if (methodName === "close") {
+          while (callArgs.length < 1) callArgs.push("ts_value_null()");
+          return `node_http_server_close(${self}, ${callArgs[0]})`;
+        }
+        while (callArgs.length < 2) callArgs.push("ts_value_null()");
+        return `node_http_server_${methodName}(${self}, ${callArgs[0]}, ${callArgs[1]})`;
       }
 
       // Known commander / class methods on Value-typed receivers (structural types lose class name)
@@ -3385,7 +3417,7 @@ export class ExpressionEmitter {
       // Method dispatch for Value-typed variables backed by struct types
       // Uses checkerTypeName from the visitor to determine the actual class
       if (varType === "Value" && callee.checkerTypeName && /^[A-Z]/.test(callee.checkerTypeName) &&
-          !/Promise|<|>|WritableStream|ReadableStream|TransformStream/.test(callee.checkerTypeName)) {
+          !/Promise|<|>|WritableStream|ReadableStream|TransformStream|Server|IncomingMessage|ClientRequest|Socket|Agent|Buffer|URL|Url|Headers|Response|Request|WebSocket|WebSocketServer/.test(callee.checkerTypeName)) {
         const className = callee.checkerTypeName.replace(/\*$/, "").replace(/<.*>/, "");
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(className)) {
           // fall through — invalid C identifier from generics/unions

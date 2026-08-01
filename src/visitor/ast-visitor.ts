@@ -611,7 +611,7 @@ export class AstVisitor {
       "fs", "path", "http", "https", "net", "os", "process", "child_process",
       "crypto", "url", "util", "events", "stream", "buffer", "querystring",
       "assert", "constants", "module", "repl", "tty", "zlib", "readline",
-      "worker_threads", "chalk", "sqlite", "ffi", "webview",
+      "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid",
     ]);
     if (NODE_BUILTINS.has(specifier)) {
       // Default import: import chalk from "chalk"
@@ -1956,7 +1956,7 @@ export class AstVisitor {
       visit(node.body);
     }
 
-    // Don't capture globals / builtins
+    // Don't capture globals / builtins / namespace imports (resolved statically at codegen)
     const skip = new Set([
       "console", "Math", "JSON", "Date", "Object", "Array", "String", "Number",
       "Boolean", "Error", "parseInt", "parseFloat", "isNaN", "isFinite",
@@ -1967,7 +1967,7 @@ export class AstVisitor {
       "WebSocket", "WebSocketServer", "Headers", "Response", "Request",
       "WritableStream", "ReadableStream", "TransformStream",
     ]);
-    return [...free].filter(n => !skip.has(n) && !/^[A-Z]/.test(n));
+    return [...free].filter(n => !skip.has(n) && !/^[A-Z]/.test(n) && !this.namespaceModulePaths.has(n));
   }
 
   /** setTimeout/setInterval return double — wrap as Value when used as Promise executor body. */
