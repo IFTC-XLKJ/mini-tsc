@@ -327,6 +327,10 @@ db.close();
 
 ---
 
+## 反馈
+
+如果您有任何问题或建议，请提交 issue 或发送邮件到 [iftcceo@gmail.com](mailto:iftcceo@gmail.com)。
+
 ## 贡献
 
 欢迎贡献代码和文档！请遵循以下步骤：
