@@ -426,6 +426,20 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "v7", cName: "node_uuid_v7", signature: "Value node_uuid_v7(void)" },
     ],
   }],
+  ["ctype", {
+    name: "ctype",
+    headerFile: "node_ctype.h",
+    cSourceFile: "node_ctype.c",
+    functions: [
+      { tsName: "CType", cName: "node_ctype_new_ctype", signature: "Value node_ctype_new_ctype(TSString* name, double size, double alignment, int isSigned)" },
+      { tsName: "sizeof", cName: "node_ctype_sizeof", signature: "Value node_ctype_sizeof(Value type)" },
+      { tsName: "alignof", cName: "node_ctype_alignof", signature: "Value node_ctype_alignof(Value type)" },
+      { tsName: "get_name", cName: "node_ctype_get_name", signature: "Value node_ctype_get_name(Value type)" },
+      { tsName: "get_size", cName: "node_ctype_get_size", signature: "Value node_ctype_get_size(Value type)" },
+      { tsName: "get_alignment", cName: "node_ctype_get_alignment", signature: "Value node_ctype_get_alignment(Value type)" },
+      { tsName: "get_signed", cName: "node_ctype_get_signed", signature: "Value node_ctype_get_signed(Value type)" },
+    ],
+  }],
 ]);
 
 export function getBuiltinModule(name: string): BuiltinModule | undefined {

@@ -4,7 +4,7 @@ import { BUILTIN_MODULES } from "../builtins/registry.js";
 /** Node built-in module names we can tree-shake. */
 export const BUILTIN_MODULE_NAMES = [
   "fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto",
-  "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid",
+  "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype",
 ] as const;
 
 export type BuiltinModuleName = (typeof BUILTIN_MODULE_NAMES)[number];

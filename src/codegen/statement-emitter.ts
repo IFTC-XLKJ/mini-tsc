@@ -201,7 +201,8 @@ export class StatementEmitter {
           init = ` = ts_to_boolean(${initExpr})`;
         }
       } else if (type === "double" || type === "number") {
-        if (initExpr.startsWith("ts_hashmap_get(") || initExpr.startsWith("ts_value_")) {
+        if (initExpr.startsWith("ts_hashmap_get(") || initExpr.startsWith("ts_value_") ||
+            initExpr.startsWith("node_")) {
           init = ` = ts_to_number(${initExpr})`;
         }
       } else if (type === "TSString*" || type === "string") {
@@ -273,6 +274,12 @@ export class StatementEmitter {
         } else if (initExpr.startsWith("ts_string_starts_with(") || initExpr.startsWith("ts_string_ends_with(") ||
                    initExpr.startsWith("ts_string_includes(") || initExpr.startsWith("ts_string_equals(") ||
                    initExpr.startsWith("ts_string_index_of(")) {
+          init = ` = ts_value_boolean(${initExpr})`;
+        } else if (node.init?.kind === "number_literal" || /^\d+(\.\d+)?([eE][+-]?\d+)?$/.test(initExpr.trim())) {
+          // Wrap number literals into Value
+          init = ` = ts_value_number(${initExpr})`;
+        } else if (node.init?.kind === "boolean_literal" || initExpr === "1" || initExpr === "0") {
+          // Wrap boolean literals into Value
           init = ` = ts_value_boolean(${initExpr})`;
         }
         // If target is Value but init is a struct pointer (e.g., Command* from imported var),
