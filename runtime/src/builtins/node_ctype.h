@@ -20,5 +20,7 @@ Value node_ctype_get_name(Value type);
 Value node_ctype_get_size(Value type);
 Value node_ctype_get_alignment(Value type);
 Value node_ctype_get_signed(Value type);
+Value node_ctype_getptr(Value type);
+Value node_ctype_equal(Value a, Value b);
 
 #endif /* NODE_CTYPE_H */

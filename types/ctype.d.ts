@@ -30,6 +30,10 @@ declare module "ctype" {
 
     function sizeof(type: CTypes): number;
     function alignof(type: CTypes): number;
+    /** Get memory address of a variable or constant (returns hex string like "0x7ffd5c8a"). */
+    function getptr(type: CTypes): string;
+    /** Compare two values for equality. */
+    function equal(a: CTypes, b: CTypes): boolean;
 
     export {
         CType,
@@ -52,5 +56,7 @@ declare module "ctype" {
         ptrdiff_t,
         sizeof,
         alignof,
+        getptr,
+        equal,
     };
 }

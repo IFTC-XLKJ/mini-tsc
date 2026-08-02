@@ -141,3 +141,40 @@ Value node_ctype_get_signed(Value type) {
     }
     return ts_value_boolean(get_value_type_signed(type));
 }
+
+/* getptr: returns the memory address of a variable or constant as hex string */
+Value node_ctype_getptr(Value type) {
+    /* Return the address of the Value struct as a hexadecimal string */
+    char buf[32];
+    snprintf(buf, sizeof(buf), "0x%p", (void*)&type);
+    return ts_value_string(ts_string_new(buf));
+}
+
+/* equal: compare two Values for equality */
+Value node_ctype_equal(Value a, Value b) {
+    /* If tags are different, they are not equal */
+    if (a.tag != b.tag) {
+        return ts_value_boolean(0);
+    }
+
+    /* Compare based on the tag type */
+    switch (a.tag) {
+        case TAG_NUMBER:
+            return ts_value_boolean(a.as.number == b.as.number);
+        case TAG_STRING:
+            return ts_value_boolean(ts_string_equals(a.as.string, b.as.string));
+        case TAG_BOOLEAN:
+            return ts_value_boolean(a.as.boolean == b.as.boolean);
+        case TAG_NULL:
+            return ts_value_boolean(1); /* null == null */
+        case TAG_OBJECT:
+        case TAG_ARRAY:
+        case TAG_FUNCTION:
+            /* Compare object pointers */
+            return ts_value_boolean(a.as.object == b.as.object);
+        case TAG_SYMBOL:
+            return ts_value_boolean(a.as.symbol == b.as.symbol);
+        default:
+            return ts_value_boolean(0);
+    }
+}

@@ -438,6 +438,8 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "get_size", cName: "node_ctype_get_size", signature: "Value node_ctype_get_size(Value type)" },
       { tsName: "get_alignment", cName: "node_ctype_get_alignment", signature: "Value node_ctype_get_alignment(Value type)" },
       { tsName: "get_signed", cName: "node_ctype_get_signed", signature: "Value node_ctype_get_signed(Value type)" },
+      { tsName: "getptr", cName: "node_ctype_getptr", signature: "Value node_ctype_getptr(Value type)" },
+      { tsName: "equal", cName: "node_ctype_equal", signature: "Value node_ctype_equal(Value a, Value b)" },
     ],
   }],
 ]);
