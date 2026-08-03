@@ -1017,13 +1017,19 @@ Value node_webview_WebView(Value options) {
     webkit_settings_set_enable_javascript(settings, TRUE);
     /* The addJavaScriptInterface bridge connects back to a local ws:// server
      * (MixedContentChecker::canConnectToInsecureWebSocket). On https:// pages
-     * WebKit blocks that connection as insecure mixed content unless this
-     * setting is enabled — without it interface calls can never reach native
+     * WebKit blocks that connection as insecure mixed content unless insecure
+     * content is allowed — without it interface calls can never reach native
      * code. Note: this permits ALL insecure subresources on https pages, not
      * just the bridge; it is required here because WebKit exposes no narrower
      * API for WebSockets alone. The bridge itself only listens on loopback,
-     * so no additional network exposure is introduced by the feature. */
-    webkit_settings_set_allow_insecure_content(settings, TRUE);
+     * so no additional network exposure is introduced by the feature.
+     *
+     * Use the long-standing allow-running-of-insecure-content / allow-display-
+     * of-insecure-content setters (available since WebKitGTK 2.2) rather than
+     * the newer allow-insecure-content property — the latter may be declared
+     * in 2.40+ headers but not present in all linked library builds. */
+    webkit_settings_set_allow_running_of_insecure_content(settings, TRUE);
+    webkit_settings_set_allow_display_of_insecure_content(settings, TRUE);
   }
 
   // === Transparent background fix ===
