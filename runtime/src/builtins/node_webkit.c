@@ -111,7 +111,6 @@ static GtkWindow* webview_toplevel(WebViewInstance* inst) {
 
 static void on_load_changed(WebKitWebView* wv, WebKitLoadEvent load_event, gpointer data) {
   WebViewInstance* inst = (WebViewInstance*)data;
-  (void)wv;
   if (!inst) return;
   if (load_event == WEBKIT_LOAD_STARTED) {
     webview_emit0(inst, "navigate");
@@ -119,6 +118,7 @@ static void on_load_changed(WebKitWebView* wv, WebKitLoadEvent load_event, gpoin
     inst->ready = 1;
     webview_emit0(inst, "ready");
     webview_emit0(inst, "load");
+    g_print("WebKitGTK: Page loaded\n");
   } else if (load_event == WEBKIT_LOAD_FAILED) {
     webview_emit(inst, "error", ts_value_string(ts_string_new("load failed")));
   }
@@ -262,46 +262,34 @@ Value node_webview_isAvailable(void) {
 
 Value node_webview_WebView(Value options) {
   webkit_ensure_gtk();
-
   WebViewInstance* inst = (WebViewInstance*)calloc(1, sizeof(WebViewInstance));
   if (!inst) return ts_value_undefined();
-
-  parse_options(inst, options);
-
+  parse_options(inst, options);   // keep your existing parser
   inst->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-  if (!inst->window) {
-    free(inst->url);
-    free(inst->title);
-    free(inst->icon);
-    free(inst);
-    return ts_value_undefined();
-  }
-
-  apply_window_options(inst);
-
+  apply_window_options(inst);     // keep your existing apply function
   inst->webview = WEBKIT_WEB_VIEW(webkit_web_view_new());
   gtk_container_add(GTK_CONTAINER(inst->window), GTK_WIDGET(inst->webview));
-
-  if (inst->devTools) {
-    WebKitSettings* settings = webkit_web_view_get_settings(inst->webview);
-    webkit_settings_set_enable_developer_extras(settings, TRUE);
+  // === Transparent background fix ===
+  if (inst->transparent) {
+    gtk_widget_set_app_paintable(inst->window, TRUE);
+    GdkRGBA bg = {0};
+    gdk_rgba_parse(&bg, "rgba(0,0,0,0)");
+    gtk_widget_override_background_color(inst->window, GTK_STATE_FLAG_NORMAL, &bg);
   }
-
   g_signal_connect(inst->webview, "load-changed", G_CALLBACK(on_load_changed), inst);
-  g_signal_connect(inst->webview, "notify::title", G_CALLBACK(on_title_changed), inst);
   g_signal_connect(inst->window, "configure-event", G_CALLBACK(on_configure), inst);
   g_signal_connect(inst->window, "destroy", G_CALLBACK(on_window_destroy), inst);
-
   webview_register_instance(inst);
-
   if (inst->url) {
-    navigate_to_url(inst);
+    navigate_to_url(inst);   // your existing function
   }
-
   if (inst->show) {
     gtk_widget_show_all(inst->window);
   }
-
+  if (inst->devTools) {
+    WebKitWebInspector* inspector = webkit_web_view_get_inspector(inst->webview);
+    if (inspector) webkit_web_inspector_show(inspector);
+  }
   return ts_value_object((void*)inst);
 }
 
