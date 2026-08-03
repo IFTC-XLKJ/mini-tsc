@@ -4,3 +4,4 @@ mini-tsc.zip
 .vscode
 node_modules/*
 dist/*
+.freebuff/*
