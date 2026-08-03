@@ -19,6 +19,12 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/select.h>
+#include <netdb.h>
+#include <time.h>
 
 typedef struct {
   int x, y, w, h;
@@ -45,6 +51,8 @@ typedef struct {
   TSHashMap* listeners;
   TSHashMap* interfaces;
   TSHashMap* interfaceMethods;
+  /* Async WebSocket bridge */
+  WsBridge* bridge;
   /* Drag regions received from frontend */
   DragRect* dragRegions;
   int dragRegionCount;
@@ -52,14 +60,22 @@ typedef struct {
   int dragExcludeCount;
 } WebViewInstance;
 
-/* ---- URI scheme bridge for addJavaScriptInterface ----
- * Replaces the old WebSocket bridge.  A custom URI scheme (mini-tsc://) is
- * registered with WebKit; the injected JS shim calls fetch('mini-tsc://...')
- * to invoke native methods.  Custom schemes are local/secure — no mixed-
- * content restrictions, so this works on https:// pages too. */
+/* ---- WebSocket bridge for addJavaScriptInterface ----
+ * A WebSocket server on 127.0.0.1:PORT is started for each WebView instance.
+ * The injected JS shim connects via ws://127.0.0.1:PORT and exchanges JSON
+ * messages.  This works on https:// pages without mixed-content issues. */
 
-/* Parsed request queued from the scheme handler (runs in a background
- * thread) and consumed by the main GTK loop. */
+typedef struct {
+  int listen_fd;
+  int client_fd;
+  int port;
+  int handshake_done;
+  char* recv_buf;
+  int recv_len;
+  int recv_cap;
+} WsBridge;
+
+/* Parsed request queued from WebSocket handler and consumed by the main GTK loop. */
 typedef struct SchemeRequest {
   struct SchemeRequest* next;
   WebViewInstance* inst;
@@ -75,147 +91,329 @@ static int g_instanceCount = 0;
 static int g_loopRunning = 0;
 static int g_gtk_inited = 0;
 
-/* ---- Custom URI scheme request queue (thread-safe) ---- */
+/* ---- Message queue (thread-safe) ---- */
 static SchemeRequest* g_scheme_queue = NULL;
 static GMutex g_scheme_mu;
 
-/* ---- Scheme handler: finish a request with a JSON body ---- */
-static void scheme_finish_json(WebKitURISchemeRequest* request,
-                               const char* body, int status) {
-  gsize len = strlen(body);
-  GInputStream* stream = g_memory_input_stream_new_from_data(body, len, NULL);
-  WebKitURISchemeResponse* response = webkit_uri_scheme_response_new(stream, len);
-  g_object_unref(stream);
-  webkit_uri_scheme_response_set_content_type(response, "application/json");
-  webkit_uri_scheme_response_set_status(response, status, NULL);
-  webkit_uri_scheme_request_finish_with_response(request, response);
-  g_object_unref(response);
+/* ==================== WebSocket Bridge ==================== */
+
+static int bridge_is_unsafe_port(int port) {
+  static const int restricted[] = {
+    1,7,9,11,13,15,17,19,20,21,22,23,25,37,42,43,53,
+    77,79,87,95,101,102,103,104,109,110,111,113,115,117,119,
+    123,135,139,143,179,389,427,465,512,513,514,515,526,530,
+    531,532,540,548,556,563,587,601,636,993,995,2049,3659,
+    4045,6000,6665,6666,6667,6668,6669,6697,7000,7100,
+    8000,8001,8002,8008,8009,8080,8081,8082,8083,8084,
+    8085,8086,8087,8088,8089,8090,8888,9000,9001,9090,9091,
+    9441,9999,10000,10001,10002,10003,10004,10005,10006,
+    10007,10008,10009,50000,50001,50002,50003,50004,50005,
+    10080, -1
+  };
+  for (int i = 0; restricted[i] != -1; i++) {
+    if (port == restricted[i]) return 1;
+  }
+  return 0;
 }
 
-/* URL-decode a percent-encoded string (caller frees result). */
-static char* url_decode(const char* src) {
-  if (!src) return NULL;
-  size_t slen = strlen(src);
-  char* out = (char*)malloc(slen + 1);
-  if (!out) return NULL;
-  char* dst = out;
-  for (size_t i = 0; i < slen; i++) {
-    if (src[i] == '%' && i + 2 < slen) {
-      char hex[3] = {src[i+1], src[i+2], 0};
-      *dst++ = (char)strtol(hex, NULL, 16);
-      i += 2;
-    } else if (src[i] == '+') {
-      *dst++ = ' ';
-    } else {
-      *dst++ = src[i];
+static int bridge_init(WebViewInstance* inst) {
+  if (inst->bridge) return inst->bridge->port;
+  for (int attempt = 0; attempt < 50; attempt++) {
+    WsBridge* b = (WsBridge*)calloc(1, sizeof(WsBridge));
+    if (!b) return -1;
+    b->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (b->listen_fd < 0) { free(b); return -1; }
+    int opt = 1;
+    setsockopt(b->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(b->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+      close(b->listen_fd); free(b); continue;
+    }
+    socklen_t addrlen = sizeof(addr);
+    if (getsockname(b->listen_fd, (struct sockaddr*)&addr, &addrlen) < 0) {
+      close(b->listen_fd); free(b); continue;
+    }
+    b->port = ntohs(addr.sin_port);
+    if (bridge_is_unsafe_port(b->port)) {
+      fprintf(stderr, "WebKitGTK: Port %d is unsafe, retrying...\n", b->port);
+      close(b->listen_fd); free(b); continue;
+    }
+    if (listen(b->listen_fd, 1) < 0) {
+      close(b->listen_fd); free(b); continue;
+    }
+    /* Non-blocking */
+    fcntl(b->listen_fd, F_SETFL, O_NONBLOCK);
+    b->client_fd = -1;
+    b->handshake_done = 0;
+    b->recv_cap = 4096;
+    b->recv_buf = (char*)malloc(b->recv_cap);
+    if (b->recv_buf) b->recv_buf[0] = '\0';
+    b->recv_len = 0;
+    inst->bridge = b;
+    fprintf(stderr, "WebKitGTK: Bridge server listening on port %d\n", b->port);
+    return b->port;
+  }
+  fprintf(stderr, "WebKitGTK: Failed to find a safe port after 50 attempts\n");
+  return -1;
+}
+
+static void bridge_close_client(WsBridge* b) {
+  if (!b) return;
+  if (b->client_fd >= 0) { close(b->client_fd); b->client_fd = -1; }
+  b->handshake_done = 0;
+  b->recv_len = 0;
+  if (b->recv_buf) b->recv_buf[0] = '\0';
+  fprintf(stderr, "WebKitGTK: Bridge client disconnected\n");
+}
+
+static void bridge_shutdown(WebViewInstance* inst) {
+  if (!inst || !inst->bridge) return;
+  WsBridge* b = inst->bridge;
+  bridge_close_client(b);
+  if (b->listen_fd >= 0) { close(b->listen_fd); b->listen_fd = -1; }
+  free(b->recv_buf); free(b); inst->bridge = NULL;
+  fprintf(stderr, "WebKitGTK: Bridge server shut down\n");
+}
+
+static int bridge_send_frame(int fd, const char* data, int len) {
+  if (fd < 0) return -1;
+  unsigned char header[10];
+  int hdrlen = 0;
+  header[0] = 0x81;
+  if (len < 126) { header[1] = (unsigned char)len; hdrlen = 2; }
+  else if (len <= 0xFFFF) { header[1] = 126; header[2] = (unsigned char)(len >> 8); header[3] = (unsigned char)(len & 0xFF); hdrlen = 4; }
+  else return -1;
+  if (send(fd, header, hdrlen, 0) != hdrlen) return -1;
+  if (len > 0 && send(fd, data, len, 0) != len) return -1;
+  return 0;
+}
+
+static void bridge_append_recv(WsBridge* b, const char* data, int len) {
+  if (!b || !data || len <= 0) return;
+  if (b->recv_len + len > b->recv_cap) {
+    b->recv_cap = b->recv_len + len + 4096;
+    b->recv_buf = (char*)realloc(b->recv_buf, b->recv_cap);
+  }
+  memcpy(b->recv_buf + b->recv_len, data, len);
+  b->recv_len += len;
+}
+
+static int bridge_try_parse_frame(WsBridge* b, char** out_payload, int* out_len) {
+  if (!b || b->recv_len < 2) return 0;
+  unsigned char* buf = (unsigned char*)b->recv_buf;
+  int opcode = buf[0] & 0x0F;
+  int masked = buf[1] & 0x80;
+  uint64_t payload_len = buf[1] & 0x7F;
+  int header_len = 2;
+  if (payload_len == 126) {
+    header_len += 2;
+    if (b->recv_len < header_len) return 0;
+    payload_len = ((uint64_t)buf[2] << 8) | (uint64_t)buf[3];
+  } else if (payload_len == 127) {
+    header_len += 8;
+    if (b->recv_len < header_len) return 0;
+    payload_len = 0;
+    for (int i = 0; i < 8; i++) payload_len = (payload_len << 8) | (uint64_t)buf[2+i];
+  }
+  if (masked) header_len += 4;
+  if (b->recv_len < header_len) return 0;
+  if (payload_len > 65536) return -1;
+  int total_len = header_len + (int)payload_len;
+  if (b->recv_len < total_len) return 0;
+  char* payload = (char*)malloc((size_t)payload_len + 1);
+  if (!payload) return -1;
+  if (payload_len > 0) {
+    memcpy(payload, b->recv_buf + header_len, (size_t)payload_len);
+    if (masked) {
+      unsigned char* mask = buf + header_len - 4;
+      for (uint64_t i = 0; i < payload_len; i++) payload[i] ^= mask[i % 4];
     }
   }
-  *dst = '\0';
-  return out;
+  payload[payload_len] = '\0';
+  int remaining = b->recv_len - total_len;
+  if (remaining > 0) memmove(b->recv_buf, b->recv_buf + total_len, remaining);
+  b->recv_len = remaining;
+  *out_payload = payload;
+  *out_len = (int)payload_len;
+  return opcode;
 }
 
-/* Callback registered with webkit_web_context_register_uri_scheme().
- * Runs in a WebKit I/O thread — must not call GTK/WebKit APIs directly. */
-static void handle_mini_tsc_scheme(WebKitURISchemeRequest* request,
-                                   gpointer user_data) {
-  (void)user_data;
-  const char* uri = webkit_uri_scheme_request_get_uri(request);
-  if (!uri) {
-    scheme_finish_json(request, "{\"__err\":\"bad uri\"}", 400);
-    return;
+/* SHA-1 + Base64 for WebSocket handshake (inline, no external deps) */
+static void ws_sha1(const unsigned char* data, size_t len, unsigned char digest[20]) {
+  uint32_t h0=0x67452301, h1=0xEFCDAB89, h2=0x98BADCFE, h3=0x10325476, h4=0xC3D2E1F0;
+  size_t ml = len * 8;
+  size_t newlen = len + 1;
+  while (newlen % 64 != 56) newlen++;
+  newlen += 8;
+  unsigned char* msg = (unsigned char*)calloc(newlen, 1);
+  memcpy(msg, data, len);
+  msg[len] = 0x80;
+  for (int i = 0; i < 8; i++) msg[newlen-1-i] = (unsigned char)(ml >> (i*8));
+  for (size_t offset = 0; offset < newlen; offset += 64) {
+    uint32_t w[80];
+    for (int i = 0; i < 16; i++) w[i] = ((uint32_t)msg[offset+i*4]<<24)|((uint32_t)msg[offset+i*4+1]<<16)|((uint32_t)msg[offset+i*4+2]<<8)|(uint32_t)msg[offset+i*4+3];
+    for (int i = 16; i < 80; i++) { uint32_t t=w[i-3]^w[i-8]^w[i-14]^w[i-16]; w[i]=(t<<1)|(t>>31); }
+    uint32_t a=h0,b=h1,c=h2,d=h3,e=h4;
+    for (int i = 0; i < 80; i++) {
+      uint32_t f,t;
+      if (i<20) { f=(b&c)|((~b)&d); t=0x5A827999; }
+      else if (i<40) { f=b^c^d; t=0x6ED9EBA1; }
+      else if (i<60) { f=(b&c)|(b&d)|(c&d); t=0x8F1BBCDC; }
+      else { f=b^c^d; t=0xCA62C1D6; }
+      uint32_t tmp=((a<<5)|(a>>27))+f+e+t+w[i]; e=d; d=c; c=(b<<30)|(b>>2); b=a; a=tmp;
+    }
+    h0+=a; h1+=b; h2+=c; h3+=d; h4+=e;
   }
+  free(msg);
+  digest[0]=(h0>>24);digest[1]=(h0>>16);digest[2]=(h0>>8);digest[3]=h0;
+  digest[4]=(h1>>24);digest[5]=(h1>>16);digest[6]=(h1>>8);digest[7]=h1;
+  digest[8]=(h2>>24);digest[9]=(h2>>16);digest[10]=(h2>>8);digest[11]=h2;
+  digest[12]=(h3>>24);digest[13]=(h3>>16);digest[14]=(h3>>8);digest[15]=h3;
+  digest[16]=(h4>>24);digest[17]=(h4>>16);digest[18]=(h4>>8);digest[19]=h4;
+}
 
-  /* Parse: mini-tsc://call/{webview_ptr_hex}/{iface}/{method}?args=...&id=... */
-  const char* p = strstr(uri, "mini-tsc://call/");
-  if (!p) {
-    scheme_finish_json(request, "{\"__err\":\"bad path\"}", 400);
-    return;
+static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static void ws_base64(const unsigned char* data, int len, char* out) {
+  int j=0;
+  for(int i=0;i<len;i+=3){
+    uint32_t a=(uint32_t)data[i]; uint32_t b=(i+1<len)?(uint32_t)data[i+1]:0; uint32_t c=(i+2<len)?(uint32_t)data[i+2]:0;
+    uint32_t triple=(a<<16)|(b<<8)|c;
+    out[j++]=B64[(triple>>18)&0x3F]; out[j++]=B64[(triple>>12)&0x3F];
+    out[j++]=(i+1<len)?B64[(triple>>6)&0x3F]:'='; out[j++]=(i+2<len)?B64[triple&0x3F]:'=';
   }
-  p += 16; /* skip "mini-tsc://call/" */
+  out[j]='\0';
+}
 
-  /* Parse webview pointer hex */
-  char* end = NULL;
-  unsigned long wv_hex = strtoul(p, &end, 16);
-  if (!end || *end != '/') {
-    scheme_finish_json(request, "{\"__err\":\"bad wv ptr\"}", 400);
-    return;
+static int bridge_handle_handshake(WsBridge* b) {
+  char temp[2048];
+  int n = recv(b->client_fd, temp, sizeof(temp), 0);
+  if (n > 0) bridge_append_recv(b, temp, n);
+  else if (n == 0) { bridge_close_client(b); return -1; }
+  else return 0;
+  if (b->recv_len < 4) return 0;
+  if (b->recv_len > 8192) { bridge_close_client(b); return -1; }
+  b->recv_buf[b->recv_len] = '\0';
+  if (!strstr(b->recv_buf, "\r\n\r\n")) return 0;
+  if (!strstr(b->recv_buf,"Upgrade: websocket") && !strstr(b->recv_buf,"upgrade: websocket")) { bridge_close_client(b); return -1; }
+  char* key_line = strstr(b->recv_buf,"Sec-WebSocket-Key:");
+  if (!key_line) key_line = strstr(b->recv_buf,"sec-websocket-key:");
+  if (!key_line) { bridge_close_client(b); return -1; }
+  char* ks = key_line + 18;
+  while(*ks==' '||*ks=='\t') ks++;
+  char key[128]={0}; int ki=0;
+  while(*ks && *ks!='\r' && *ks!='\n' && ki<127) key[ki++]=*ks++;
+  while(ki>0 && (key[ki-1]==' '||key[ki-1]=='\t')) { key[ki-1]='\0'; ki--; }
+  /* Compute accept key */
+  const char* GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  size_t klen = strlen(key);
+  size_t glen = strlen(GUID);
+  unsigned char* combined = (unsigned char*)malloc(klen + glen);
+  memcpy(combined, key, klen);
+  memcpy(combined + klen, GUID, glen);
+  unsigned char digest[20];
+  ws_sha1(combined, klen + glen, digest);
+  free(combined);
+  char accept_key[64];
+  ws_base64(digest, 20, accept_key);
+  char resp[512];
+  int rlen = snprintf(resp, sizeof(resp),
+    "HTTP/1.1 101 Switching Protocols\r\n"
+    "Upgrade: websocket\r\n"
+    "Connection: Upgrade\r\n"
+    "Sec-WebSocket-Accept: %s\r\n\r\n", accept_key);
+  int total_sent = 0;
+  while (total_sent < rlen) {
+    int sent = send(b->client_fd, resp + total_sent, rlen - total_sent, 0);
+    if (sent > 0) total_sent += sent;
+    else { bridge_close_client(b); return -1; }
   }
-  WebKitWebView* wv = (WebKitWebView*)(uintptr_t)wv_hex;
-  p = end + 1;
+  b->handshake_done = 1;
+  b->recv_len = 0;
+  if (b->recv_buf) b->recv_buf[0] = '\0';
+  fprintf(stderr, "WebKitGTK: Bridge handshake done\n");
+  return 1;
+}
 
-  /* Parse iface name (until next '/') */
-  const char* iface_start = p;
-  while (*p && *p != '/') p++;
-  size_t iface_len = (size_t)(p - iface_start);
-  if (*p != '/') {
-    scheme_finish_json(request, "{\"__err\":\"bad iface\"}", 400);
-    return;
+/* Poll the WebSocket bridge for incoming connections and messages. */
+static void bridge_poll(WebViewInstance* inst) {
+  if (!inst || !inst->bridge) return;
+  WsBridge* b = inst->bridge;
+  /* Accept new connections */
+  if (b->listen_fd >= 0) {
+    struct sockaddr_in addr;
+    socklen_t addrlen = sizeof(addr);
+    int fd = accept(b->listen_fd, (struct sockaddr*)&addr, &addrlen);
+    if (fd >= 0) {
+      if (b->client_fd >= 0) bridge_close_client(b);
+      fcntl(fd, F_SETFL, O_NONBLOCK);
+      b->client_fd = fd;
+      b->handshake_done = 0;
+      b->recv_len = 0;
+      if (b->recv_buf) b->recv_buf[0] = '\0';
+      fprintf(stderr, "WebKitGTK: Bridge client connected\n");
+    }
   }
-  char* iface = strndup(iface_start, iface_len);
-  p++; /* skip '/' */
-
-  /* Parse method name (until '?' or end) */
-  const char* method_start = p;
-  while (*p && *p != '?') p++;
-  size_t method_len = (size_t)(p - method_start);
-  char* method = strndup(method_start, method_len);
-
-  /* Parse query parameters */
-  char* args_str = NULL;
-  char* id_str = NULL;
-  if (*p == '?') {
-    p++; /* skip '?' */
-    while (*p) {
-      if (strncmp(p, "args=", 5) == 0) {
-        p += 5;
-        const char* val_start = p;
-        while (*p && *p != '&') p++;
-        args_str = url_decode(val_start);
-      } else if (strncmp(p, "id=", 3) == 0) {
-        p += 3;
-        const char* val_start = p;
-        while (*p && *p != '&') p++;
-        id_str = url_decode(val_start);
-      } else {
-        while (*p && *p != '&') p++;
+  if (b->client_fd < 0) return;
+  if (!b->handshake_done) {
+    int r = bridge_handle_handshake(b);
+    if (r <= 0) return;
+  }
+  char temp[4096];
+  int n = recv(b->client_fd, temp, sizeof(temp), 0);
+  if (n > 0) bridge_append_recv(b, temp, n);
+  else if (n == 0) { bridge_close_client(b); return; }
+  else { errno_t err = errno; if (err != EAGAIN && err != EWOULDBLOCK) { bridge_close_client(b); return; } }
+  while (1) {
+    char* payload = NULL; int payload_len = 0;
+    int opcode = bridge_try_parse_frame(b, &payload, &payload_len);
+    if (opcode == 0) break;
+    if (opcode < 0) { bridge_close_client(b); return; }
+    if (opcode == 0x08) { bridge_close_client(b); free(payload); return; }
+    if (opcode == 0x09) {
+      unsigned char pong[2] = {0x8A, 0x00};
+      send(b->client_fd, pong, 2, 0);
+      free(payload); continue;
+    }
+    if (opcode == 0x01 || opcode == 0x02) {
+      /* Dispatch message */
+      if (inst->interfaceMethods && payload) {
+        SchemeRequest* req = (SchemeRequest*)calloc(1, sizeof(SchemeRequest));
+        req->inst = inst;
+        /* Parse JSON: {__if, __m, __a, __id} */
+        TSString* msgStr = ts_string_new(payload);
+        Value parsed = ts_json_parse(msgStr);
+        ts_string_free(msgStr);
+        if (parsed.tag == TAG_OBJECT && parsed.as.object) {
+          TSHashMap* map = (TSHashMap*)parsed.as.object;
+          Value ifVal = ts_hashmap_get(map, ts_string_new("__if"));
+          Value mVal = ts_hashmap_get(map, ts_string_new("__m"));
+          Value aVal = ts_hashmap_get(map, ts_string_new("__a"));
+          Value idVal = ts_hashmap_get(map, ts_string_new("__id"));
+          if (ifVal.tag == TAG_STRING && ifVal.as.string && mVal.tag == TAG_STRING && mVal.as.string) {
+            req->iface = strdup(ifVal.as.string->data);
+            req->method = strdup(mVal.as.string->data);
+            /* Serialize args back to JSON string */
+            TSString* argsJson = ts_json_stringize(aVal);
+            req->args = argsJson ? strdup(argsJson->data) : strdup("[]");
+            if (argsJson) ts_string_free(argsJson);
+            req->id = (idVal.tag == TAG_STRING && idVal.as.string) ? strdup(idVal.as.string->data) : strdup("");
+            g_mutex_lock(&g_scheme_mu);
+            req->next = g_scheme_queue;
+            g_scheme_queue = req;
+            g_mutex_unlock(&g_scheme_mu);
+          } else {
+            free(req);
+          }
+        } else {
+          free(req);
+        }
       }
-      if (*p == '&') p++;
     }
+    free(payload);
   }
-
-  if (!args_str) args_str = strdup("[]");
-  if (!id_str) id_str = strdup("");
-
-  /* Find the WebViewInstance */
-  WebViewInstance* inst = NULL;
-  for (int i = 0; i < MAX_INSTANCES; i++) {
-    if (g_instances[i] && g_instances[i]->webview == wv) {
-      inst = g_instances[i];
-      break;
-    }
-  }
-  if (!inst) {
-    free(iface); free(method); free(args_str); free(id_str);
-    scheme_finish_json(request, "{\"__err\":\"instance not found\"}", 404);
-    return;
-  }
-
-  /* Enqueue request for main thread processing */
-  SchemeRequest* req = (SchemeRequest*)calloc(1, sizeof(SchemeRequest));
-  req->inst = inst;
-  req->iface = iface;
-  req->method = method;
-  req->args = args_str;
-  req->id = id_str;
-
-  g_mutex_lock(&g_scheme_mu);
-  req->next = g_scheme_queue;
-  g_scheme_queue = req;
-  g_mutex_unlock(&g_scheme_mu);
-
-  /* Return a "pending" response — the main loop will call
-   * G.dispatch(id, result, isErr) via webview_run_js() when done. */
-  scheme_finish_json(request, "{\"__pending\":true}", 200);
 }
 
 /* Forward declarations */
@@ -229,32 +427,19 @@ static int bridge_inst_is_alive(WebViewInstance* inst) {
   return 0;
 }
 
-/* Dispatch a pending promise result to JS via G.dispatch(id, val, isErr). */
-static void bridge_resolve_promise_js(WebViewInstance* inst, const char* id,
+/* Send a promise result to JS via WebSocket frame: {__id, __res} or {__id, __err}. */
+static void bridge_resolve_promise_ws(WebViewInstance* inst, const char* id,
                                        TSPromise* p) {
-  if (!inst || !p) return;
+  if (!inst || !p || !inst->bridge) return;
+  WsBridge* b = inst->bridge;
+  if (b->client_fd < 0 || !b->handshake_done) return;
   TSString* resultJson = ts_json_stringify(p->result);
   const char* val = resultJson ? resultJson->data : "null";
   int isErr = (p->state == PROMISE_REJECTED) ? 1 : 0;
-  /* Build JS that resolves/rejects the pending promise.
-   * val is already a JSON-encoded literal (string, number, null, etc.)
-   * from ts_json_stringify, so it can be inlined directly in JS. */
-  char js[131072];
-  snprintf(js, sizeof(js),
-    "(function(){"
-    "var b=window.__mjbBr;"
-    "if(!b)return;"
-    "var e=b.pending['%s'];"
-    "if(e){delete b.pending['%s'];"
-    "%s%s%s;}"
-    "b.dispatch&&b.dispatch('%s',%s,%d);"
-    "})();",
-    id, id,
-    isErr ? "e.rej(new Error(" : "e.res(",
-    val,
-    isErr ? "))" : ")",
-    id, val, isErr);
-  webview_run_js(inst, js);
+  char resp[131072];
+  snprintf(resp, sizeof(resp), "{\"__id\":\"%s\",\"__%s\":%s}",
+           id, isErr ? "err" : "res", val);
+  bridge_send_frame(b->client_fd, resp, (int)strlen(resp));
   if (resultJson) ts_string_free(resultJson);
 }
 
@@ -274,8 +459,9 @@ static void bridge_poll_pending_promises(void) {
     PendingPromiseEntry* e = *prev;
     TSPromise* p = e->promise;
     if (p && p->type_tag == PROMISE_TAG && p->state != PROMISE_PENDING) {
-      if (bridge_inst_is_alive(e->inst)) {
-        bridge_resolve_promise_js(e->inst, e->id, p);
+      if (bridge_inst_is_alive(e->inst) && e->inst->bridge &&
+          e->inst->bridge->client_fd >= 0 && e->inst->bridge->handshake_done) {
+        bridge_resolve_promise_ws(e->inst, e->id, p);
       }
       *prev = e->next;
       free(e);
@@ -556,13 +742,12 @@ static void bridge_dispatch_message(WebViewInstance* inst,
 
   if ((cb.tag != TAG_FUNCTION || !cb.as.function) &&
       !(cb.tag == TAG_OBJECT && cb.as.object && *(int32_t*)cb.as.object == BOUND_FN_TAG)) {
-    /* Method not found — return error */
-    if (id && id[0]) {
-      char js_buf[1024];
-      snprintf(js_buf, sizeof(js_buf),
-        "(function(){var b=window.__mjbBr;if(b){b.dispatch('%s',"
-        "'method not found',true);}})();", id);
-      webview_run_js(inst, js_buf);
+    /* Method not found — return error via WebSocket */
+    if (id && id[0] && inst->bridge && inst->bridge->client_fd >= 0 && inst->bridge->handshake_done) {
+      char resp[1024];
+      snprintf(resp, sizeof(resp),
+        "{\"__id\":\"%s\",\"__err\":\"method not found\"}", id);
+      bridge_send_frame(inst->bridge->client_fd, resp, (int)strlen(resp));
     }
     return;
   }
@@ -587,15 +772,14 @@ static void bridge_dispatch_message(WebViewInstance* inst,
     if (p && p->type_tag == PROMISE_TAG) {
       if (p->state == PROMISE_FULFILLED) {
         result = p->result;
-      } else if (p->state == PROMISE_REJECTED) {
-        if (id && id[0]) {
+      } else      if (p->state == PROMISE_REJECTED) {
+        if (id && id[0] && inst->bridge && inst->bridge->client_fd >= 0 && inst->bridge->handshake_done) {
           TSString* rj = ts_json_stringify(p->result);
-          char js_buf[131072];
-          snprintf(js_buf, sizeof(js_buf),
-            "(function(){var b=window.__mjbBr;if(b&&b.dispatch)"
-            "b.dispatch('%s',%s,true);})();",
+          char resp[131072];
+          snprintf(resp, sizeof(resp),
+            "{\"__id\":\"%s\",\"__err\":%s}",
             id, rj ? rj->data : "null");
-          webview_run_js(inst, js_buf);
+          bridge_send_frame(inst->bridge->client_fd, resp, (int)strlen(resp));
           if (rj) ts_string_free(rj);
         }
         return;
@@ -609,15 +793,13 @@ static void bridge_dispatch_message(WebViewInstance* inst,
     }
   }
 
-  /* Send result back to JS */
-  if (id && id[0]) {
+  /* Send result back to JS via WebSocket frame */
+  if (id && id[0] && inst->bridge && inst->bridge->client_fd >= 0 && inst->bridge->handshake_done) {
     TSString* resultJson = ts_json_stringify(result);
-    char js_buf[131072];
-    snprintf(js_buf, sizeof(js_buf),
-      "(function(){var b=window.__mjbBr;if(b&&b.dispatch)"
-      "b.dispatch('%s',%s,false);})();",
-      id, resultJson ? resultJson->data : "null");
-    webview_run_js(inst, js_buf);
+    char resp[131072];
+    snprintf(resp, sizeof(resp), "{\"__id\":\"%s\",\"__res\":%s}",
+             id, resultJson ? resultJson->data : "null");
+    bridge_send_frame(inst->bridge->client_fd, resp, (int)strlen(resp));
     if (resultJson) ts_string_free(resultJson);
   }
 
