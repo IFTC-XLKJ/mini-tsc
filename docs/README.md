@@ -213,12 +213,6 @@ console.log(process.cwd());
 - 支持所有 POSIX 功能
 - 需要安装系统依赖（如 webview）
 
-### macOS
-
-- 文件路径使用 `/` 分隔符
-- 支持所有 POSIX 功能
-- WebKit 作为 webview 后端
-
 ---
 
 ## 错误处理
