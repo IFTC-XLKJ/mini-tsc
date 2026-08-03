@@ -1,4 +1,5 @@
 #include "node_webview.h"
+#include "ts_features.h"
 #include "runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -194,13 +195,16 @@ static HRESULT STDMETHODCALLTYPE NavCompleted_Invoke(...) {
 
 // ... all original COM handlers, bridge functions, WndProc, etc. (full original Windows code preserved)
 
+#if defined(TS_NEED_node_webview_isAvailable)
 Value node_webview_isAvailable(void) {
   LPWSTR version = NULL;
   HRESULT hr = GetAvailableCoreWebView2BrowserVersionString(NULL, &version);
   if (version) CoTaskMemFree(version);
   return ts_value_boolean(SUCCEEDED(hr));
 }
+#endif /* TS_NEED_node_webview_isAvailable */
 
+#if defined(TS_NEED_node_webview_WebView)
 Value node_webview_WebView(Value options) {
   WebViewInstance* inst = (WebViewInstance*)calloc(1, sizeof(WebViewInstance));
   if (!inst) return ts_value_undefined();
@@ -223,7 +227,9 @@ Value node_webview_WebView(Value options) {
   inst->url = strdup("about:blank");
   return ts_value_object(inst);
 }
+#endif /* TS_NEED_node_webview_WebView */
 
+#if defined(TS_NEED_node_webview_loadURL)
 Value node_webview_loadURL(Value self, Value url) {
   WebViewInstance* inst = (WebViewInstance*)self.as.object;
   if (!inst) return ts_value_undefined();
@@ -232,7 +238,9 @@ Value node_webview_loadURL(Value self, Value url) {
   navigate_to_url(inst);
   return ts_value_undefined();
 }
+#endif /* TS_NEED_node_webview_loadURL */
 
+#if defined(TS_NEED_node_webview_run)
 Value node_webview_run(Value self) {
   WebViewInstance* inst = (WebViewInstance*)self.as.object;
   if (!inst->hwnd) return ts_value_undefined();
@@ -247,6 +255,7 @@ Value node_webview_run(Value self) {
   }
   return ts_value_undefined();
 }
+#endif /* TS_NEED_node_webview_run */
 
 Value node_webview_addJavaScriptInterface(Value self, Value name, Value methods) {
   WebViewInstance* inst = (WebViewInstance*)self.as.object;
@@ -306,6 +315,7 @@ static void create_webkit_view(WebViewInstance* inst) {
   }
 }
 
+#if defined(TS_NEED_node_webview_WebView)
 Value node_webview_WebView(Value options) {
   WebViewInstance* inst = (WebViewInstance*)calloc(1, sizeof(WebViewInstance));
   if (!inst) return ts_value_undefined();
@@ -318,7 +328,9 @@ Value node_webview_WebView(Value options) {
   webview_register_instance(inst);
   return ts_value_object(inst);
 }
+#endif /* TS_NEED_node_webview_WebView */
 
+#if defined(TS_NEED_node_webview_loadURL)
 Value node_webview_loadURL(Value self, Value url) {
   WebViewInstance* inst = (WebViewInstance*)self.as.object;
   if (!inst) return ts_value_undefined();
@@ -329,13 +341,16 @@ Value node_webview_loadURL(Value self, Value url) {
   }
   return ts_value_undefined();
 }
+#endif /* TS_NEED_node_webview_loadURL */
 
+#if defined(TS_NEED_node_webview_run)
 Value node_webview_run(Value self) {
   WebViewInstance* inst = (WebViewInstance*)self.as.object;
   if (!inst->window) return ts_value_undefined();
   gtk_main();
   return ts_value_undefined();
 }
+#endif /* TS_NEED_node_webview_run */
 
 Value node_webview_addJavaScriptInterface(Value self, Value name, Value methods) {
   // shared bridge logic (same as Windows)
