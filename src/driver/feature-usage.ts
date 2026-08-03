@@ -286,6 +286,11 @@ export function analyzeFeatureUsage(
             usage.features.add("parse");
           }
 
+          // convertBase
+          if (cal.kind === "identifier" && cal.name === "convertBase") {
+            usage.features.add("convert_base");
+          }
+
           // setTimeout / setInterval / clearTimeout / clearInterval
           if (cal.kind === "identifier" &&
               (cal.name === "setTimeout" || cal.name === "setInterval" ||

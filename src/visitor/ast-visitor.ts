@@ -1959,7 +1959,7 @@ export class AstVisitor {
     // Don't capture globals / builtins / namespace imports (resolved statically at codegen)
     const skip = new Set([
       "console", "Math", "JSON", "Date", "Object", "Array", "String", "Number",
-      "Boolean", "Error", "parseInt", "parseFloat", "isNaN", "isFinite",
+      "Boolean", "Error", "parseInt", "parseFloat", "isNaN", "isFinite", "convertBase",
       "setTimeout", "setInterval", "clearTimeout", "clearInterval",
       "alert", "confirm", "prompt",
       "undefined", "null", "true", "false", "NaN", "Infinity",

@@ -464,3 +464,13 @@ interface WebSocketServer {
 }
 
 declare var WebSocketServer: { new (): WebSocketServer };
+
+/**
+ * Convert a number string from one base to another (base 2-36).
+ * Supports fractional parts.
+ * @param value - The number string to convert
+ * @param fromBase - The source base (2-36)
+ * @param toBase - The target base (2-36)
+ * @returns The converted number string
+ */
+declare function convertBase(value: string, fromBase: number, toBase: number): string;

@@ -97,6 +97,126 @@ double ts_parse_float(TSString* str) {
 }
 #endif
 
+/* convertBase — arbitrary base conversion (2-36) with fractional support */
+#if defined(TS_NEED_CONVERT_BASE)
+static int char_to_digit(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+  return -1;
+}
+
+static char digit_to_char(int d) {
+  if (d < 10) return '0' + d;
+  return 'A' + (d - 10);
+}
+
+TSString* ts_convert_base(TSString* value, int fromBase, int toBase) {
+  if (fromBase < 2 || fromBase > 36 || toBase < 2 || toBase > 36) {
+    return ts_string_new("");
+  }
+
+  const char* input = value->data;
+  double result = 0.0;
+  int negative = 0;
+  int pos = 0;
+
+  /* Handle sign */
+  if (input[pos] == '-') {
+    negative = 1;
+    pos++;
+  } else if (input[pos] == '+') {
+    pos++;
+  }
+
+  /* Parse integer part */
+  while (input[pos] && input[pos] != '.') {
+    int d = char_to_digit(input[pos]);
+    if (d < 0 || d >= fromBase) break;
+    result = result * fromBase + d;
+    pos++;
+  }
+
+  /* Parse fractional part */
+  if (input[pos] == '.') {
+    pos++;
+    double fraction = 0.0;
+    double base_power = 1.0 / fromBase;
+    while (input[pos]) {
+      int d = char_to_digit(input[pos]);
+      if (d < 0 || d >= fromBase) break;
+      fraction += d * base_power;
+      base_power /= fromBase;
+      pos++;
+    }
+    result += fraction;
+  }
+
+  if (negative) result = -result;
+
+  /* Handle zero */
+  if (result == 0.0) {
+    return ts_string_new("0");
+  }
+
+  /* Convert to target base */
+  char intBuf[256];
+  char fracBuf[64];
+  int intPos = 255;
+  int fracPos = 0;
+  intBuf[intPos] = '\0';
+
+  /* Extract integer part */
+  long long intPart = (long long)result;
+  double fracPart = result - (double)intPart;
+
+  /* Handle negative */
+  if (intPart < 0) {
+    intPart = -intPart;
+    fracPart = -fracPart;
+  }
+
+  /* Convert integer part (built backwards, will be reversed) */
+  if (intPart == 0) {
+    intBuf[--intPos] = '0';
+  } else {
+    while (intPart > 0 && intPos > 0) {
+      int rem = intPart % toBase;
+      intBuf[--intPos] = digit_to_char(rem);
+      intPart /= toBase;
+    }
+  }
+
+  /* Add negative sign if needed */
+  if (negative && intPos > 0) {
+    intBuf[--intPos] = '-';
+  }
+
+  /* Build result string */
+  char resultBuf[512];
+  int resultPos = 0;
+
+  /* Copy integer part (already in correct order in buffer) */
+  for (int i = intPos; intBuf[i] != '\0' && resultPos < 511; i++) {
+    resultBuf[resultPos++] = intBuf[i];
+  }
+
+  /* Convert fractional part (max 32 digits, forward order) */
+  if (fracPart != 0.0) {
+    resultBuf[resultPos++] = '.';
+    for (int i = 0; i < 32 && fracPart != 0.0 && resultPos < 511; i++) {
+      fracPart *= toBase;
+      int digit = (int)fracPart;
+      resultBuf[resultPos++] = digit_to_char(digit);
+      fracPart -= digit;
+    }
+  }
+
+  resultBuf[resultPos] = '\0';
+  return ts_string_new(resultBuf);
+}
+#endif /* TS_NEED_CONVERT_BASE */
+
 /* isNaN, isFinite — tiny; keep always (often used with numbers) */
 int ts_is_nan(double x) {
   return isnan(x);

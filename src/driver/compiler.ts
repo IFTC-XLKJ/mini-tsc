@@ -675,6 +675,9 @@ double ts_date_now(void);
 double ts_parse_int(TSString* str, int radix);
 double ts_parse_float(TSString* str);
 
+/* Base conversion */
+TSString* ts_convert_base(TSString* value, int fromBase, int toBase);
+
 /* Utility */
 int ts_is_nan(double x);
 int ts_is_finite(double x);
@@ -1325,11 +1328,12 @@ extern TsErrorContext _ts_current_error;
       usage?.features.has("math") ||
       usage?.features.has("date") ||
       usage?.features.has("parse") ||
+      usage?.features.has("convert_base") ||
       usage?.features.has("console_time") ||
       usage?.features.has("timers") ||
       usage?.features.has("dialogs") ||
       usage?.features.has("promise") ||
-      /\bts_math_|\bts_date_now\b|\bts_parse_|\bts_set_timeout\b|\bts_set_interval\b|\bts_alert\b|\bts_confirm\b|\bts_prompt\b/.test(allC)
+      /\bts_math_|\bts_date_now\b|\bts_parse_|\bts_convert_base\b|\bts_set_timeout\b|\bts_set_interval\b|\bts_alert\b|\bts_confirm\b|\bts_prompt\b/.test(allC)
     );
     // Pure console.log("literal") → puts() programs need zero runtime objects.
     const needsStringOps = /\bts_string_/.test(allC);

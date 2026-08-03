@@ -984,6 +984,17 @@ export class ExpressionEmitter {
       return `(${arg}.tag == TAG_ARRAY)`;
     }
 
+    // convertBase(value, fromBase, toBase)
+    if (callee.kind === "identifier" && callee.name === "convertBase") {
+      const args = (node.arguments || []).map((a: CNode) => this.emit(a));
+      if (args.length < 3) return 'ts_value_string(ts_string_new(""))';
+      // Wrap value as TSString* via ts_to_string, wrap bases as int via ts_to_number
+      const valueArg = args[0].startsWith("ts_string_") ? args[0] : `ts_to_string(${args[0]})`;
+      const fromBaseArg = args[1].startsWith("ts_value_number(") ? args[1] : `ts_value_number(${args[1]})`;
+      const toBaseArg = args[2].startsWith("ts_value_number(") ? args[2] : `ts_value_number(${args[2]})`;
+      return `ts_value_string(ts_convert_base(${valueArg}, (int)ts_to_number(${fromBaseArg}), (int)ts_to_number(${toBaseArg})))`;
+    }
+
     // Browser-like dialogs: alert / confirm / prompt
     if (callee.kind === "identifier" &&
         (callee.name === "alert" || callee.name === "confirm" || callee.name === "prompt")) {

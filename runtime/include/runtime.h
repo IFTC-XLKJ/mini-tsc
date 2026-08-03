@@ -250,6 +250,9 @@ TSString* date_toLocaleString_ts(double ts);
 double ts_parse_int(TSString* str, int radix);
 double ts_parse_float(TSString* str);
 
+/* Base conversion */
+TSString* ts_convert_base(TSString* value, int fromBase, int toBase);
+
 /* Utility */
 int ts_is_nan(double x);
 int ts_is_finite(double x);

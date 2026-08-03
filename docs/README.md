@@ -97,6 +97,73 @@
 |------|------|------|
 | [assert](./assert.md) | 断言 | 条件检查、测试验证 |
 
+### C 类型描述
+
+| 模块 | 文档 | 描述 |
+|------|------|------|
+| [ctype](./ctype.md) | C 类型描述符 | FFI 类型大小、对齐、内存地址查询 |
+
+### 全局函数
+
+| 函数 | 文档 | 描述 |
+|------|------|------|
+| [convertBase](./convertBase.md) | 任意进制转换 | 支持 2-36 进制，含小数部分 |
+| `parseInt(str, radix?)` | - | 解析字符串并返回整数 |
+| `parseFloat(str)` | - | 解析字符串并返回浮点数 |
+| `isNaN(value)` | - | 判断是否为 NaN |
+| `isFinite(value)` | - | 判断是否为有限数值 |
+
+#### convertBase 详解
+
+`convertBase` 是新增的全局函数，用于在任意进制（2-36）之间转换数字字符串，支持小数部分。
+
+**函数签名:**
+```typescript
+function convertBase(value: string, fromBase: number, toBase: number): string;
+```
+
+**参数:**
+- `value`: 要转换的数字字符串
+- `fromBase`: 源进制（2-36）
+- `toBase`: 目标进制（2-36）
+
+**返回值:** 转换后的数字字符串
+
+**示例:**
+```typescript
+// 十进制转二进制
+convertBase("10", 10, 2);      // "1010"
+convertBase("255", 10, 2);     // "11111111"
+
+// 十六进制转十进制
+convertBase("FF", 16, 10);     // "255"
+convertBase("1A", 16, 10);     // "26"
+
+// 十进制转十六进制
+convertBase("255", 10, 16);    // "FF"
+
+// 二进制转八进制
+convertBase("1010", 2, 8);     // "12"
+
+// 支持小数部分
+convertBase("3.14", 10, 2);    // "11.00100011110101110000101000111101"
+convertBase("1010.11", 2, 16); // "A.C"
+convertBase("A.C", 16, 10);    // "10.75"
+
+// 支持负数
+convertBase("-10", 10, 2);     // "-1010"
+convertBase("-FF", 16, 10);    // "-255"
+
+// 支持正号
+convertBase("+FF", 16, 10);    // "255"
+
+// Base 36
+convertBase("ZZ", 36, 10);     // "1295"
+convertBase("1295", 10, 36);   // "ZZ"
+```
+
+**支持的进制范围:** 2-36（使用 0-9 和 A-Z 作为数字字符）
+
 ---
 
 ## 快速开始

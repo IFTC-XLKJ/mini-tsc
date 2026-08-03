@@ -171,7 +171,7 @@ console.log(`CPU speed: ${cpus[0].speed} MHz`);
 
 #### `os.loadavg()`
 
-获取系统负载平均值（仅 Linux/macOS）。
+获取系统负载平均值（仅 Linux）。
 
 **返回值**: `[number, number, number]` - [1分钟, 5分钟, 15分钟]
 
@@ -254,7 +254,7 @@ console.log(os.tmpdir()); // "/tmp" | "C:\Users\user\AppData\Local\Temp"
 
 获取行结束符。
 
-**返回值**: `string` - `'\r\n'` (Windows) | `'\n'` (Linux/macOS)
+**返回值**: `string` - `'\r\n'` (Windows) | `'\n'` (Linux)
 
 **示例**:
 ```typescript
@@ -267,7 +267,7 @@ console.log(`Line ending: ${JSON.stringify(os.EOL)}`);
 
 获取空设备路径。
 
-**返回值**: `string` - `'NUL'` (Windows) | `'/dev/null'` (Linux/macOS)
+**返回值**: `string` - `'NUL'` (Windows) | `'/dev/null'` (Linux)
 
 ---
 
