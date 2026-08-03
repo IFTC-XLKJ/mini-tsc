@@ -88,6 +88,7 @@ static PendingPromiseEntry* g_pending_promises = NULL;
 
 /* Forward declarations for bridge */
 static int bridge_send_frame(int fd, const char* data, int len);
+static void webview_run_js(WebViewInstance* inst, const char* script);
 
 static int bridge_inst_is_alive(WebViewInstance* inst) {
   if (!inst) return 0;
@@ -1016,9 +1017,15 @@ Value node_webview_WebView(Value options) {
   // === Transparent background fix ===
   if (inst->transparent) {
     gtk_widget_set_app_paintable(inst->window, TRUE);
-    GdkRGBA bg = {0};
-    gdk_rgba_parse(&bg, "rgba(0,0,0,0)");
-    gtk_widget_override_background_color(inst->window, GTK_STATE_FLAG_NORMAL, &bg);
+    GtkCssProvider *provider = gtk_css_provider_new();
+    char *css = g_strdup_printf("window { background-color: rgba(0,0,0,0); }");
+    gtk_css_provider_load_from_data(provider, css, -1, NULL);
+    gtk_style_context_add_provider(
+        gtk_widget_get_style_context(inst->window),
+        GTK_STYLE_PROVIDER(provider),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_free(css);
+    g_object_unref(provider);
   }
   g_signal_connect(inst->webview, "load-changed", G_CALLBACK(on_load_changed), inst);
   g_signal_connect(inst->webview, "load-failed", G_CALLBACK(on_load_failed), inst);
