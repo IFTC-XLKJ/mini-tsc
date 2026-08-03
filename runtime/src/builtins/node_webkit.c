@@ -425,7 +425,10 @@ static int bridge_init(WebViewInstance* inst) {
     setsockopt(b->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    /* Bridge is only ever reached via the injected shim, which connects to
+     * ws://127.0.0.1:PORT — bind loopback only so the IPC channel is never
+     * exposed to the network. */
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = 0; /* dynamic */
     if (bind(b->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
       close(b->listen_fd); free(b); return -1;
@@ -1012,6 +1015,15 @@ Value node_webview_WebView(Value options) {
     webkit_settings_set_enable_developer_extras(settings, TRUE);
     webkit_settings_set_javascript_can_open_windows_automatically(settings, TRUE);
     webkit_settings_set_enable_javascript(settings, TRUE);
+    /* The addJavaScriptInterface bridge connects back to a local ws:// server
+     * (MixedContentChecker::canConnectToInsecureWebSocket). On https:// pages
+     * WebKit blocks that connection as insecure mixed content unless this
+     * setting is enabled — without it interface calls can never reach native
+     * code. Note: this permits ALL insecure subresources on https pages, not
+     * just the bridge; it is required here because WebKit exposes no narrower
+     * API for WebSockets alone. The bridge itself only listens on loopback,
+     * so no additional network exposure is introduced by the feature. */
+    webkit_settings_set_allow_insecure_content(settings, TRUE);
   }
 
   // === Transparent background fix ===
