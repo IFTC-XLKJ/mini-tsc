@@ -109,18 +109,30 @@ static GtkWindow* webview_toplevel(WebViewInstance* inst) {
   return GTK_WINDOW(inst->window);
 }
 
+static gboolean on_load_failed(WebKitWebView* wv, WebKitLoadEvent load_event,
+                                gchar* failing_uri, GError* error, gpointer data) {
+  (void)wv; (void)load_event;
+  WebViewInstance* inst = (WebViewInstance*)data;
+  if (!inst) return FALSE;
+  fprintf(stderr, "WebKitGTK: load-failed uri=%s error=%s\n",
+          failing_uri ? failing_uri : "(null)",
+          error ? error->message : "(null)");
+  webview_emit(inst, "error", ts_value_string(ts_string_new(
+      error ? error->message : "load failed")));
+  return FALSE;
+}
+
 static void on_load_changed(WebKitWebView* wv, WebKitLoadEvent load_event, gpointer data) {
   WebViewInstance* inst = (WebViewInstance*)data;
   if (!inst) return;
+  fprintf(stderr, "WebKitGTK: on_load_changed event=%d\n", load_event);
   if (load_event == WEBKIT_LOAD_STARTED) {
     webview_emit0(inst, "navigate");
   } else if (load_event == WEBKIT_LOAD_FINISHED) {
     inst->ready = 1;
     webview_emit0(inst, "ready");
     webview_emit0(inst, "load");
-    g_print("WebKitGTK: Page loaded\n");
-  } else if (load_event == WEBKIT_LOAD_FAILED) {
-    webview_emit(inst, "error", ts_value_string(ts_string_new("load failed")));
+    fprintf(stderr, "WebKitGTK: Page loaded OK\n");
   }
 }
 
@@ -158,7 +170,12 @@ static void on_window_destroy(GtkWidget* widget, gpointer data) {
 }
 
 static void navigate_to_url(WebViewInstance* inst) {
-  if (!inst || !inst->webview || !inst->url) return;
+  if (!inst || !inst->webview || !inst->url) {
+    fprintf(stderr, "WebKitGTK: navigate_to_url skipped (inst=%p webview=%p url=%s)\n",
+            (void*)inst, inst ? (void*)inst->webview : NULL, inst && inst->url ? inst->url : "(null)");
+    return;
+  }
+  fprintf(stderr, "WebKitGTK: navigate_to_url url=%s\n", inst->url);
   webkit_web_view_load_uri(inst->webview, inst->url);
 }
 
@@ -255,6 +272,21 @@ static void parse_options(WebViewInstance* inst, Value options) {
 
 /* ---------- Public API (same symbols as Windows node_webview.c) ---------- */
 
+static gboolean webview_open_devtools_idle(gpointer data) {
+  WebViewInstance* inst = (WebViewInstance*)data;
+  if (!inst || !inst->webview) return G_SOURCE_REMOVE;
+  WebKitSettings* settings = webkit_web_view_get_settings(inst->webview);
+  webkit_settings_set_enable_developer_extras(settings, TRUE);
+  WebKitWebInspector* inspector = webkit_web_view_get_inspector(inst->webview);
+  if (inspector) {
+    webkit_web_inspector_show(inspector);
+    fprintf(stderr, "WebKitGTK: DevTools opened (inspector=%p)\n", (void*)inspector);
+  } else {
+    fprintf(stderr, "WebKitGTK: DevTools FAILED - inspector is NULL\n");
+  }
+  return G_SOURCE_REMOVE;
+}
+
 Value node_webview_isAvailable(void) {
   /* WebKitGTK present at link time ⇒ available */
   return ts_value_boolean(1);
@@ -269,6 +301,13 @@ Value node_webview_WebView(Value options) {
   apply_window_options(inst);     // keep your existing apply function
   inst->webview = WEBKIT_WEB_VIEW(webkit_web_view_new());
   gtk_container_add(GTK_CONTAINER(inst->window), GTK_WIDGET(inst->webview));
+
+  /* Enable developer extras early so inspector can be shown later. */
+  {
+    WebKitSettings* settings = webkit_web_view_get_settings(inst->webview);
+    webkit_settings_set_enable_developer_extras(settings, TRUE);
+  }
+
   // === Transparent background fix ===
   if (inst->transparent) {
     gtk_widget_set_app_paintable(inst->window, TRUE);
@@ -277,18 +316,20 @@ Value node_webview_WebView(Value options) {
     gtk_widget_override_background_color(inst->window, GTK_STATE_FLAG_NORMAL, &bg);
   }
   g_signal_connect(inst->webview, "load-changed", G_CALLBACK(on_load_changed), inst);
+  g_signal_connect(inst->webview, "load-failed", G_CALLBACK(on_load_failed), inst);
   g_signal_connect(inst->window, "configure-event", G_CALLBACK(on_configure), inst);
   g_signal_connect(inst->window, "destroy", G_CALLBACK(on_window_destroy), inst);
   webview_register_instance(inst);
-  if (inst->url) {
-    navigate_to_url(inst);   // your existing function
-  }
+  /* Show window FIRST so the widget is realized; navigation needs that. */
   if (inst->show) {
     gtk_widget_show_all(inst->window);
   }
+  if (inst->url) {
+    navigate_to_url(inst);
+  }
+  /* Open devtools via idle so the main loop is already running. */
   if (inst->devTools) {
-    WebKitWebInspector* inspector = webkit_web_view_get_inspector(inst->webview);
-    if (inspector) webkit_web_inspector_show(inspector);
+    g_idle_add(webview_open_devtools_idle, inst);
   }
   return ts_value_object((void*)inst);
 }
