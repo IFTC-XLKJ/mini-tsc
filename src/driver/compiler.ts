@@ -269,7 +269,7 @@ export class CompilerDriver {
       }
       const builtin = getBuiltinModule(builtinName);
       if (builtin) {
-        allFiles.push(...this.generateBuiltinFiles(builtin, featureUsage, projectRoot));
+        allFiles.push(...this.generateBuiltinFiles(builtin, featureUsage, projectRoot, options));
       }
     }
 
@@ -860,12 +860,33 @@ extern TsErrorContext _ts_current_error;
 `;
   }
 
-  private generateBuiltinFiles(builtin: BuiltinModule, usage: FeatureUsage, projectRoot: string): EmitFile[] {
+  private generateBuiltinFiles(
+    builtin: BuiltinModule,
+    usage: FeatureUsage,
+    projectRoot: string,
+    options?: CompilerOptions,
+  ): EmitFile[] {
     const files: EmitFile[] = [];
 
+    // webview: Windows uses WebView2 (node_webview.c), Linux uses WebKitGTK (node_webkit.c).
+    // Emit paths stay node_webview.* so generated #include "node_webview.h" keeps working.
+    let cSourceFile = builtin.cSourceFile;
+    let headerFile = builtin.headerFile;
+    const emitCPath = builtin.cSourceFile;
+    const emitHPath = builtin.headerFile;
+    if (builtin.name === "webview") {
+      const isWindows =
+        (options?.target || process.platform) === "win32" ||
+        options?.target === "windows";
+      if (!isWindows) {
+        cSourceFile = "node_webkit.c";
+        headerFile = "node_webkit.h";
+      }
+    }
+
     // Read the pre-written C source file
-    const srcPath = path.join(projectRoot, "runtime", "src", "builtins", builtin.cSourceFile);
-    const headerPath = path.join(projectRoot, "runtime", "src", "builtins", builtin.headerFile);
+    const srcPath = path.join(projectRoot, "runtime", "src", "builtins", cSourceFile);
+    const headerPath = path.join(projectRoot, "runtime", "src", "builtins", headerFile);
 
     try {
       const srcExists = fs.existsSync(srcPath);
@@ -873,6 +894,13 @@ extern TsErrorContext _ts_current_error;
 
       if (srcExists) {
         let content = fs.readFileSync(srcPath, "utf-8") as string;
+        // Linux webkit backend includes node_webkit.h; rewrite so emit path matches.
+        if (cSourceFile === "node_webkit.c") {
+          content = content.replace(
+            /#include\s+"node_webkit\.h"/,
+            '#include "node_webview.h"',
+          );
+        }
         // Ensure ts_features.h is included for method-level guards
         if (!content.includes("ts_features.h")) {
           content = content.replace(
@@ -883,14 +911,14 @@ extern TsErrorContext _ts_current_error;
         // Wrap each known builtin function with #if TS_NEED_<cName>
         content = wrapFunctionsWithFeatureGuards(content, allBuiltinCNames());
         files.push({
-          path: builtin.cSourceFile,
+          path: emitCPath,
           content,
           kind: "c",
         });
       } else {
         // Generate stubs when source file doesn't exist (e.g. running from subdirectory)
         files.push({
-          path: builtin.cSourceFile,
+          path: emitCPath,
           content: this.generateBuiltinStub(builtin, usage),
           kind: "c",
         });
@@ -899,14 +927,14 @@ extern TsErrorContext _ts_current_error;
         // Header: only declare methods that are used (smaller + clearer)
         const original = fs.readFileSync(headerPath, "utf-8") as string;
         files.push({
-          path: builtin.headerFile,
+          path: emitHPath,
           content: this.filterBuiltinHeader(original, builtin, usage),
           kind: "h",
         });
       } else {
         // Generate header stub when header doesn't exist
         files.push({
-          path: builtin.headerFile,
+          path: emitHPath,
           content: this.generateBuiltinHeaderStub(builtin, usage),
           kind: "h",
         });
@@ -914,12 +942,12 @@ extern TsErrorContext _ts_current_error;
     } catch {
       // If files don't exist, generate stubs for used methods only
       files.push({
-        path: builtin.cSourceFile,
+        path: emitCPath,
         content: this.generateBuiltinStub(builtin, usage),
         kind: "c",
       });
       files.push({
-        path: builtin.headerFile,
+        path: emitHPath,
         content: this.generateBuiltinHeaderStub(builtin, usage),
         kind: "h",
       });
