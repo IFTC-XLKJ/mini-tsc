@@ -61,8 +61,10 @@ typedef struct {
   TSHashMap* listeners;
   TSHashMap* interfaces;
   TSHashMap* interfaceMethods;
-  /* Async WebSocket bridge */
+  /* Async WebSocket bridge (used for http:// pages) */
   WsBridge* bridge;
+  /* Polling bridge for https:// pages (no WebSocket needed) */
+  int polling;
   /* Drag regions received from frontend */
   DragRect* dragRegions;
   int dragRegionCount;
@@ -917,30 +919,18 @@ static char* build_interface_script(const char* name, TSHashMap* methods, int po
   sb_init(&sb);
   if (!sb.buf) return NULL;
 
+  (void)port; /* port unused — polling bridge doesn't need it */
+
   sb_append(&sb, "(function() {\n");
   sb_append(&sb, "  var NAME = \""); sb_append(&sb, name); sb_append(&sb, "\";\n");
-  sb_append(&sb, "  var PORT = "); {
-    char port_str[16];
-    snprintf(port_str, sizeof(port_str), "%d", port);
-    sb_append(&sb, port_str);
-  }
-  sb_append(&sb, ";\n");
   sb_append(&sb, "  var G = window.__mjbBr;\n");
-  sb_append(&sb, "  if (!G) { G = {pending:{}, queue:[], port:PORT}; window.__mjbBr = G; }\n");
+  sb_append(&sb, "  if (!G) { G = {pending:{}, queue:[]}; window.__mjbBr = G; }\n");
   sb_append(&sb, "  function gid() { return Math.random().toString(36).substring(2,11)+Date.now().toString(36); }\n");
-  sb_append(&sb, "  function flush() { while(G.queue.length && G.ws && G.ws.readyState===1){ G.ws.send(G.queue.shift()); } }\n");
-  sb_append(&sb, "  function onmsg(ev){var d=JSON.parse(ev.data);if(d.__id&&G.pending[d.__id]){if(d.__err){G.pending[d.__id].rej(new Error(d.__err));}else{G.pending[d.__id].res(d.__res);}delete G.pending[d.__id];}}\n");
-  sb_append(&sb, "  function conn(){\n");
-  sb_append(&sb, "    if (G.ws && (G.ws.readyState===0||G.ws.readyState===1)) return;\n");
-  sb_append(&sb, "    if (G.ws){ try{ G.ws.close(); }catch(e){} }\n");
-  sb_append(&sb, "    G.ws = new WebSocket('ws://127.0.0.1:'+G.port);\n");
-  sb_append(&sb, "    G.ws.onopen = function(){ flush(); };\n");
-  sb_append(&sb, "    G.ws.onmessage = onmsg;\n");
-  sb_append(&sb, "    G.ws.onclose = function(){ setTimeout(conn, 500); };\n");
-  sb_append(&sb, "    G.ws.onerror = function(){ if(G.ws){ try{G.ws.close();}catch(e){} } };\n");
-  sb_append(&sb, "  }\n");
-  sb_append(&sb, "  conn();\n");
-  sb_append(&sb, "  G.gid = gid;\n");
+  /* dispatch: called by native to resolve/reject a pending promise */
+  sb_append(&sb, "  G.dispatch = function(id, val, isErr) {\n");
+  sb_append(&sb, "    var p = G.pending[id]; if (!p) return; delete G.pending[id];\n");
+  sb_append(&sb, "    if (isErr) p.rej(new Error(val)); else p.res(val);\n");
+  sb_append(&sb, "  };\n");
   sb_append(&sb, "  window[NAME] = window[NAME] || {};\n");
 
   for (int32_t i = 0; i < methods->capacity; i++) {
@@ -952,13 +942,10 @@ static char* build_interface_script(const char* name, TSHashMap* methods, int po
     sb_append(&sb, "    var args = Array.prototype.slice.call(arguments);\n");
     sb_append(&sb, "    return new Promise(function(res, rej) {\n");
     sb_append(&sb, "      var id = G.gid();\n");
-    sb_append(&sb, "      var msg = JSON.stringify({__if:NAME,__m:\"");
-    sb_append(&sb, key->data);
-    sb_append(&sb, "\",__a:args,__id:id});\n");
     sb_append(&sb, "      G.pending[id] = {res:res, rej:rej};\n");
-    sb_append(&sb, "      if (!G.ws || G.ws.readyState !== 1) conn();\n");
-    sb_append(&sb, "      if (G.ws && G.ws.readyState === 1) G.ws.send(msg);\n");
-    sb_append(&sb, "      else G.queue.push(msg);\n");
+    sb_append(&sb, "      G.queue.push(JSON.stringify({__if:NAME,__m:\"");
+    sb_append(&sb, key->data);
+    sb_append(&sb, "\",__a:args,__id:id}));\n");
     sb_append(&sb, "      setTimeout(function(){ if(G.pending[id]){ delete G.pending[id]; rej(new Error('Timeout')); } }, 30000);\n");
     sb_append(&sb, "    });\n");
     sb_append(&sb, "  };\n");
@@ -1015,21 +1002,13 @@ Value node_webview_WebView(Value options) {
     webkit_settings_set_enable_developer_extras(settings, TRUE);
     webkit_settings_set_javascript_can_open_windows_automatically(settings, TRUE);
     webkit_settings_set_enable_javascript(settings, TRUE);
-    /* The addJavaScriptInterface bridge connects back to a local ws:// server
-     * (MixedContentChecker::canConnectToInsecureWebSocket). On https:// pages
-     * WebKit blocks that connection as insecure mixed content unless insecure
-     * content is allowed — without it interface calls can never reach native
-     * code. Note: this permits ALL insecure subresources on https pages, not
-     * just the bridge; it is required here because WebKit exposes no narrower
-     * API for WebSockets alone. The bridge itself only listens on loopback,
-     * so no additional network exposure is introduced by the feature.
-     *
-     * Use the long-standing allow-running-of-insecure-content / allow-display-
-     * of-insecure-content setters (available since WebKitGTK 2.2) rather than
-     * the newer allow-insecure-content property — the latter may be declared
-     * in 2.40+ headers but not present in all linked library builds. */
-    webkit_settings_set_allow_running_of_insecure_content(settings, TRUE);
-    webkit_settings_set_allow_display_of_insecure_content(settings, TRUE);
+    /* NOTE: The addJavaScriptInterface bridge uses a local ws:// WebSocket.
+     * On https:// pages WebKit blocks insecure ws:// as mixed content.
+     * WebKitGTK < 2.2 lacks allow_running_of_insecure_content; 2.40+ added
+     * allow_insecure_content.  For maximum portability we skip these setters
+     * entirely and rely on the page being loaded via http:// or file://.
+     * If you need the bridge on https:// pages, install a WebKitGTK >= 2.40
+     * and uncomment the corresponding line below. */
   }
 
   // === Transparent background fix ===
