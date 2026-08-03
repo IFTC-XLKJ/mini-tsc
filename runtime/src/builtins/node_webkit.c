@@ -5,6 +5,12 @@
 #include "runtime.h"
 
 #include <webkit2/webkit2.h>
+#include <glib.h>
+
+#if !defined(WEBKIT_LOAD_FAILED)
+#define WEBKIT_LOAD_FAILED ((WebKitLoadEvent)0)
+#endif
+
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
 #include <string.h>
