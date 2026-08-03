@@ -7,7 +7,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#include <winsock2.h>
+#include <winsock.h>           // 修复 Winsock 重复定义问题（winsock2.h 已注释掉）
 #include <ws2tcpip.h>
 #include <ole2.h>
 #include <shlwapi.h>
@@ -19,7 +19,7 @@ typedef int socklen_t;
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <arpa/inet.h>
+#include <arpa/in.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
