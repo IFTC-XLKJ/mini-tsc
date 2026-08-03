@@ -868,47 +868,35 @@ static char* sb_take(StrBuilder* sb) {
 }
 
 static char* build_interface_script(const char* name, TSHashMap* methods,
-                                    WebKitWebView* wv) {
+                                    int port) {
   StrBuilder sb;
   sb_init(&sb);
   if (!sb.buf) return NULL;
 
   sb_append(&sb, "(function() {\n");
   sb_append(&sb, "  var NAME = \""); sb_append(&sb, name); sb_append(&sb, "\";\n");
-  sb_append(&sb, "  var WVPTR = \"");
-  {
-    char hex[32];
-    snprintf(hex, sizeof(hex), "%lx", (unsigned long)(uintptr_t)wv);
-    sb_append(&sb, hex);
+  sb_append(&sb, "  var PORT = "); {
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+    sb_append(&sb, port_str);
   }
-  sb_append(&sb, "\";\n");
+  sb_append(&sb, ";\n");
   sb_append(&sb, "  var G = window.__mjbBr;\n");
-  sb_append(&sb, "  if (!G) { G = {pending:{},queue:[]}; window.__mjbBr = G; }\n");
+  sb_append(&sb, "  if (!G) { G = {pending:{}, queue:[], port:PORT}; window.__mjbBr = G; }\n");
   sb_append(&sb, "  function gid() { return Math.random().toString(36).substring(2,11)+Date.now().toString(36); }\n");
-  /* dispatch: called by native to resolve/reject a pending promise */
-  sb_append(&sb, "  G.dispatch = function(id, val, isErr) {\n");
-  sb_append(&sb, "    var p = G.pending[id]; if (p) { delete G.pending[id];\n");
-  sb_append(&sb, "      if (isErr) p.rej(new Error(val)); else p.res(val);\n");
-  sb_append(&sb, "    }\n");
-  sb_append(&sb, "  };\n");
-  /* processQueue: drain G.queue and call native via custom URI scheme */
-  sb_append(&sb, "  G.processQueue = function() {\n");
-  sb_append(&sb, "    while (G.queue.length > 0) {\n");
-  sb_append(&sb, "      var msg = G.queue.shift();\n");
-  sb_append(&sb, "      var m = JSON.parse(msg);\n");
-  sb_append(&sb, "      var url = 'mini-tsc://call/' + WVPTR + '/' + NAME + '/' + m.__m\n");
-  sb_append(&sb, "        + '?args=' + encodeURIComponent(JSON.stringify(m.__a||[]))\n");
-  sb_append(&sb, "        + '&id=' + encodeURIComponent(m.__id);\n");
-  sb_append(&sb, "      fetch(url).then(function(r){return r.text();}).then(function(t){\n");
-  sb_append(&sb, "        try { var d = JSON.parse(t); if (!d.__pending) {\n");
-  sb_append(&sb, "          if (d.__err) G.dispatch(m.__id, d.__err, true);\n");
-  sb_append(&sb, "          else G.dispatch(m.__id, d.__res, false);\n");
-  sb_append(&sb, "        }} catch(e) {}\n");
-  sb_append(&sb, "      }).catch(function(){});\n");
-  sb_append(&sb, "    }\n");
-  sb_append(&sb, "  };\n");
-  /* Periodic timer to drain the queue */
-  sb_append(&sb, "  if (!G._timer) G._timer = setInterval(G.processQueue, 10);\n");
+  sb_append(&sb, "  function flush() { while(G.queue.length && G.ws && G.ws.readyState===1){ G.ws.send(G.queue.shift()); } }\n");
+  sb_append(&sb, "  function onmsg(ev){var d=JSON.parse(ev.data);if(d.__id&&G.pending[d.__id]){if(d.__err){G.pending[d.__id].rej(new Error(d.__err));}else{G.pending[d.__id].res(d.__res);}delete G.pending[d.__id];}}\n");
+  sb_append(&sb, "  function conn(){\n");
+  sb_append(&sb, "    if (G.ws && (G.ws.readyState===0||G.ws.readyState===1)) return;\n");
+  sb_append(&sb, "    if (G.ws){ try{ G.ws.close(); }catch(e){} }\n");
+  sb_append(&sb, "    G.ws = new WebSocket('ws://127.0.0.1:'+G.port);\n");
+  sb_append(&sb, "    G.ws.onopen = function(){ flush(); };\n");
+  sb_append(&sb, "    G.ws.onmessage = onmsg;\n");
+  sb_append(&sb, "    G.ws.onclose = function(){ setTimeout(conn, 500); };\n");
+  sb_append(&sb, "    G.ws.onerror = function(){ if(G.ws){ try{G.ws.close();}catch(e){} } };\n");
+  sb_append(&sb, "  }\n");
+  sb_append(&sb, "  conn();\n");
+  sb_append(&sb, "  G.gid = gid;\n");
   sb_append(&sb, "  window[NAME] = window[NAME] || {};\n");
 
   for (int32_t i = 0; i < methods->capacity; i++) {
@@ -919,12 +907,14 @@ static char* build_interface_script(const char* name, TSHashMap* methods,
     sb_append(&sb, "\"] = function() {\n");
     sb_append(&sb, "    var args = Array.prototype.slice.call(arguments);\n");
     sb_append(&sb, "    return new Promise(function(res, rej) {\n");
-    sb_append(&sb, "      var id = gid();\n");
-    sb_append(&sb, "      G.pending[id] = {res:res, rej:rej};\n");
-    sb_append(&sb, "      G.queue.push(JSON.stringify({__if:NAME,__m:\"");
+    sb_append(&sb, "      var id = G.gid();\n");
+    sb_append(&sb, "      var msg = JSON.stringify({__if:NAME,__m:\"");
     sb_append(&sb, key->data);
-    sb_append(&sb, "\",__a:args,__id:id}));\n");
-    sb_append(&sb, "      G.processQueue();\n");
+    sb_append(&sb, "\",__a:args,__id:id});\n");
+    sb_append(&sb, "      G.pending[id] = {res:res, rej:rej};\n");
+    sb_append(&sb, "      if (!G.ws || G.ws.readyState !== 1) conn();\n");
+    sb_append(&sb, "      if (G.ws && G.ws.readyState === 1) G.ws.send(msg);\n");
+    sb_append(&sb, "      else G.queue.push(msg);\n");
     sb_append(&sb, "      setTimeout(function(){ if(G.pending[id]){ delete G.pending[id]; rej(new Error('Timeout')); } }, 30000);\n");
     sb_append(&sb, "    });\n");
     sb_append(&sb, "  };\n");
@@ -956,21 +946,6 @@ Value node_webview_isAvailable(void) {
 
 Value node_webview_WebView(Value options) {
   webkit_ensure_gtk();
-
-  /* Register the custom URI scheme on the default WebKitWebContext.
-   * This must be done before any WebView is created.  The handler
-   * is called from a WebKit I/O thread — it enqueues the request
-   * and returns a pending response; the main thread processes it. */
-  {
-    static int scheme_registered = 0;
-    if (!scheme_registered) {
-      WebKitWebContext* ctx = webkit_web_context_get_default();
-      webkit_web_context_register_uri_scheme(ctx, "mini-tsc",
-                                             handle_mini_tsc_scheme, NULL, NULL);
-      scheme_registered = 1;
-      fprintf(stderr, "WebKitGTK: Registered mini-tsc:// URI scheme\n");
-    }
-  }
 
   WebViewInstance* inst = (WebViewInstance*)calloc(1, sizeof(WebViewInstance));
   if (!inst) return ts_value_undefined();
@@ -1234,7 +1209,13 @@ Value node_webview_run(Value self) {
     while (gtk_events_pending()) {
       gtk_main_iteration_do(FALSE);
     }
-    /* Process queued URI scheme requests from JS */
+    /* Poll WebSocket bridges for all instances */
+    for (int i = 0; i < MAX_INSTANCES; i++) {
+      if (g_instances[i] && g_instances[i]->bridge) {
+        bridge_poll(g_instances[i]);
+      }
+    }
+    /* Process queued messages from WebSocket/URI scheme */
     process_scheme_queue();
     /* Poll pending async Promise results */
     bridge_poll_pending_promises();
@@ -1342,9 +1323,16 @@ Value node_webview_addJavaScriptInterface(Value self, Value name, Value methods)
     free(compositeKey);
   }
 
+  /* Initialize WebSocket bridge */
+  int port = bridge_init(inst);
+  if (port < 0) {
+    fprintf(stderr, "WebKitGTK: Failed to initialize bridge\n");
+    return ts_value_undefined();
+  }
+
   /* Build JS shim and store for re-injection on every navigation.
-   * The shim uses fetch('mini-tsc://call/...') — no WebSocket needed. */
-  char* jsCode = build_interface_script(ifName, methodsMap, inst->webview);
+   * The shim uses ws://127.0.0.1:PORT to communicate with native code. */
+  char* jsCode = build_interface_script(ifName, methodsMap, port);
   if (!jsCode) return ts_value_undefined();
 
   if (!inst->interfaces) {
