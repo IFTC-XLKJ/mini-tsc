@@ -784,7 +784,7 @@ Value node_webview_WebView(Value options) {
     if (!scheme_registered) {
       WebKitWebContext* ctx = webkit_web_context_get_default();
       webkit_web_context_register_uri_scheme(ctx, "mini-tsc",
-                                             handle_mini_tsc_scheme, NULL);
+                                             handle_mini_tsc_scheme, NULL, NULL);
       scheme_registered = 1;
       fprintf(stderr, "WebKitGTK: Registered mini-tsc:// URI scheme\n");
     }
