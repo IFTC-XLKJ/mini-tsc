@@ -2,7 +2,8 @@
 #define NODE_WEBKIT_H
 
 /* Linux WebKitGTK backend for the `webview` module.
- * Exports the same node_webview_* C API as Windows (node_webview.h). */
+ * Exports the same node_webview_* C API as Windows (node_webview.h).
+ * When selected by the compiler, this content is emitted as node_webview.h. */
 
 #include "runtime.h"
 
