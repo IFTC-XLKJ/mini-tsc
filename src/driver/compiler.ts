@@ -1553,6 +1553,27 @@ extern TsErrorContext _ts_current_error;
             }
           })()
         : []),
+      // GnuTLS for TLS WebSocket bridge (optional — avoids mixed-content on HTTPS pages)
+      ...(needWebview && isUnix
+        ? (() => {
+            try {
+              // Only add -lgnutls if the shared library actually exists on this system
+              execSync(
+                "test -f /usr/lib/x86_64-linux-gnu/libgnutls.so || test -f /usr/lib/libgnutls.so || test -f /usr/lib64/libgnutls.so || ldconfig -p 2>/dev/null | grep -q libgnutls.so",
+                { encoding: "utf-8", stdio: "pipe" },
+              );
+              const flags = execSync(
+                "pkg-config --cflags --libs gnutls 2>/dev/null",
+                { encoding: "utf-8" },
+              ).trim();
+              return flags
+                ? [...flags.split(/\s+/).filter(Boolean), "-DHAS_GNUTLS=1"]
+                : ["-lgnutls", "-DHAS_GNUTLS=1"];
+            } catch {
+              return [];
+            }
+          })()
+        : []),
       ...gcFlags,
       ...guiFlags,
       "-Wno-implicit-function-declaration",

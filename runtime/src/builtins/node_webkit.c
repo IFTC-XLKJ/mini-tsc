@@ -26,16 +26,34 @@
 #include <netdb.h>
 #include <time.h>
 
+/* HAS_GNUTLS is set by the build system (-DHAS_GNUTLS=1) when libgnutls
+ * is available.  Fallback to __has_include for manual builds. */
+#ifndef HAS_GNUTLS
+#if __has_include(<gnutls/gnutls.h>)
+#define HAS_GNUTLS 1
+#else
+#define HAS_GNUTLS 0
+#endif
+#endif
+
+#if HAS_GNUTLS
+#include <gnutls/gnutls.h>
+#endif
+
 /* ---- WebSocket bridge for addJavaScriptInterface ----
  * A WebSocket server on 127.0.0.1:PORT is started for each WebView instance.
- * The injected JS shim connects via ws://127.0.0.1:PORT and exchanges JSON
- * messages.  This works on https:// pages without mixed-content issues. */
+ * The injected JS shim connects via ws:// or wss://127.0.0.1:PORT and exchanges
+ * JSON messages.  TLS is used for HTTPS pages to avoid mixed-content blocking. */
 
 typedef struct {
   int listen_fd;
   int client_fd;
   int port;
   int handshake_done;
+#if HAS_GNUTLS
+  int use_tls;
+  gnutls_session_t tls_session;
+#endif
   char* recv_buf;
   int recv_len;
   int recv_cap;
@@ -91,11 +109,126 @@ static int g_instanceCount = 0;
 static int g_loopRunning = 0;
 static int g_gtk_inited = 0;
 
+#if HAS_GNUTLS
+/* ---- TLS globals ---- */
+static gnutls_certificate_credentials_t g_tls_creds;
+static int g_tls_inited = 0;
+#endif
+
 /* ---- Message queue (thread-safe) ---- */
 static SchemeRequest* g_scheme_queue = NULL;
 static GMutex g_scheme_mu;
 
 /* ==================== WebSocket Bridge ==================== */
+
+#if HAS_GNUTLS
+/* Generate a self-signed certificate for localhost TLS. */
+static void bridge_ensure_tls(void) {
+  if (g_tls_inited) return;
+  gnutls_certificate_allocate_credentials(&g_tls_creds);
+
+  /* Generate RSA key */
+  gnutls_privkey_t key;
+  gnutls_privkey_init(&key);
+  gnutls_privkey_generate(key, GNUTLS_PK_RSA, 2048, 0);
+
+  /* Create self-signed certificate */
+  gnutls_x509_crt_t crt;
+  gnutls_x509_crt_init(&crt);
+  gnutls_x509_crt_set_version(crt, 3);
+
+  /* Subject = CN=localhost */
+  gnutls_x509_crt_set_dn_by_oid(crt, GNUTLS_OID_X520_COMMON_NAME, 0,
+                                  "localhost", 9);
+
+  /* Subject Alternative Name: IP 127.0.0.1 */
+  gnutls_x509_crt_set_subject_alt_name(crt, GNUTLS_SAN_IPADDRESS,
+                                         "\x7f\x00\x00\x01", 4, 0);
+
+  /* Validity: now to +1 year */
+  time_t now = time(NULL);
+  gnutls_x509_crt_set_activation_time(crt, now);
+  gnutls_x509_crt_set_expiration_time(crt, now + 365 * 86400);
+
+  /* Sign with the same key */
+  gnutls_x509_crt_set_key(crt, key);
+  unsigned char serial[4] = {1, 0, 0, 0};
+  gnutls_x509_crt_set_serial(crt, serial, 4);
+  gnutls_x509_crt_sign(crt, key, key);
+
+  /* Export to DER for credential loading */
+  unsigned char crt_der[4096];
+  size_t crt_der_len = sizeof(crt_der);
+  gnutls_x509_crt_export(crt, GNUTLS_X509_FMT_DER, crt_der, &crt_der_len);
+
+  unsigned char key_der[4096];
+  size_t key_der_len = sizeof(key_der);
+  gnutls_privkey_export_x509(key, GNUTLS_X509_FMT_DER, key_der, &key_der_len);
+
+  gnutls_certificate_set_x509_key_mem(g_tls_creds,
+    &(gnutls_datum_t){crt_der, crt_der_len},
+    &(gnutls_datum_t){key_der, key_der_len},
+    GNUTLS_X509_FMT_DER);
+
+  gnutls_x509_crt_deinit(crt);
+  gnutls_privkey_deinit(key);
+  g_tls_inited = 1;
+  fprintf(stderr, "WebKitGTK: TLS credentials initialized (self-signed cert for localhost)\n");
+}
+
+/* TLS-aware send: routes through gnutls_record_send when TLS is active. */
+static int bridge_send_all(WsBridge* b, const void* data, int len) {
+  if (b->use_tls) {
+    int sent = 0;
+    while (sent < len) {
+      int r = gnutls_record_send(b->tls_session, (const char*)data + sent, len - sent);
+      if (r < 0) return -1;
+      sent += r;
+    }
+    return sent;
+  }
+  const char* p = (const char*)data;
+  int total = 0;
+  while (total < len) {
+    int r = send(b->client_fd, p + total, len - total, 0);
+    if (r <= 0) return -1;
+    total += r;
+  }
+  return total;
+}
+
+/* TLS-aware recv: routes through gnutls_record_recv when TLS is active. */
+static int bridge_recv(WsBridge* b, void* buf, int len) {
+  if (b->use_tls) return gnutls_record_recv(b->tls_session, buf, len);
+  return recv(b->client_fd, buf, len, 0);
+}
+
+/* Peek at first byte to detect TLS ClientHello (0x16). */
+static int bridge_peek_first_byte(WsBridge* b) {
+  unsigned char ch;
+  if (b->use_tls) {
+    int r = gnutls_record_peek(b->tls_session, &ch, 1);
+    return (r == 1) ? ch : -1;
+  }
+  int r = recv(b->client_fd, &ch, 1, MSG_PEEK);
+  return (r == 1) ? ch : -1;
+}
+#else /* !HAS_GNUTLS — plain ws:// only, no TLS support */
+static void bridge_ensure_tls(void) {}
+static int bridge_send_all(WsBridge* b, const void* data, int len) {
+  const char* p = (const char*)data;
+  int total = 0;
+  while (total < len) {
+    int r = send(b->client_fd, p + total, len - total, 0);
+    if (r <= 0) return -1;
+    total += r;
+  }
+  return total;
+}
+static int bridge_recv(WsBridge* b, void* buf, int len) {
+  return recv(b->client_fd, buf, len, 0);
+}
+#endif /* HAS_GNUTLS */
 
 static int bridge_is_unsafe_port(int port) {
   static const int restricted[] = {
@@ -118,6 +251,7 @@ static int bridge_is_unsafe_port(int port) {
 
 static int bridge_init(WebViewInstance* inst) {
   if (inst->bridge) return inst->bridge->port;
+  bridge_ensure_tls();
   for (int attempt = 0; attempt < 50; attempt++) {
     WsBridge* b = (WsBridge*)calloc(1, sizeof(WsBridge));
     if (!b) return -1;
@@ -148,6 +282,10 @@ static int bridge_init(WebViewInstance* inst) {
     fcntl(b->listen_fd, F_SETFL, O_NONBLOCK);
     b->client_fd = -1;
     b->handshake_done = 0;
+#if HAS_GNUTLS
+    b->use_tls = 0;
+    b->tls_session = NULL;
+#endif
     b->recv_cap = 4096;
     b->recv_buf = (char*)malloc(b->recv_cap);
     if (b->recv_buf) b->recv_buf[0] = '\0';
@@ -162,6 +300,14 @@ static int bridge_init(WebViewInstance* inst) {
 
 static void bridge_close_client(WsBridge* b) {
   if (!b) return;
+#if HAS_GNUTLS
+  if (b->use_tls && b->tls_session) {
+    gnutls_bye(b->tls_session, GNUTLS_SHUT_RDWR);
+    gnutls_deinit(b->tls_session);
+    b->tls_session = NULL;
+    b->use_tls = 0;
+  }
+#endif
   if (b->client_fd >= 0) { close(b->client_fd); b->client_fd = -1; }
   b->handshake_done = 0;
   b->recv_len = 0;
@@ -178,16 +324,16 @@ static void bridge_shutdown(WebViewInstance* inst) {
   fprintf(stderr, "WebKitGTK: Bridge server shut down\n");
 }
 
-static int bridge_send_frame(int fd, const char* data, int len) {
-  if (fd < 0) return -1;
+static int bridge_send_frame(WsBridge* b, const char* data, int len) {
+  if (!b || b->client_fd < 0) return -1;
   unsigned char header[10];
   int hdrlen = 0;
   header[0] = 0x81;
   if (len < 126) { header[1] = (unsigned char)len; hdrlen = 2; }
   else if (len <= 0xFFFF) { header[1] = 126; header[2] = (unsigned char)(len >> 8); header[3] = (unsigned char)(len & 0xFF); hdrlen = 4; }
   else return -1;
-  if (send(fd, header, hdrlen, 0) != hdrlen) return -1;
-  if (len > 0 && send(fd, data, len, 0) != len) return -1;
+  if (bridge_send_all(b, header, hdrlen) != hdrlen) return -1;
+  if (len > 0 && bridge_send_all(b, data, len) != len) return -1;
   return 0;
 }
 
@@ -288,11 +434,33 @@ static void ws_base64(const unsigned char* data, int len, char* out) {
 }
 
 static int bridge_handle_handshake(WsBridge* b) {
+#if HAS_GNUTLS
+  /* If TLS not yet negotiated, detect TLS ClientHello (first byte 0x16) */
+  if (!b->use_tls) {
+    int ch = bridge_peek_first_byte(b);
+    if (ch == 0x16) {
+      /* TLS ClientHello detected — perform TLS handshake */
+      gnutls_init(&b->tls_session, GNUTLS_SERVER);
+      gnutls_set_default_priority(b->tls_session);
+      gnutls_credentials_set(b->tls_session, GNUTLS_CRD_CERTIFICATE, g_tls_creds);
+      gnutls_transport_set_int(b->tls_session, b->client_fd);
+      int r = gnutls_handshake(b->tls_session);
+      if (r < 0) {
+        fprintf(stderr, "WebKitGTK: TLS handshake failed: %s\n", gnutls_strerror(r));
+        bridge_close_client(b);
+        return -1;
+      }
+      b->use_tls = 1;
+      fprintf(stderr, "WebKitGTK: TLS handshake completed\n");
+    }
+  }
+#endif
+
   char temp[2048];
-  int n = recv(b->client_fd, temp, sizeof(temp), 0);
+  int n = bridge_recv(b, temp, sizeof(temp));
   if (n > 0) bridge_append_recv(b, temp, n);
   else if (n == 0) { bridge_close_client(b); return -1; }
-  else return 0;
+  else { int err = errno; if (err != EAGAIN && err != EWOULDBLOCK) { bridge_close_client(b); return -1; } return 0; }
   if (b->recv_len < 4) return 0;
   if (b->recv_len > 8192) { bridge_close_client(b); return -1; }
   b->recv_buf[b->recv_len] = '\0';
@@ -324,12 +492,7 @@ static int bridge_handle_handshake(WsBridge* b) {
     "Upgrade: websocket\r\n"
     "Connection: Upgrade\r\n"
     "Sec-WebSocket-Accept: %s\r\n\r\n", accept_key);
-  int total_sent = 0;
-  while (total_sent < rlen) {
-    int sent = send(b->client_fd, resp + total_sent, rlen - total_sent, 0);
-    if (sent > 0) total_sent += sent;
-    else { bridge_close_client(b); return -1; }
-  }
+  if (bridge_send_all(b, resp, rlen) != rlen) { bridge_close_client(b); return -1; }
   b->handshake_done = 1;
   b->recv_len = 0;
   if (b->recv_buf) b->recv_buf[0] = '\0';
@@ -362,7 +525,7 @@ static void bridge_poll(WebViewInstance* inst) {
     if (r <= 0) return;
   }
   char temp[4096];
-  int n = recv(b->client_fd, temp, sizeof(temp), 0);
+  int n = bridge_recv(b, temp, sizeof(temp));
   if (n > 0) bridge_append_recv(b, temp, n);
   else if (n == 0) { bridge_close_client(b); return; }
   else { int err = errno; if (err != EAGAIN && err != EWOULDBLOCK) { bridge_close_client(b); return; } }
@@ -374,7 +537,7 @@ static void bridge_poll(WebViewInstance* inst) {
     if (opcode == 0x08) { bridge_close_client(b); free(payload); return; }
     if (opcode == 0x09) {
       unsigned char pong[2] = {0x8A, 0x00};
-      send(b->client_fd, pong, 2, 0);
+      bridge_send_all(b, pong, 2);
       free(payload); continue;
     }
     if (opcode == 0x01 || opcode == 0x02) {
@@ -439,7 +602,7 @@ static void bridge_resolve_promise_ws(WebViewInstance* inst, const char* id,
   char resp[131072];
   snprintf(resp, sizeof(resp), "{\"__id\":\"%s\",\"__%s\":%s}",
            id, isErr ? "err" : "res", val);
-  bridge_send_frame(b->client_fd, resp, (int)strlen(resp));
+  bridge_send_frame(b, resp, (int)strlen(resp));
   if (resultJson) ts_string_free(resultJson);
 }
 
@@ -747,7 +910,7 @@ static void bridge_dispatch_message(WebViewInstance* inst,
       char resp[1024];
       snprintf(resp, sizeof(resp),
         "{\"__id\":\"%s\",\"__err\":\"method not found\"}", id);
-      bridge_send_frame(inst->bridge->client_fd, resp, (int)strlen(resp));
+      bridge_send_frame(inst->bridge, resp, (int)strlen(resp));
     }
     return;
   }
@@ -779,7 +942,7 @@ static void bridge_dispatch_message(WebViewInstance* inst,
           snprintf(resp, sizeof(resp),
             "{\"__id\":\"%s\",\"__err\":%s}",
             id, rj ? rj->data : "null");
-          bridge_send_frame(inst->bridge->client_fd, resp, (int)strlen(resp));
+          bridge_send_frame(inst->bridge, resp, (int)strlen(resp));
           if (rj) ts_string_free(rj);
         }
         return;
@@ -799,7 +962,7 @@ static void bridge_dispatch_message(WebViewInstance* inst,
     char resp[131072];
     snprintf(resp, sizeof(resp), "{\"__id\":\"%s\",\"__res\":%s}",
              id, resultJson ? resultJson->data : "null");
-    bridge_send_frame(inst->bridge->client_fd, resp, (int)strlen(resp));
+    bridge_send_frame(inst->bridge, resp, (int)strlen(resp));
     if (resultJson) ts_string_free(resultJson);
   }
 
@@ -889,7 +1052,8 @@ static char* build_interface_script(const char* name, TSHashMap* methods,
   sb_append(&sb, "  function conn(){\n");
   sb_append(&sb, "    if (G.ws && (G.ws.readyState===0||G.ws.readyState===1)) return;\n");
   sb_append(&sb, "    if (G.ws){ try{ G.ws.close(); }catch(e){} }\n");
-  sb_append(&sb, "    G.ws = new WebSocket('ws://127.0.0.1:'+G.port);\n");
+  sb_append(&sb, "    var PROTO = (window.location.protocol === 'https:') ? 'wss:' : 'ws:';\n");
+  sb_append(&sb, "    G.ws = new WebSocket(PROTO + '//127.0.0.1:'+G.port);\n");
   sb_append(&sb, "    G.ws.onopen = function(){ flush(); };\n");
   sb_append(&sb, "    G.ws.onmessage = onmsg;\n");
   sb_append(&sb, "    G.ws.onclose = function(){ setTimeout(conn, 500); };\n");
