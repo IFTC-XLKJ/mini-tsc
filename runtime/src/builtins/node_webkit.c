@@ -38,6 +38,14 @@
 
 #if HAS_GNUTLS
 #include <gnutls/gnutls.h>
+#include <gnutls/x509.h>
+/* Fallback defines for older GnuTLS versions */
+#ifndef GNUTLS_OID_X520_COMMON_NAME
+#define GNUTLS_OID_X520_COMMON_NAME "2.5.4.3"
+#endif
+#ifndef GNUTLS_SAN_IPADDRESS
+#define GNUTLS_SAN_IPADDRESS 8
+#endif
 #endif
 
 /* ---- WebSocket bridge for addJavaScriptInterface ----
@@ -652,7 +660,16 @@ static void webkit_ensure_gtk(void) {
    * an offscreen compositor — fixes white screen on remote/headless X11. */
   g_setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", FALSE);
   g_setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", FALSE);
+  /* Ensure X11 backend on remote/headless servers (WebKitGTK 2.50+ defaults
+   * to Wayland which segfaults without a compositor). */
+  if (!g_getenv("GDK_BACKEND"))
+    g_setenv("GDK_BACKEND", "x11", FALSE);
+  /* Disable WebKit sandbox on headless/remote servers to avoid segfaults
+   * in the web process (bubblewrap sandbox requires specific setup). */
+  g_setenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1", FALSE);
   gtk_init(NULL, NULL);
+  fprintf(stderr, "WebKitGTK: initialized (GDK_BACKEND=%s)\n",
+          g_getenv("GDK_BACKEND") ? g_getenv("GDK_BACKEND") : "(null)");
   g_gtk_inited = 1;
 }
 
