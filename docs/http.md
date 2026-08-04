@@ -2,50 +2,40 @@
 
 ## 概述
 
-`http` 模块提供了 HTTP 服务器和客户端的功能，支持创建 HTTP 服务器、发送 HTTP 请求等。
+`http` 模块提供了 HTTP 服务器和客户端功能。mini-tsc 的实现采用 **Web API 风格**，使用标准的 `Request` 和 `Response` 对象，而非传统的 Node.js `IncomingMessage`/`ServerResponse` 模式。
 
 ## 类型定义
 
 ```typescript
-interface ServerOptions {
-  // 服务器配置选项
+type RequestListener = (
+  req: Request,
+) => Response | Promise<Response> | BodyInit | Promise<BodyInit> | any;
+
+interface Server {
+  listen(port: number, callback?: () => void): this | void;
+  listen(port: number, host: string, callback?: () => void): this | void;
+  close?(callback?: () => void): void;
+  on?(event: string, listener: (...args: any[]) => void): this;
 }
 
 interface RequestOptions {
   hostname?: string;
-  port?: number;
+  host?: string;
+  port?: number | string;
   path?: string;
   method?: string;
   headers?: Record<string, string>;
-}
-
-interface IncomingMessage {
-  method: string;
-  url: string;
-  headers: Record<string, string>;
-  // 请求体通过事件获取
-}
-
-interface ServerResponse {
-  statusCode: number;
-  statusMessage: string;
-  headers: Record<string, string>;
-  
-  writeHead(statusCode: number, headers?: Record<string, string>): void;
-  write(data: string | Buffer): void;
-  end(data?: string | Buffer): void;
-  setHeader(name: string, value: string): void;
 }
 ```
 
 ## API 列表
 
-### `http.createServer(callback?)`
+### `http.createServer(handler?)`
 
 创建 HTTP 服务器。
 
 **参数**:
-- `callback`: 请求处理函数 `(req, res) => void`
+- `handler`: 请求处理函数，接收 `Request` 对象，返回 `Response` 或 `Promise<Response>`
 
 **返回值**: `Server` 对象
 
@@ -53,9 +43,10 @@ interface ServerResponse {
 ```typescript
 import * as http from 'http';
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Hello World');
+const server = http.createServer((req: Request) => {
+  return new Response('Hello World', {
+    headers: { 'Content-Type': 'text/plain' }
+  });
 });
 ```
 
@@ -135,16 +126,10 @@ http.get('http://example.com/api/data', (res) => {
 ```typescript
 import * as http from 'http';
 
-const server = http.createServer((req, res) => {
-  console.log(`${req.method} ${req.url}`);
+const server = http.createServer((req: Request) => {
+  console.log(req.method, req.url);
   
-  // 设置响应头
-  res.writeHead(200, {
-    'Content-Type': 'text/html; charset=utf-8'
-  });
-  
-  // 发送响应
-  res.end(`
+  return new Response(`
     <!DOCTYPE html>
     <html>
     <head><title>My Server</title></head>
@@ -153,7 +138,9 @@ const server = http.createServer((req, res) => {
       <p>Time: ${new Date().toISOString()}</p>
     </body>
     </html>
-  `);
+  `, {
+    headers: { 'Content-Type': 'text/html; charset=utf-8' }
+  });
 });
 
 server.listen(3000, () => {
@@ -177,51 +164,53 @@ const users: User[] = [
   { id: 2, name: 'Bob', email: 'bob@example.com' },
 ];
 
-function parseBody(req: any): Promise<string> {
-  return new Promise((resolve) => {
-    let body = '';
-    req.on('data', (chunk: string) => body += chunk);
-    req.on('end', () => resolve(body));
-  });
-}
-
-const server = http.createServer(async (req, res) => {
-  const { method, url } = req;
+const server = http.createServer(async (req: Request) => {
+  const url = new URL(req.url || '/', 'http://localhost');
+  const method = req.method;
   
   // CORS 头
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE',
+  };
   
   // 路由
-  if (method === 'GET' && url === '/api/users') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(users));
+  if (method === 'GET' && url.pathname === '/api/users') {
+    return new Response(JSON.stringify(users), {
+      headers: { ...headers, 'Content-Type': 'application/json' }
+    });
   }
-  else if (method === 'POST' && url === '/api/users') {
-    const body = await parseBody(req);
-    const newUser = JSON.parse(body);
-    newUser.id = users.length + 1;
+  
+  if (method === 'POST' && url.pathname === '/api/users') {
+    const body = await req.json();
+    const newUser = { id: users.length + 1, ...body as any };
     users.push(newUser);
     
-    res.writeHead(201, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(newUser));
+    return new Response(JSON.stringify(newUser), {
+      status: 201,
+      headers: { ...headers, 'Content-Type': 'application/json' }
+    });
   }
-  else if (method === 'GET' && url?.startsWith('/api/users/')) {
-    const id = parseInt(url.split('/')[3]);
+  
+  if (method === 'GET' && url.pathname.startsWith('/api/users/')) {
+    const id = parseInt(url.pathname.split('/')[3]);
     const user = users.find(u => u.id === id);
     
     if (user) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(user));
-    } else {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'User not found' }));
+      return new Response(JSON.stringify(user), {
+        headers: { ...headers, 'Content-Type': 'application/json' }
+      });
     }
+    return new Response(JSON.stringify({ error: 'User not found' }), {
+      status: 404,
+      headers: { ...headers, 'Content-Type': 'application/json' }
+    });
   }
-  else {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not found' }));
-  }
+  
+  return new Response(JSON.stringify({ error: 'Not found' }), {
+    status: 404,
+    headers: { ...headers, 'Content-Type': 'application/json' }
+  });
 });
 
 server.listen(8080, () => {
@@ -229,71 +218,104 @@ server.listen(8080, () => {
 });
 ```
 
-### HTTP 客户端
+### 文件服务
+
+```typescript
+import * as http from 'http';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+
+const server = http.createServer(async (req: Request) => {
+  const url = new URL(req.url || '/', 'http://localhost');
+  
+  if (url.pathname === '/download') {
+    const file = await fs.readFile(path.join(__dirname, '../data.zip'));
+    return new Response(file, {
+      headers: {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': 'attachment; filename=data.zip',
+      }
+    });
+  }
+  
+  return new Response('Not found', { status: 404 });
+});
+
+server.listen(3000);
+```
+
+### Server-Sent Events (SSE)
 
 ```typescript
 import * as http from 'http';
 
-// GET 请求
-function fetch(url: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    http.get(url, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => resolve(data));
-      res.on('error', reject);
-    }).on('error', reject);
-  });
-}
-
-// POST 请求
-async function postData(url: string, data: any): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const postData = JSON.stringify(data);
-    
-    const req = http.request(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': postData.length.toString()
-      }
-    }, (res) => {
-      let result = '';
-      res.on('data', (chunk) => result += chunk);
-      res.on('end', () => resolve(result));
-      res.on('error', reject);
-    });
-    
-    req.on('error', reject);
-    req.write(postData);
-    req.end();
-  });
-}
-
-// 使用示例
-async function main() {
-  const users = await fetch('http://api.example.com/users');
-  console.log('Users:', users);
+const server = http.createServer((req: Request) => {
+  const url = new URL(req.url || '/', 'http://localhost');
   
-  const newUser = await postData('http://api.example.com/users', {
-    name: 'Charlie',
-    email: 'charlie@example.com'
-  });
-  console.log('Created:', newUser);
-}
+  if (url.pathname === '/events') {
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
+    
+    // 模拟发送事件
+    for (let i = 1; i <= 5; i++) {
+      setTimeout(() => {
+        writer.write(`id: ${i}\nevent: tick\ndata: chunk ${i}\n\n`);
+        if (i === 5) writer.close();
+      }, i * 1000);
+    }
+    
+    return new Response(readable, {
+      headers: { 'Content-Type': 'text/event-stream' }
+    });
+  }
+  
+  return new Response('Hello');
+});
+
+server.listen(3000);
+```
+
+### WebSocket 升级
+
+```typescript
+import * as http from 'http';
+
+const server = http.createServer((req: Request) => {
+  const url = new URL(req.url || '/', 'http://localhost');
+  
+  if (url.pathname === '/ws') {
+    if (req.headers.get('upgrade') !== 'websocket') {
+      return new Response(null, { status: 426 });
+    }
+    
+    const wss = new WebSocketServer();
+    wss.onmessage = (event) => {
+      console.log('Received:', event.data);
+      wss.send('Echo: ' + event.data);
+    };
+    
+    return new Response(wss, {
+      headers: { 'Sec-WebSocket-Protocol': 'chat' }
+    });
+  }
+  
+  return new Response('Hello');
+});
+
+server.listen(3000);
 ```
 
 ## 实现细节
 
 ### 服务器实现
 
-HTTP 服务器基于 TCP 套接字实现：
+HTTP 服务器基于以下流程：
 
 1. 创建 TCP 服务器监听指定端口
 2. 接受客户端连接
-3. 解析 HTTP 请求
+3. 解析 HTTP 请求为 Web `Request` 对象
 4. 调用请求处理函数
-5. 发送 HTTP 响应
+5. 将返回的 `Response` 对象发送给客户端
 
 ### 客户端实现
 
