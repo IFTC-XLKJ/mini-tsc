@@ -26,6 +26,21 @@
 #include <netdb.h>
 #include <time.h>
 
+/* ---- WebSocket bridge for addJavaScriptInterface ----
+ * A WebSocket server on 127.0.0.1:PORT is started for each WebView instance.
+ * The injected JS shim connects via ws://127.0.0.1:PORT and exchanges JSON
+ * messages.  This works on https:// pages without mixed-content issues. */
+
+typedef struct {
+  int listen_fd;
+  int client_fd;
+  int port;
+  int handshake_done;
+  char* recv_buf;
+  int recv_len;
+  int recv_cap;
+} WsBridge;
+
 typedef struct {
   int x, y, w, h;
 } DragRect;
@@ -59,31 +74,6 @@ typedef struct {
   DragRect* dragExcludes;
   int dragExcludeCount;
 } WebViewInstance;
-
-/* ---- WebSocket bridge for addJavaScriptInterface ----
- * A WebSocket server on 127.0.0.1:PORT is started for each WebView instance.
- * The injected JS shim connects via ws://127.0.0.1:PORT and exchanges JSON
- * messages.  This works on https:// pages without mixed-content issues. */
-
-typedef struct {
-  int listen_fd;
-  int client_fd;
-  int port;
-  int handshake_done;
-  char* recv_buf;
-  int recv_len;
-  int recv_cap;
-} WsBridge;
-
-/* Parsed request queued from WebSocket handler and consumed by the main GTK loop. */
-typedef struct SchemeRequest {
-  struct SchemeRequest* next;
-  WebViewInstance* inst;
-  char* iface;   /* interface name */
-  char* method;  /* method name */
-  char* args;    /* JSON args array string */
-  char* id;      /* promise ID */
-} SchemeRequest;
 
 /* Parsed request queued from WebSocket handler and consumed by the main GTK loop. */
 typedef struct SchemeRequest {
