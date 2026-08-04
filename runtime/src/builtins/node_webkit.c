@@ -85,6 +85,16 @@ typedef struct SchemeRequest {
   char* id;      /* promise ID */
 } SchemeRequest;
 
+/* Parsed request queued from WebSocket handler and consumed by the main GTK loop. */
+typedef struct SchemeRequest {
+  struct SchemeRequest* next;
+  WebViewInstance* inst;
+  char* iface;   /* interface name */
+  char* method;  /* method name */
+  char* args;    /* JSON args array string */
+  char* id;      /* promise ID */
+} SchemeRequest;
+
 #define MAX_INSTANCES 32
 static WebViewInstance* g_instances[MAX_INSTANCES] = {0};
 static int g_instanceCount = 0;
@@ -365,7 +375,7 @@ static void bridge_poll(WebViewInstance* inst) {
   int n = recv(b->client_fd, temp, sizeof(temp), 0);
   if (n > 0) bridge_append_recv(b, temp, n);
   else if (n == 0) { bridge_close_client(b); return; }
-  else { errno_t err = errno; if (err != EAGAIN && err != EWOULDBLOCK) { bridge_close_client(b); return; } }
+  else { int err = errno; if (err != EAGAIN && err != EWOULDBLOCK) { bridge_close_client(b); return; } }
   while (1) {
     char* payload = NULL; int payload_len = 0;
     int opcode = bridge_try_parse_frame(b, &payload, &payload_len);
@@ -396,7 +406,7 @@ static void bridge_poll(WebViewInstance* inst) {
             req->iface = strdup(ifVal.as.string->data);
             req->method = strdup(mVal.as.string->data);
             /* Serialize args back to JSON string */
-            TSString* argsJson = ts_json_stringize(aVal);
+            TSString* argsJson = ts_json_stringify(aVal);
             req->args = argsJson ? strdup(argsJson->data) : strdup("[]");
             if (argsJson) ts_string_free(argsJson);
             req->id = (idVal.tag == TAG_STRING && idVal.as.string) ? strdup(idVal.as.string->data) : strdup("");
