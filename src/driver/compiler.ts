@@ -1519,8 +1519,9 @@ extern TsErrorContext _ts_current_error;
       ...(isWindows && needShell32 ? ["-lshell32"] : []),
       ...(isWindows && needOs ? ["-ladvapi32"] : []),
       ...(isWindows && needFetch ? ["-lwinhttp"] : []),
-      // mouse: needs user32 for Windows hooks
+      // mouse: needs user32 (Win) / X11 + XInput2 (Linux)
       ...(isWindows && needMouse ? ["-luser32"] : []),
+      ...(isUnix && needMouse ? ["-lX11", "-lXi"] : []),
       // sqlite amalgamation needs math on some platforms
       ...(needSqlite && isUnix ? ["-lm"] : []),
       // ffi needs dl library on Unix
@@ -1583,6 +1584,17 @@ extern TsErrorContext _ts_current_error;
       "-Wno-deprecated-non-prototype",
       ...(options.clangArgs || []),
     ].join(" ");
+
+    // Pre-flight: check that required system libraries are installed
+    const depErrors = CompilerDriver.checkDeps(
+      usage?.modules ?? new Set(), usage?.features ?? new Set(), isUnix, execSync,
+    );
+    if (depErrors.length > 0) {
+      throw new Error(
+        `Missing system dependencies for linking:\n${depErrors.join("\n")}\n` +
+        `Install the missing packages above, then re-run the compile command.`,
+      );
+    }
 
     try {
       execSync(cmd, { stdio: "pipe", cwd: process.cwd() });
@@ -1774,6 +1786,83 @@ END
         fs.copyFileSync(srcPath, dstPath);
       }
     }
+  }
+
+  /**
+   * Check that required system libraries are available before attempting to link.
+   * Returns an array of human-readable error messages for missing dependencies.
+   */
+  private static checkDeps(
+    modules: Set<string>,
+    features: Set<string>,
+    isUnix: boolean,
+    execSync: typeof import("child_process").execSync,
+  ): string[] {
+    if (!isUnix) return []; // Windows system libs are always present
+
+    const missing: string[] = [];
+    const checked = new Set<string>();
+
+    /** Run a shell command; returns true if it exits 0. */
+    const cmdOk = (cmd: string): boolean => {
+      try { execSync(cmd, { stdio: "pipe" }); return true; } catch { return false; }
+    };
+
+    /** Check pkg-config package; if absent, fall back to ldconfig / header probe. */
+    const requireLib = (
+      pkgName: string,
+      pkgConfigName: string,
+      header: string,
+      installHint: string,
+    ) => {
+      if (checked.has(pkgName)) return;
+      checked.add(pkgName);
+      const hasPkg = cmdOk(`pkg-config --exists ${pkgConfigName} 2>/dev/null`);
+      const hasHeader = cmdOk(`test -f /usr/include/${header}`);
+      const hasSo = cmdOk(`ldconfig -p 2>/dev/null | grep -q lib${pkgName}.so`);
+      if (!hasPkg && !hasHeader && !hasSo) {
+        missing.push(`  - ${pkgName}  →  ${installHint}`);
+      }
+    };
+
+    // fetch / http / net / websocket → libcurl
+    if (features.has("fetch") || modules.has("http") || modules.has("net") || features.has("websocket")) {
+      requireLib("curl", "libcurl", "curl/curl.h",
+        "sudo apt install libcurl4-openssl-dev   # Debian/Ubuntu\n" +
+        "      sudo dnf install libcurl-devel       # Fedora/RHEL\n" +
+        "      sudo pacman -S curl                  # Arch");
+    }
+
+    // mouse → libX11, libXi
+    if (modules.has("mouse")) {
+      requireLib("X11", "x11", "X11/Xlib.h",
+        "sudo apt install libx11-dev   # Debian/Ubuntu\n" +
+        "      sudo dnf install libX11-devel # Fedora/RHEL\n" +
+        "      sudo pacman -S libx11        # Arch");
+      requireLib("Xi", "xi", "X11/extensions/XInput2.h",
+        "sudo apt install libxi-dev    # Debian/Ubuntu\n" +
+        "      sudo dnf install libXi-devel   # Fedora/RHEL\n" +
+        "      sudo pacman -S libxi           # Arch");
+    }
+
+    // webview → webkit2gtk + gtk3
+    if (modules.has("webview")) {
+      const hasWk = cmdOk("pkg-config --exists webkit2gtk-4.1 2>/dev/null") ||
+                    cmdOk("pkg-config --exists webkit2gtk-4.0 2>/dev/null");
+      if (!hasWk) {
+        missing.push("  - webkit2gtk  →  sudo apt install libwebkit2gtk-4.0-dev   # Debian/Ubuntu\n" +
+                     "                       sudo dnf install webkit2gtk4.0-devel  # Fedora/RHEL\n" +
+                     "                       sudo pacman -S webkit2gtk              # Arch");
+      }
+      const hasGtk = cmdOk("pkg-config --exists gtk+-3.0 2>/dev/null");
+      if (!hasGtk) {
+        missing.push("  - gtk3        →  sudo apt install libgtk-3-dev     # Debian/Ubuntu\n" +
+                     "                       sudo dnf install gtk3-devel        # Fedora/RHEL\n" +
+                     "                       sudo pacman -S gtk3                # Arch");
+      }
+    }
+
+    return missing;
   }
 
   /** Create a zip archive of `sourceDir` at `zipFile` using system tools,
