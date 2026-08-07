@@ -4,7 +4,7 @@ import { BUILTIN_MODULES } from "../builtins/registry.js";
 /** Node built-in module names we can tree-shake. */
 export const BUILTIN_MODULE_NAMES = [
   "fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto",
-  "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype",
+  "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype", "mouse",
 ] as const;
 
 export type BuiltinModuleName = (typeof BUILTIN_MODULE_NAMES)[number];
@@ -724,7 +724,7 @@ export function analyzeFeatureUsage(
   }
   const modulesNeedingHashArray = [
     "fs", "path", "http", "net", "events", "child_process",
-    "crypto", "assert", "readline", "os", "worker_threads", "sqlite", "webview", "ffi", "uuid",
+    "crypto", "assert", "readline", "os", "worker_threads", "sqlite", "webview", "ffi", "uuid", "mouse",
   ];
   for (const m of modulesNeedingHashArray) {
     if (usage.modules.has(m)) {

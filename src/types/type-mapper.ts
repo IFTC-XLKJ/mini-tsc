@@ -109,6 +109,11 @@ export class TypeMapper {
           return { kind: "any", cType: "Value", cHeader: "ts_runtime.h" };
         }
 
+        // mouse.MouseEvent → Value (runtime hashmap/object)
+        if (name === "MouseEvent") {
+          return { kind: "any", cType: "Value", cHeader: "ts_runtime.h" };
+        }
+
         // Class types - return ClassName*
         // Check if this is a class (not a built-in type)
         if (objectType.symbol?.declarations) {

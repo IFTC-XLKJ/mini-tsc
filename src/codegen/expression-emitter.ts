@@ -1804,7 +1804,7 @@ export class ExpressionEmitter {
     if (callee.kind === "property_access" &&
         callee.object.kind === "identifier") {
       const moduleName = callee.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "mouse"];
       if (builtinModules.includes(moduleName) && this.canTreatAsBuiltinModule(moduleName)) {
         const funcName = `node_${moduleName}_${callee.property}`;
         // Wrap each argument in Value constructors
@@ -3782,7 +3782,7 @@ export class ExpressionEmitter {
       if (imported && !this.localSymbols.has(callee.name)) callName = imported;
       // Wrap arguments for imported Node builtin function calls (e.g. dlopen from ffi)
       const isBuiltinImport = imported && !this.localSymbols.has(callee.name) &&
-        /^(node_(?:fs|path|process|os|http|net|child_process|events|readline|assert|crypto|worker_threads|chalk|sqlite|ffi)_)/.test(imported);
+        /^(node_(?:fs|path|process|os|http|net|child_process|events|readline|assert|crypto|worker_threads|chalk|sqlite|ffi|mouse)_)/.test(imported);
       const calleeVarType = this.varTypes.get(callee.name) || this.varTypes.get(sanitizeCIdentifier(callee.name));
       const calleeIsLocalValue = this.localSymbols.has(callee.name) &&
         (calleeVarType === "Value" || calleeVarType === "any" || calleeVarType === "unknown");
@@ -4004,7 +4004,7 @@ export class ExpressionEmitter {
     // must emit as function calls: node_process_argv()
     if (node.object.kind === "identifier") {
       const moduleName = node.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "mouse"];
       if (builtinModules.includes(moduleName) && this.canTreatAsBuiltinModule(moduleName)) {
         const funcName = `node_${moduleName}_${node.property}`;
         this._lastBuiltinCall = funcName;

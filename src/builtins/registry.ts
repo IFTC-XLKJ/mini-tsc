@@ -442,6 +442,21 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "equal", cName: "node_ctype_equal", signature: "Value node_ctype_equal(Value a, Value b)" },
     ],
   }],
+  ["mouse", {
+    name: "mouse",
+    headerFile: "node_mouse.h",
+    cSourceFile: "node_mouse.c",
+    functions: [
+      { tsName: "start",           cName: "node_mouse_start",           signature: "Value node_mouse_start(void)" },
+      { tsName: "stop",            cName: "node_mouse_stop",            signature: "Value node_mouse_stop(void)" },
+      { tsName: "on",              cName: "node_mouse_on",              signature: "Value node_mouse_on(Value event, Value callback)" },
+      { tsName: "once",            cName: "node_mouse_once",            signature: "Value node_mouse_once(Value event, Value callback)" },
+      { tsName: "off",             cName: "node_mouse_off",             signature: "Value node_mouse_off(Value event, Value callback)" },
+      { tsName: "getPosition",     cName: "node_mouse_getPosition",     signature: "Value node_mouse_getPosition(void)" },
+      { tsName: "isButtonDown",    cName: "node_mouse_isButtonDown",    signature: "Value node_mouse_isButtonDown(Value button)" },
+      { tsName: "listenerCount",   cName: "node_mouse_listenerCount",   signature: "Value node_mouse_listenerCount(Value event)" },
+    ],
+  }],
 ]);
 
 export function getBuiltinModule(name: string): BuiltinModule | undefined {

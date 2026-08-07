@@ -161,7 +161,7 @@ export class CompilerDriver {
           usedBuiltins.add(builtin);
         }
       }
-      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype"];
+      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype", "mouse"];
       for (const builtin of globalBuiltins) {
         if (cEmitter.unitUsesBuiltin(unit, builtin)) {
           usedBuiltins.add(builtin);
@@ -1437,6 +1437,7 @@ extern TsErrorContext _ts_current_error;
     const needShell32 = !!(usage?.methods.has("node_process_argv") || usage?.methods.has("node_process_openUrl"));
     const needOs = usage?.modules.has("os") ?? false;
     const needMathLib = usage?.features.has("math") ?? false;
+    const needMouse = usage?.modules.has("mouse") ?? false;
 
     // Size-oriented flags: optimize for size; COMDAT sections + GC drop unused funcs.
     // -Oz is more aggressive than -Os; LTO (when lld available) enables cross-TU DCE.
@@ -1518,6 +1519,8 @@ extern TsErrorContext _ts_current_error;
       ...(isWindows && needShell32 ? ["-lshell32"] : []),
       ...(isWindows && needOs ? ["-ladvapi32"] : []),
       ...(isWindows && needFetch ? ["-lwinhttp"] : []),
+      // mouse: needs user32 for Windows hooks
+      ...(isWindows && needMouse ? ["-luser32"] : []),
       // sqlite amalgamation needs math on some platforms
       ...(needSqlite && isUnix ? ["-lm"] : []),
       // ffi needs dl library on Unix
