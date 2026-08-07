@@ -795,6 +795,7 @@ export class AstVisitor {
         const builtinModules = [
           "fs", "path", "process", "os", "http", "net", "child_process",
           "events", "readline", "assert", "crypto", "worker_threads",
+          "mouse",
         ];
         let initExpr: ts.Expression | undefined = decl.initializer;
         if (initExpr && ts.isAwaitExpression(initExpr)) {
