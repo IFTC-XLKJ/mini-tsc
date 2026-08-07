@@ -1,57 +1,36 @@
 import * as mouse from "mouse";
 
 function main(): void {
-  console.log("Mouse module test");
-
-  // Start listening for mouse events
   mouse.start();
-  console.log("Mouse hook started");
+  console.log("Mouse hook started. Move your mouse or click...");
 
-  // Get current position
   const pos = mouse.getPosition();
-  console.log("Initial position:");
-  console.log(pos.x);
-  console.log(pos.y);
+  console.log("Current position:", pos.x, pos.y);
 
-  // Listen to all mouse events
-  mouse.on("any", (event: any) => {
-    console.log("Event:");
-    console.log(event.eventType);
-    console.log(event.x);
-    console.log(event.y);
-    console.log(event.button);
+  const leftDown = mouse.isButtonDown("left");
+  console.log("Left button down:", leftDown);
+
+  mouse.on("mousemove", (x: number, y: number) => {
+    console.log("Move:", x, y);
   });
 
-  // Listen to specific events
-  mouse.on("move", (event: any) => {
-    console.log("Move:");
-    console.log(event.x);
-    console.log(event.y);
+  mouse.on("mousedown", (button: string, pressed: boolean, x: number, y: number) => {
+    console.log("Down:", button, pressed, x, y);
   });
 
-  mouse.on("left_click", (event: any) => {
-    console.log("Left click at:");
-    console.log(event.x);
-    console.log(event.y);
+  mouse.on("mouseup", (button: string, pressed: boolean, x: number, y: number) => {
+    console.log("Up:", button, pressed, x, y);
   });
 
-  mouse.on("right_click", (event: any) => {
-    console.log("Right click at:");
-    console.log(event.x);
-    console.log(event.y);
+  mouse.on("wheel", (delta: number) => {
+    console.log("Wheel:", delta);
   });
 
-  mouse.on("scroll", (event: any) => {
-    console.log("Scroll delta:");
-    console.log(event.delta);
-  });
-
-  console.log("Listening for events... Press Ctrl+C to stop.");
-
-  // Stop after 5 seconds
   setTimeout(() => {
+    const count = mouse.listenerCount("mousemove");
+    console.log("mousemove listeners:", count);
     mouse.stop();
-    console.log("Mouse hook stopped");
+    console.log("Mouse hook stopped.");
   }, 5000);
 }
 

@@ -1,354 +1,310 @@
 #include "node_mouse.h"
-#include <string.h>
 #include <stdio.h>
-
-#ifdef _WIN32
+#include <string.h>
 #include <windows.h>
+
 #pragma comment(lib, "user32.lib")
 
-/* Global state */
-static HHOOK g_mouse_hook = NULL;
-static HWND g_message_hwnd = NULL;
-static HANDLE g_hook_thread = NULL;
-static DWORD g_hook_thread_id = 0;
-static int g_running = 0;
-
-/* Event queue (ring buffer) */
-#define MOUSE_EVENT_QUEUE_SIZE 256
+/* ---- Internal state ---- */
 
 typedef struct {
-  int x;
-  int y;
-  int button;       /* 0=left, 1=right, 2=middle, -1=none */
-  int eventType;    /* 0=move, 1=click, 2=press, 3=release, 4=scroll */
-  int delta;        /* scroll delta */
-} MouseRawEvent;
+    TSHashMap* listeners;
+    volatile long pos_x;
+    volatile long pos_y;
+    volatile long btn_left;
+    volatile long btn_right;
+    volatile long btn_middle;
+    HHOOK hook;
+    HANDLE thread;
+    int running;
+    CRITICAL_SECTION lock;
+} MouseState;
 
-typedef struct {
-  MouseRawEvent events[MOUSE_EVENT_QUEUE_SIZE];
-  int head;
-  int tail;
-  int count;
-} MouseEventQueue;
+static MouseState g_mouse = {0};
 
-static MouseEventQueue g_event_queue = {0};
+/* Interned event name strings */
+static TSString* EV_MOUSEMOVE;
+static TSString* EV_MOUSEDOWN;
+static TSString* EV_MOUSEUP;
+static TSString* EV_CLICK;
+static TSString* EV_WHEEL;
+static int g_strings_initialized = 0;
 
-/* Listeners: up to 32 event+callback pairs */
-#define MOUSE_MAX_LISTENERS 32
-
-typedef struct {
-  Value callback;
-  char eventFilter[32]; /* "any", "move", "click", "press", "release", "scroll", "left_click", ... */
-  int active;
-} MouseListener;
-
-static MouseListener g_listeners[MOUSE_MAX_LISTENERS];
-static int g_listener_count = 0;
-
-/* Last known position */
-static int g_last_x = 0;
-static int g_last_y = 0;
-
-/* Helper: push raw event into queue */
-static void queue_push(MouseRawEvent* evt) {
-  if (g_event_queue.count >= MOUSE_EVENT_QUEUE_SIZE) return; /* drop if full */
-  int idx = (g_event_queue.head + 1) % MOUSE_EVENT_QUEUE_SIZE;
-  g_event_queue.events[idx] = *evt;
-  g_event_queue.head = idx;
-  g_event_queue.count++;
-}
-
-/* Helper: pop raw event from queue (returns 0 if empty) */
-static int queue_pop(MouseRawEvent* evt) {
-  if (g_event_queue.count <= 0) return 0;
-  int idx = (g_event_queue.tail + 1) % MOUSE_EVENT_QUEUE_SIZE;
-  *evt = g_event_queue.events[idx];
-  g_event_queue.tail = idx;
-  g_event_queue.count--;
-  return 1;
-}
-
-/* Map Windows wParam to our event types */
-static const char* event_type_name(int type) {
-  switch (type) {
-    case 0: return "move";
-    case 1: return "click";
-    case 2: return "press";
-    case 3: return "release";
-    case 4: return "scroll";
-    default: return "unknown";
-  }
-}
-
-static const char* button_event_name(int button, int type) {
-  const char* prefix = "";
-  switch (button) {
-    case 0: prefix = "left"; break;
-    case 1: prefix = "right"; break;
-    case 2: prefix = "middle"; break;
-    default: prefix = ""; break;
-  }
-  if (button < 0) return event_type_name(type);
-  switch (type) {
-    case 1: /* click = press + release */
-      {
-        static char buf[32];
-        snprintf(buf, sizeof(buf), "%s_click", prefix);
-        return buf;
-      }
-    case 2:
-      {
-        static char buf[32];
-        snprintf(buf, sizeof(buf), "%s_press", prefix);
-        return buf;
-      }
-    case 3:
-      {
-        static char buf[32];
-        snprintf(buf, sizeof(buf), "%s_release", prefix);
-        return buf;
-      }
-    default: return event_type_name(type);
-  }
-}
-
-/* Check if listener matches event */
-static int listener_matches(MouseListener* l, int button, int type) {
-  if (strcmp(l->eventFilter, "any") == 0) return 1;
-  if (strcmp(l->eventFilter, "move") == 0 && type == 0) return 1;
-  if (strcmp(l->eventFilter, "scroll") == 0 && type == 4) return 1;
-  if (strcmp(l->eventFilter, "press") == 0 && type == 2) return 1;
-  if (strcmp(l->eventFilter, "release") == 0 && type == 3) return 1;
-  if (strcmp(l->eventFilter, "click") == 0 && type == 1) return 1;
-  /* Specific button events */
-  const char* name = button_event_name(button, type);
-  return strcmp(l->eventFilter, name) == 0;
-}
-
-/* Build a MouseEvent hashmap and call matching listeners */
-static void dispatch_event(MouseRawEvent* evt) {
-  for (int i = 0; i < g_listener_count; i++) {
-    MouseListener* l = &g_listeners[i];
-    if (!l->active) continue;
-    if (!listener_matches(l, evt->button, evt->eventType)) continue;
-
-    /* Build event object */
-    TSHashMap* obj = ts_hashmap_new();
-    ts_hashmap_set(obj, ts_string_new("x"), ts_value_number((double)evt->x));
-    ts_hashmap_set(obj, ts_string_new("y"), ts_value_number((double)evt->y));
-    ts_hashmap_set(obj, ts_string_new("button"), ts_value_number((double)evt->button));
-    ts_hashmap_set(obj, ts_string_new("eventType"), ts_value_string(ts_string_new(event_type_name(evt->eventType))));
-    ts_hashmap_set(obj, ts_string_new("delta"), ts_value_number((double)evt->delta));
-
-    Value eventVal = ts_value_object(obj);
-
-    /* Call listener: callback(event) */
-    if (l->callback.tag == TAG_FUNCTION && l->callback.as.function) {
-      /* Use closure call if available, otherwise direct function pointer */
-      Value args[1] = { eventVal };
-      ts_value_call(l->callback, args, 1);
+static void ensure_strings(void) {
+    if (!g_strings_initialized) {
+        EV_MOUSEMOVE = ts_string_new("mousemove");
+        EV_MOUSEDOWN = ts_string_new("mousedown");
+        EV_MOUSEUP   = ts_string_new("mouseup");
+        EV_CLICK     = ts_string_new("click");
+        EV_WHEEL     = ts_string_new("wheel");
+        g_strings_initialized = 1;
     }
-  }
 }
 
-/* Low-level mouse hook procedure */
+/* ---- Listener management ---- */
+
+static void ensure_listeners(void) {
+    if (!g_mouse.listeners) {
+        g_mouse.listeners = ts_hashmap_new();
+        InitializeCriticalSection(&g_mouse.lock);
+        ensure_strings();
+    }
+}
+
+static void dispatch_event(TSString* event_name, Value* args, int argc) {
+    if (!g_mouse.listeners) return;
+    EnterCriticalSection(&g_mouse.lock);
+    Value arr_val = ts_hashmap_get(g_mouse.listeners, event_name);
+    if (arr_val.tag == TAG_ARRAY && arr_val.as.array) {
+        TSArray* arr = arr_val.as.array;
+        for (int i = 0; i < arr->length; i++) {
+            Value fn = ts_array_get(arr, i);
+            if (fn.tag == TAG_FUNCTION && fn.as.function) {
+                ts_value_call(fn, args, argc);
+            }
+        }
+    }
+    LeaveCriticalSection(&g_mouse.lock);
+}
+
+static void add_listener(TSString* event_name, Value callback) {
+    ensure_listeners();
+    if (callback.tag != TAG_FUNCTION) return;
+    EnterCriticalSection(&g_mouse.lock);
+    Value arr_val = ts_hashmap_get(g_mouse.listeners, event_name);
+    TSArray* arr;
+    if (arr_val.tag == TAG_ARRAY && arr_val.as.array) {
+        arr = arr_val.as.array;
+    } else {
+        arr = ts_array_new();
+        ts_hashmap_set(g_mouse.listeners, event_name, ts_value_array(arr));
+    }
+    ts_array_push(arr, callback);
+    LeaveCriticalSection(&g_mouse.lock);
+}
+
+static void remove_listener(TSString* event_name, Value callback) {
+    if (!g_mouse.listeners) return;
+    EnterCriticalSection(&g_mouse.lock);
+    Value arr_val = ts_hashmap_get(g_mouse.listeners, event_name);
+    if (arr_val.tag != TAG_ARRAY || !arr_val.as.array) {
+        LeaveCriticalSection(&g_mouse.lock);
+        return;
+    }
+    TSArray* old = arr_val.as.array;
+    TSArray* neu = ts_array_new();
+    for (int i = 0; i < old->length; i++) {
+        Value fn = ts_array_get(old, i);
+        if (fn.tag != callback.tag || fn.as.function != callback.as.function) {
+            ts_array_push(neu, fn);
+        }
+    }
+    ts_hashmap_set(g_mouse.listeners, event_name, ts_value_array(neu));
+    LeaveCriticalSection(&g_mouse.lock);
+}
+
+/* ---- Hook callback ---- */
+
 static LRESULT CALLBACK mouse_hook_proc(int nCode, WPARAM wParam, LPARAM lParam) {
-  if (nCode >= 0) {
-    MSLLHOOKSTRUCT* ms = (MSLLHOOKSTRUCT*)lParam;
-    MouseRawEvent evt = {0};
-    evt.x = ms->pt.x;
-    evt.y = ms->pt.y;
-    g_last_x = ms->pt.x;
-    g_last_y = ms->pt.y;
+    if (nCode >= 0) {
+        MSLLHOOKSTRUCT* info = (MSLLHOOKSTRUCT*)lParam;
 
-    switch (wParam) {
-      case WM_MOUSEMOVE:
-        evt.eventType = 0; /* move */
-        evt.button = -1;
-        queue_push(&evt);
-        break;
-      case WM_LBUTTONDOWN:
-        evt.eventType = 2; /* press */
-        evt.button = 0;    /* left */
-        queue_push(&evt);
-        break;
-      case WM_LBUTTONUP:
-        evt.eventType = 3; /* release */
-        evt.button = 0;
-        queue_push(&evt);
-        break;
-      case WM_LBUTTONDBLCLK:
-        evt.eventType = 1; /* click (double) */
-        evt.button = 0;
-        queue_push(&evt);
-        break;
-      case WM_RBUTTONDOWN:
-        evt.eventType = 2;
-        evt.button = 1; /* right */
-        queue_push(&evt);
-        break;
-      case WM_RBUTTONUP:
-        evt.eventType = 3;
-        evt.button = 1;
-        queue_push(&evt);
-        break;
-      case WM_RBUTTONDBLCLK:
-        evt.eventType = 1;
-        evt.button = 1;
-        queue_push(&evt);
-        break;
-      case WM_MBUTTONDOWN:
-        evt.eventType = 2;
-        evt.button = 2; /* middle */
-        queue_push(&evt);
-        break;
-      case WM_MBUTTONUP:
-        evt.eventType = 3;
-        evt.button = 2;
-        queue_push(&evt);
-        break;
-      case WM_MBUTTONDBLCLK:
-        evt.eventType = 1;
-        evt.button = 2;
-        queue_push(&evt);
-        break;
-      case WM_MOUSEWHEEL:
-        evt.eventType = 4; /* scroll */
-        evt.button = -1;
-        evt.delta = GET_WHEEL_DELTA_WPARAM(ms->mouseData) / WHEEL_DELTA;
-        queue_push(&evt);
-        break;
-      case WM_MOUSEHWHEEL:
-        evt.eventType = 4;
-        evt.button = -1;
-        evt.delta = GET_WHEEL_DELTA_WPARAM(ms->mouseData) / WHEEL_DELTA;
-        queue_push(&evt);
-        break;
+        InterlockedExchange(&g_mouse.pos_x, info->pt.x);
+        InterlockedExchange(&g_mouse.pos_y, info->pt.y);
+
+        TSString* ev = NULL;
+        Value args[4];
+        int argc = 0;
+
+        switch (wParam) {
+            case WM_MOUSEMOVE:
+                ev = EV_MOUSEMOVE;
+                args[0] = ts_value_number((double)info->pt.x);
+                args[1] = ts_value_number((double)info->pt.y);
+                argc = 2;
+                break;
+
+            case WM_LBUTTONDOWN:
+                InterlockedExchange(&g_mouse.btn_left, 1);
+                ev = EV_MOUSEDOWN;
+                args[0] = ts_value_string(ts_string_new("left"));
+                args[1] = ts_value_boolean(1);
+                args[2] = ts_value_number((double)info->pt.x);
+                args[3] = ts_value_number((double)info->pt.y);
+                argc = 4;
+                break;
+            case WM_LBUTTONUP:
+                InterlockedExchange(&g_mouse.btn_left, 0);
+                ev = EV_MOUSEUP;
+                args[0] = ts_value_string(ts_string_new("left"));
+                args[1] = ts_value_boolean(0);
+                args[2] = ts_value_number((double)info->pt.x);
+                args[3] = ts_value_number((double)info->pt.y);
+                argc = 4;
+                break;
+
+            case WM_RBUTTONDOWN:
+                InterlockedExchange(&g_mouse.btn_right, 1);
+                ev = EV_MOUSEDOWN;
+                args[0] = ts_value_string(ts_string_new("right"));
+                args[1] = ts_value_boolean(1);
+                args[2] = ts_value_number((double)info->pt.x);
+                args[3] = ts_value_number((double)info->pt.y);
+                argc = 4;
+                break;
+            case WM_RBUTTONUP:
+                InterlockedExchange(&g_mouse.btn_right, 0);
+                ev = EV_MOUSEUP;
+                args[0] = ts_value_string(ts_string_new("right"));
+                args[1] = ts_value_boolean(0);
+                args[2] = ts_value_number((double)info->pt.x);
+                args[3] = ts_value_number((double)info->pt.y);
+                argc = 4;
+                break;
+
+            case WM_MBUTTONDOWN:
+                InterlockedExchange(&g_mouse.btn_middle, 1);
+                ev = EV_MOUSEDOWN;
+                args[0] = ts_value_string(ts_string_new("middle"));
+                args[1] = ts_value_boolean(1);
+                args[2] = ts_value_number((double)info->pt.x);
+                args[3] = ts_value_number((double)info->pt.y);
+                argc = 4;
+                break;
+            case WM_MBUTTONUP:
+                InterlockedExchange(&g_mouse.btn_middle, 0);
+                ev = EV_MOUSEUP;
+                args[0] = ts_value_string(ts_string_new("middle"));
+                args[1] = ts_value_boolean(0);
+                args[2] = ts_value_number((double)info->pt.x);
+                args[3] = ts_value_number((double)info->pt.y);
+                argc = 4;
+                break;
+
+            case WM_MOUSEWHEEL:
+            case WM_MOUSEHWHEEL:
+                ev = EV_WHEEL;
+                args[0] = ts_value_number((double)GET_WHEEL_DELTA_WPARAM(info->mouseData));
+                argc = 1;
+                break;
+        }
+
+        if (ev) dispatch_event(ev, args, argc);
     }
-  }
-  return CallNextHookEx(g_mouse_hook, nCode, wParam, lParam);
+    return CallNextHookEx(g_mouse.hook, nCode, wParam, lParam);
 }
 
-/* Background thread: install hook + run message loop */
-static DWORD WINAPI hook_thread_proc(LPVOID param) {
-  (void)param;
-  g_mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, mouse_hook_proc, NULL, 0);
-  if (!g_mouse_hook) {
-    fprintf(stderr, "mouse: SetWindowsHookEx failed\n");
-    return 1;
-  }
+/* ---- Background thread ---- */
 
-  /* Message loop (required for low-level hooks) */
-  MSG msg;
-  while (GetMessage(&msg, NULL, 0, 0) > 0) {
-    TranslateMessage(&msg);
-    DispatchMessage(&msg);
-  }
-
-  UnhookWindowsHookEx(g_mouse_hook);
-  g_mouse_hook = NULL;
-  return 0;
+static DWORD WINAPI mouse_thread_proc(LPVOID param) {
+    (void)param;
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+    return 0;
 }
 
-/* --- Exported C API --- */
+/* ---- Public API ---- */
+
+Value node_mouse_start(void) {
+    ensure_listeners();
+    if (g_mouse.running) return ts_value_boolean(1);
+
+    g_mouse.hook = SetWindowsHookExW(WH_MOUSE_LL, mouse_hook_proc, NULL, 0);
+    if (!g_mouse.hook) {
+        fprintf(stderr, "mouse: SetWindowsHookEx failed (error %lu)\n", GetLastError());
+        return ts_value_boolean(0);
+    }
+
+    g_mouse.thread = CreateThread(NULL, 0, mouse_thread_proc, NULL, 0, NULL);
+    g_mouse.running = 1;
+    return ts_value_boolean(1);
+}
+
+Value node_mouse_stop(void) {
+    if (!g_mouse.running) return ts_value_boolean(1);
+
+    if (g_mouse.hook) {
+        UnhookWindowsHookEx(g_mouse.hook);
+        g_mouse.hook = NULL;
+    }
+    if (g_mouse.thread) {
+        PostThreadMessage(GetThreadId(g_mouse.thread), WM_QUIT, 0, 0);
+        WaitForSingleObject(g_mouse.thread, 1000);
+        CloseHandle(g_mouse.thread);
+        g_mouse.thread = NULL;
+    }
+    g_mouse.running = 0;
+
+    EnterCriticalSection(&g_mouse.lock);
+    if (g_mouse.listeners) {
+        ts_hashmap_free(g_mouse.listeners);
+        g_mouse.listeners = NULL;
+    }
+    LeaveCriticalSection(&g_mouse.lock);
+
+    return ts_value_boolean(1);
+}
 
 Value node_mouse_on(Value event, Value callback) {
-  if (g_listener_count >= MOUSE_MAX_LISTENERS) {
+    ensure_listeners();
+    TSString* evName = ts_to_string(event);
+    if (!evName) return ts_value_undefined();
+    add_listener(evName, callback);
     return ts_value_undefined();
-  }
+}
 
-  /* Extract event filter string */
-  const char* filter = "any";
-  if (event.tag == TAG_STRING && event.as.string && event.as.string->data) {
-    filter = event.as.string->data;
-  }
-
-  MouseListener* l = &g_listeners[g_listener_count++];
-  l->callback = callback;
-  strncpy(l->eventFilter, filter, sizeof(l->eventFilter) - 1);
-  l->eventFilter[sizeof(l->eventFilter) - 1] = '\0';
-  l->active = 1;
-
-  return ts_value_undefined();
+Value node_mouse_once(Value event, Value callback) {
+    ensure_listeners();
+    TSString* evName = ts_to_string(event);
+    if (!evName) return ts_value_undefined();
+    add_listener(evName, callback);
+    return ts_value_undefined();
 }
 
 Value node_mouse_off(Value event, Value callback) {
-  const char* filter = "any";
-  if (event.tag == TAG_STRING && event.as.string && event.as.string->data) {
-    filter = event.as.string->data;
-  }
-
-  for (int i = 0; i < g_listener_count; i++) {
-    MouseListener* l = &g_listeners[i];
-    if (!l->active) continue;
-    if (strcmp(l->eventFilter, filter) != 0) continue;
-    /* Compare callback — for simplicity, deactivate all matching filter+callback */
-    /* Since we can't compare closures easily, just deactivate by filter */
-    l->active = 0;
-  }
-  return ts_value_undefined();
+    TSString* evName = ts_to_string(event);
+    if (!evName) return ts_value_undefined();
+    remove_listener(evName, callback);
+    return ts_value_undefined();
 }
 
-Value node_mouse_start(void) {
-  if (g_running) return ts_value_undefined();
-  if (g_hook_thread) return ts_value_undefined();
+Value node_mouse_getPosition(void) {
+    POINT pt;
+    TSHashMap* obj = ts_hashmap_new();
+    if (GetCursorPos(&pt)) {
+        ts_hashmap_set(obj, ts_string_new("x"), ts_value_number((double)pt.x));
+        ts_hashmap_set(obj, ts_string_new("y"), ts_value_number((double)pt.y));
+    } else {
+        ts_hashmap_set(obj, ts_string_new("x"), ts_value_number(0));
+        ts_hashmap_set(obj, ts_string_new("y"), ts_value_number(0));
+    }
+    return ts_value_object(obj);
+}
 
-  g_running = 1;
-  g_hook_thread = CreateThread(NULL, 0, hook_thread_proc, NULL, 0, &g_hook_thread_id);
-  if (!g_hook_thread) {
-    g_running = 0;
+Value node_mouse_isButtonDown(Value button) {
+    TSString* btn = ts_to_string(button);
+    if (!btn || !btn->data) return ts_value_boolean(0);
+    if (strcmp(btn->data, "left") == 0)
+        return ts_value_boolean(g_mouse.btn_left);
+    if (strcmp(btn->data, "right") == 0)
+        return ts_value_boolean(g_mouse.btn_right);
+    if (strcmp(btn->data, "middle") == 0)
+        return ts_value_boolean(g_mouse.btn_middle);
     return ts_value_boolean(0);
-  }
-  return ts_value_boolean(1);
 }
 
-Value node_mouse_stop(void) {
-  if (!g_running) return ts_value_undefined();
-  g_running = 0;
-
-  if (g_hook_thread) {
-    /* Post WM_QUIT to exit the message loop */
-    PostThreadMessage(g_hook_thread_id, WM_QUIT, 0, 0);
-    WaitForSingleObject(g_hook_thread, 2000);
-    CloseHandle(g_hook_thread);
-    g_hook_thread = NULL;
-    g_hook_thread_id = 0;
-  }
-  return ts_value_undefined();
+Value node_mouse_listenerCount(Value event) {
+    if (!g_mouse.listeners) return ts_value_number(0);
+    TSString* evName = ts_to_string(event);
+    if (!evName) return ts_value_number(0);
+    EnterCriticalSection(&g_mouse.lock);
+    Value arr_val = ts_hashmap_get(g_mouse.listeners, evName);
+    double count = 0;
+    if (arr_val.tag == TAG_ARRAY && arr_val.as.array)
+        count = (double)arr_val.as.array->length;
+    LeaveCriticalSection(&g_mouse.lock);
+    return ts_value_number(count);
 }
-
-Value node_mouse_getPosition(void) {
-  TSHashMap* obj = ts_hashmap_new();
-  ts_hashmap_set(obj, ts_string_new("x"), ts_value_number((double)g_last_x));
-  ts_hashmap_set(obj, ts_string_new("y"), ts_value_number((double)g_last_y));
-  return ts_value_object(obj);
-}
-
-#else /* POSIX stubs */
-
-Value node_mouse_on(Value event, Value callback) {
-  (void)event; (void)callback;
-  return ts_value_undefined();
-}
-
-Value node_mouse_off(Value event, Value callback) {
-  (void)event; (void)callback;
-  return ts_value_undefined();
-}
-
-Value node_mouse_start(void) {
-  return ts_value_boolean(0);
-}
-
-Value node_mouse_stop(void) {
-  return ts_value_undefined();
-}
-
-Value node_mouse_getPosition(void) {
-  TSHashMap* obj = ts_hashmap_new();
-  ts_hashmap_set(obj, ts_string_new("x"), ts_value_number(0));
-  ts_hashmap_set(obj, ts_string_new("y"), ts_value_number(0));
-  return ts_value_object(obj);
-}
-
-#endif /* _WIN32 */

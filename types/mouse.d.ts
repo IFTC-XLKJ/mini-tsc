@@ -1,34 +1,47 @@
-/** Node.js `mouse` ambient types for mini-tsc. */
+/** Global mouse event monitoring for mini-tsc (Win32). */
 declare module "mouse" {
+  type MouseButton = "left" | "right" | "middle";
+
   interface MouseEvent {
-    /** X coordinate */
     x: number;
-    /** Y coordinate */
     y: number;
-    /** Button: 0=left, 1=right, 2=middle, -1=none(move/scroll) */
-    button: number;
-    /** Event type: "move", "left_click", "left_press", "left_release",
-     *  "right_click", "right_press", "right_release",
-     *  "middle_click", "middle_press", "middle_release", "scroll" */
-    eventType: string;
-    /** Scroll delta: positive=up, negative=down (only for scroll events) */
+    button: MouseButton;
+    pressed: boolean;
     delta: number;
   }
 
-  /** Register a listener for mouse events. Event types: "move", "click", "press", "release", "scroll", "left_click", "left_press", "left_release", "right_click", "right_press", "right_release", "middle_click", "middle_press", "middle_release", "any" */
-  function on(event: string, callback: (event: MouseEvent) => void): void;
+  interface MousePosition {
+    x: number;
+    y: number;
+  }
 
-  /** Remove a previously registered listener */
-  function off(event: string, callback: (event: MouseEvent) => void): void;
+  /** Start the global mouse hook. Must be called before on(). */
+  function start(): boolean;
 
-  /** Start listening for mouse events (installs a global mouse hook) */
-  function start(): void;
+  /** Stop the global mouse hook and remove all listeners. */
+  function stop(): boolean;
 
-  /** Stop listening for mouse events (removes the global mouse hook) */
-  function stop(): void;
+  /** Register a callback for a mouse event. */
+  function on(event: "mousemove", listener: (x: number, y: number) => void): void;
+  function on(event: "mousedown", listener: (button: MouseButton, pressed: boolean, x: number, y: number) => void): void;
+  function on(event: "mouseup", listener: (button: MouseButton, pressed: boolean, x: number, y: number) => void): void;
+  function on(event: "click", listener: (button: MouseButton, pressed: boolean, x: number, y: number) => void): void;
+  function on(event: "wheel", listener: (delta: number) => void): void;
 
-  /** Get the current mouse position */
-  function getPosition(): { x: number; y: number };
+  /** Register a one-time callback. */
+  function once(event: string, listener: (...args: any[]) => void): void;
 
-  export { MouseEvent, on, off, start, stop, getPosition };
+  /** Remove a previously registered callback. */
+  function off(event: string, listener: (...args: any[]) => void): void;
+
+  /** Get the current cursor position (screen coordinates). */
+  function getPosition(): MousePosition;
+
+  /** Check if a specific button is currently pressed. */
+  function isButtonDown(button: MouseButton): boolean;
+
+  /** Get the number of registered listeners for an event. */
+  function listenerCount(event: string): number;
+
+  export { start, stop, on, once, off, getPosition, isButtonDown, listenerCount };
 }

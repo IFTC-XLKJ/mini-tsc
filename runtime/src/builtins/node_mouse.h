@@ -3,19 +3,20 @@
 
 #include "runtime.h"
 
-/* Register a listener for mouse events */
-Value node_mouse_on(Value event, Value callback);
-
-/* Remove a previously registered listener */
-Value node_mouse_off(Value event, Value callback);
-
-/* Start listening for mouse events (installs a global mouse hook) */
+/* Lifecycle */
 Value node_mouse_start(void);
-
-/* Stop listening for mouse events (removes the global mouse hook) */
 Value node_mouse_stop(void);
 
-/* Get the current mouse position as { x: number, y: number } */
+/* Event registration */
+Value node_mouse_on(Value event, Value callback);
+Value node_mouse_once(Value event, Value callback);
+Value node_mouse_off(Value event, Value callback);
+
+/* State queries */
 Value node_mouse_getPosition(void);
+Value node_mouse_isButtonDown(Value button);
+
+/* Listener management */
+Value node_mouse_listenerCount(Value event);
 
 #endif /* NODE_MOUSE_H */
