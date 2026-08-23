@@ -456,7 +456,27 @@ export class StatementEmitter {
   }
 
   private emitForStatement(node: CNode): string {
-    const init = node.init ? this.emit(node.init).replace(/;$/, "") : "";
+    // Detect when loop variable is used as an index (init involves .length)
+    // and override type to int32_t for correct string/array indexing
+    let init = node.init ? this.emit(node.init).replace(/;$/, "") : "";
+
+    // Check if this is an index-based loop (init involves .length property access)
+    const isIndexLoop = node.init?.kind === "variable_decl" &&
+      node.init?.init?.kind === "binary_expression" &&
+      ((node.init?.init?.left?.kind === "property_access" &&
+        node.init?.init?.left?.property === "length") ||
+       (node.init?.init?.right?.kind === "property_access" &&
+        node.init?.init?.right?.property === "length"));
+
+    if (isIndexLoop && node.init?.name && node.init?.type === "double") {
+      // Override type from double to int32_t for index loops
+      const varName = node.init.name;
+      const initExpr = node.init?.init ? this.exprEmitter.emit(node.init.init) : "0";
+      init = `int32_t ${varName} = (int32_t)(${initExpr})`;
+      // Re-declare with int32_t type
+      this.exprEmitter.declareVar(varName, "int32_t");
+    }
+
     const condition = node.condition
       ? this.asCondition(this.exprEmitter.emit(node.condition), node.condition)
       : "";

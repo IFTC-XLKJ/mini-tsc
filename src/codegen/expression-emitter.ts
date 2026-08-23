@@ -315,7 +315,7 @@ export class ExpressionEmitter {
     const target = this.emit(node.target);
     let value = this.emit(node.value);
 
-    // String += operator: str += x → str = ts_string_concat(str, x)
+    // String += operator: str += x → str = ts_string_append(str, x) for memory efficiency
     if (op === "+=" && node.target) {
       const targetType = this.resolveTargetType(node.target);
       if (targetType === "TSString*" || targetType === "string") {
@@ -323,7 +323,25 @@ export class ExpressionEmitter {
           value.startsWith("ts_to_string(") || value.startsWith("ts_number_to_string(") ||
           value.includes("/*__ts_str*/")
           ? value : `ts_to_string(${value})`;
-        return `${target} = ts_string_concat(${target}, ${rightStr})`;
+        return `${target} = ts_string_append(${target}, ${rightStr})`;
+      }
+    }
+
+    // Optimize pattern: x = ts_string_concat(x, y) → x = ts_string_append(x, y)
+    // This frees the old x and avoids memory leaks in loops
+    if (op === "=" && value.startsWith("ts_string_concat(")) {
+      const targetType = this.resolveTargetType(node.target);
+      if (targetType === "TSString*" || targetType === "string") {
+        // Extract args from ts_string_concat(left, right)
+        const match = value.match(/^ts_string_concat\((.+),\s*(.+)\)$/);
+        if (match) {
+          const concatLeft = match[1].trim();
+          const concatRight = match[2].trim();
+          // Check if left operand of concat is the same as target
+          if (concatLeft === target) {
+            value = `ts_string_append(${target}, ${concatRight})`;
+          }
+        }
       }
     }
 
@@ -805,8 +823,12 @@ export class ExpressionEmitter {
       }
     }
 
-    // Modulo operator - C doesn't support % on doubles, use fmod()
+    // Modulo operator - use integer arithmetic when right operand is a small constant
     if (op === "%") {
+      // Check if right operand is a small integer constant (e.g., 10)
+      if (node.right?.kind === "number_literal" && Number.isInteger(node.right.value) && node.right.value > 0 && node.right.value <= 100) {
+        return `((int)(${left}) % ${node.right.value})`;
+      }
       return `fmod(${left}, ${right})`;
     }
 

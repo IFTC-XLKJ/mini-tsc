@@ -41,6 +41,7 @@ typedef struct TSString {
 TSString* ts_string_new(const char* cstr);
 TSString* ts_string_new_len(const char* data, int32_t len);
 TSString* ts_string_concat(TSString* a, TSString* b);
+TSString* ts_string_append(TSString* a, TSString* b);
 int ts_string_equals(TSString* a, TSString* b);
 TSString* ts_number_to_string(double n);
 char ts_string_char_at(TSString* s, int32_t index);

@@ -32,6 +32,37 @@ TSString* ts_string_concat(TSString* a, TSString* b) {
   return result;
 }
 
+/* Efficient append: frees 'a' if it has refcount 1, avoids double-copy in the common
+ * pattern  a = ts_string_append(a, b);  */
+TSString* ts_string_append(TSString* a, TSString* b) {
+  if (!b || !b->data || b->length == 0) return a;
+  if (!a || !a->data || a->length == 0) {
+    if (a) ts_string_free(a);
+    return ts_string_new_len(b->data, b->length);
+  }
+  int32_t aLen = a->length;
+  int32_t bLen = b->length;
+  int32_t totalLen = aLen + bLen;
+  /* If 'a' is the sole owner, try to realloc in-place to avoid a copy */
+  if (a->refcount == 1) {
+    char* newData = (char*)realloc(a->data, (size_t)totalLen + 1);
+    if (newData) {
+      memcpy(newData + aLen, b->data, (size_t)bLen);
+      newData[totalLen] = '\0';
+      a->data = newData;
+      a->length = totalLen;
+      return a;
+    }
+  }
+  /* Fallback: allocate new string, free old */
+  char* buf = (char*)malloc((size_t)totalLen + 1);
+  memcpy(buf, a->data, (size_t)aLen);
+  memcpy(buf + aLen, b->data, (size_t)bLen);
+  buf[totalLen] = '\0';
+  ts_string_free(a);
+  return ts_string_new_len(buf, totalLen);
+}
+
 int ts_string_equals(TSString* a, TSString* b) {
   if (a->length != b->length) return 0;
   return memcmp(a->data, b->data, a->length) == 0;
