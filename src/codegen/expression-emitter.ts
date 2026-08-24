@@ -323,11 +323,18 @@ export class ExpressionEmitter {
           value.startsWith("ts_to_string(") || value.startsWith("ts_number_to_string(") ||
           value.includes("/*__ts_str*/")
           ? value : `ts_to_string(${value})`;
+        // Optimization: single-char from charAt → ts_string_append_char
+        const charAtNewLenRe = /^ts_string_new_len\(\(char\[\]\)\{ts_string_char_at\((.+),\s*(.+)\),\s*0\},\s*1\)$/;
+        const rightCharMatch = rightStr.match(charAtNewLenRe);
+        if (rightCharMatch) {
+          return `${target} = ts_string_append_char(${target}, ts_string_char_at(${rightCharMatch[1]}, ${rightCharMatch[2]}))`;
+        }
         return `${target} = ts_string_append(${target}, ${rightStr})`;
       }
     }
 
     // Optimize pattern: x = ts_string_concat(x, y) → x = ts_string_append(x, y)
+    // Also: x = ts_string_concat(x, charAt(...)) → x = ts_string_append_char(x, ts_string_char_at(...))
     // This frees the old x and avoids memory leaks in loops
     if (op === "=" && value.startsWith("ts_string_concat(")) {
       const targetType = this.resolveTargetType(node.target);
@@ -339,7 +346,14 @@ export class ExpressionEmitter {
           const concatRight = match[2].trim();
           // Check if left operand of concat is the same as target
           if (concatLeft === target) {
-            value = `ts_string_append(${target}, ${concatRight})`;
+            // Optimization: single-char from charAt → ts_string_append_char
+            const charAtNewLenRe = /^ts_string_new_len\(\(char\[\]\)\{ts_string_char_at\((.+),\s*(.+)\),\s*0\},\s*1\)$/;
+            const rightCharMatch = concatRight.match(charAtNewLenRe);
+            if (rightCharMatch) {
+              value = `ts_string_append_char(${target}, ts_string_char_at(${rightCharMatch[1]}, ${rightCharMatch[2]}))`;
+            } else {
+              value = `ts_string_append(${target}, ${concatRight})`;
+            }
           }
         }
       }
@@ -547,6 +561,18 @@ export class ExpressionEmitter {
         };
         leftStr = stripTsToString(leftStr);
         rightStr = stripTsToString(rightStr);
+        // Optimization: single-char from charAt → use ts_string_append_char to avoid temp allocation
+        const charAtNewLenRe = /^ts_string_new_len\(\(char\[\]\)\{ts_string_char_at\((.+),\s*(.+)\),\s*0\},\s*1\)$/;
+        const rightCharMatch = rightStr.match(charAtNewLenRe);
+        const leftCharMatch = leftStr.match(charAtNewLenRe);
+        if (rightCharMatch) {
+          // left + charAt(obj, idx) → ts_string_append_char(left, ts_string_char_at(obj, idx))
+          return `ts_string_append_char(${leftStr}, ts_string_char_at(${rightCharMatch[1]}, ${rightCharMatch[2]}))`;
+        }
+        if (leftCharMatch) {
+          // charAt(obj, idx) + right → ts_string_append_char(right, ts_string_char_at(obj, idx))
+          return `ts_string_append_char(${rightStr}, ts_string_char_at(${leftCharMatch[1]}, ${leftCharMatch[2]}))`;
+        }
         return `ts_string_concat(${leftStr}, ${rightStr})`;
       }
     }
@@ -567,10 +593,23 @@ export class ExpressionEmitter {
       const leftLit = node.left?.kind === "string_literal" ? node.left.value : undefined;
       if (rightLit !== undefined && rightLit.length === 1) {
         const eq = op === "===" ? "==" : "!=";
+        // Optimization: if left is a charAt result (ts_string_new_len wrapping ts_string_char_at),
+        // use the inner ts_string_char_at directly to avoid creating a temp TSString*
+        const charAtRe = /^ts_string_new_len\(\(char\[\]\)\{ts_string_char_at\((.+),\s*(.+)\),\s*0\},\s*1\)$/;
+        const leftCharMatch = left.match(charAtRe);
+        if (leftCharMatch) {
+          return `ts_string_char_at(${leftCharMatch[1]}, ${leftCharMatch[2]}) ${eq} '${rightLit}'`;
+        }
         return `ts_string_char_at(${left}, 0) ${eq} '${rightLit}'`;
       }
       if (leftLit !== undefined && leftLit.length === 1) {
         const eq = op === "===" ? "==" : "!=";
+        // Optimization: if right is a charAt result, use inner ts_string_char_at directly
+        const charAtRe = /^ts_string_new_len\(\(char\[\]\)\{ts_string_char_at\((.+),\s*(.+)\),\s*0\},\s*1\)$/;
+        const rightCharMatch = right.match(charAtRe);
+        if (rightCharMatch) {
+          return `ts_string_char_at(${rightCharMatch[1]}, ${rightCharMatch[2]}) ${eq} '${leftLit}'`;
+        }
         return `ts_string_char_at(${right}, 0) ${eq} '${leftLit}'`;
       }
       const eq = op === "===" ? "" : "!";

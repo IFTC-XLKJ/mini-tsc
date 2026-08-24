@@ -63,6 +63,31 @@ TSString* ts_string_append(TSString* a, TSString* b) {
   return ts_string_new_len(buf, totalLen);
 }
 
+/* Append a single char — avoids allocating a temporary TSString */
+TSString* ts_string_append_char(TSString* a, char c) {
+  if (!a || !a->data || a->length == 0) {
+    if (a) ts_string_free(a);
+    return ts_string_new_len((const char[]){c, 0}, 1);
+  }
+  int32_t totalLen = a->length + 1;
+  if (a->refcount == 1) {
+    char* newData = (char*)realloc(a->data, (size_t)totalLen + 1);
+    if (newData) {
+      newData[a->length] = c;
+      newData[totalLen] = '\0';
+      a->data = newData;
+      a->length = totalLen;
+      return a;
+    }
+  }
+  char* buf = (char*)malloc((size_t)totalLen + 1);
+  memcpy(buf, a->data, (size_t)a->length);
+  buf[a->length] = c;
+  buf[totalLen] = '\0';
+  ts_string_free(a);
+  return ts_string_new_len(buf, totalLen);
+}
+
 int ts_string_equals(TSString* a, TSString* b) {
   if (a->length != b->length) return 0;
   return memcmp(a->data, b->data, a->length) == 0;
