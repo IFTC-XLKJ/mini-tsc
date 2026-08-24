@@ -481,7 +481,12 @@ export class StatementEmitter {
       ? this.asCondition(this.exprEmitter.emit(node.condition), node.condition)
       : "";
     const update = node.update ? this.exprEmitter.emit(node.update) : "";
-    const body = this.emitBlock(node.body);
+    let body = this.emitBlock(node.body);
+    // Insert periodic GC collection inside for-loop bodies so that
+    // temporary strings/arrays allocated during long loops are reclaimed
+    // before memory is exhausted. ts_gc_maybe_collect() is a no-op when
+    // the allocation threshold hasn't been reached, so overhead is minimal.
+    body = body.replace(/\n\}$/, `\n  ts_gc_maybe_collect();\n}`);
     return `for (${init}; ${condition}; ${update}) ${body}`;
   }
 
