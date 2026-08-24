@@ -561,6 +561,18 @@ export class ExpressionEmitter {
         const eq = op === "===" ? "" : "!";
         return `${eq}(${ptr})`;
       }
+      // Optimization: single-char string literal comparison → char comparison
+      // Avoids allocating a temporary ts_string_new("X") on every comparison.
+      const rightLit = node.right?.kind === "string_literal" ? node.right.value : undefined;
+      const leftLit = node.left?.kind === "string_literal" ? node.left.value : undefined;
+      if (rightLit !== undefined && rightLit.length === 1) {
+        const eq = op === "===" ? "==" : "!=";
+        return `ts_string_char_at(${left}, 0) ${eq} '${rightLit}'`;
+      }
+      if (leftLit !== undefined && leftLit.length === 1) {
+        const eq = op === "===" ? "==" : "!=";
+        return `ts_string_char_at(${right}, 0) ${eq} '${leftLit}'`;
+      }
       const eq = op === "===" ? "" : "!";
       // Headers.get / hashmap get return Value — coerce to TSString*
       let leftStr = left;
