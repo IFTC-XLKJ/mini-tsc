@@ -28,8 +28,7 @@ function pow2(n: number): string {
   return result;
 }
 
-const n: number = 10;
+const n: number = 5;
 const answer: string = pow2(n);
 console.log("Computing 2^" + n + "...");
-console.log("Result has " + answer.length + " digits");
-console.log(answer);
+console.log("Result: " + answer);
