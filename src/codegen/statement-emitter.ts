@@ -165,6 +165,18 @@ export class StatementEmitter {
     }
 
     let initExpr = node.init ? this.exprEmitter.emit(node.init) : "";
+
+    // Optimization: if a string variable is initialized with
+    // ts_string_new_len((char[]){ts_string_char_at(X,Y),0},1), downgrade it to plain char
+    // to avoid a wasteful TSString* allocation just to extract a char back.
+    const charAtNewLenRe = /^ts_string_new_len\(\(char\[\]\)\{ts_string_char_at\((.+),\s*(.+)\),\s*0\},\s*1\)$/;
+    const charAtInitMatch = (type === 'string' || type === 'TSString*') ? initExpr.match(charAtNewLenRe) : null;
+    if (charAtInitMatch && type !== 'Value') {
+      type = 'char';
+      initExpr = `ts_string_char_at(${charAtInitMatch[1]}, ${charAtInitMatch[2]})`;
+      this.exprEmitter.registerCharInline(node.name, initExpr);
+    }
+
     // File-scope statics need zero-init when no initializer (C defaults, but be explicit for clarity)
     let init = initExpr ? ` = ${initExpr}` : (node.isStatic ? " = {0}" : "");
     // For scalar statics, {0} works; for pointers too. Prefer typed zero:
@@ -306,6 +318,7 @@ export class StatementEmitter {
 
     // Register variable type for console.log wrapping
     this.exprEmitter.declareVar(node.name, type);
+
     const cName = sanitizeCIdentifier(node.name);
     return `${qualifier}${type} ${cName}${init};`;
   }
@@ -445,13 +458,30 @@ export class StatementEmitter {
 
   private emitWhileStatement(node: CNode): string {
     const condition = this.asCondition(this.exprEmitter.emit(node.condition), node.condition);
-    const body = this.emitBlock(node.body);
+    let body = this.emitBlock(node.body);
+    // Free loop-local TSString* temporaries and collect GC
+    const loopTsVars: string[] = [];
+    body.replace(/TSString\*\s+(\w+)\s*=/g, (_m: string, v: string) => { loopTsVars.push(v); return _m; });
+    if (loopTsVars.length > 0) {
+      const freeLines = loopTsVars.map(v => `  ts_string_free(${v}); ${v} = NULL;`).join("\n");
+      body = body.replace(/\n\}$/, `\n${freeLines}\n  ts_gc_maybe_collect();\n}`);
+    } else {
+      body = body.replace(/\n\}$/, `\n  ts_gc_maybe_collect();\n}`);
+    }
     return `while (${condition}) ${body}`;
   }
 
   private emitDoWhileStatement(node: CNode): string {
     const condition = this.asCondition(this.exprEmitter.emit(node.condition), node.condition);
-    const body = this.emitBlock(node.body);
+    let body = this.emitBlock(node.body);
+    const loopTsVars: string[] = [];
+    body.replace(/TSString\*\s+(\w+)\s*=/g, (_m: string, v: string) => { loopTsVars.push(v); return _m; });
+    if (loopTsVars.length > 0) {
+      const freeLines = loopTsVars.map(v => `  ts_string_free(${v}); ${v} = NULL;`).join("\n");
+      body = body.replace(/\n\}$/, `\n${freeLines}\n  ts_gc_maybe_collect();\n}`);
+    } else {
+      body = body.replace(/\n\}$/, `\n  ts_gc_maybe_collect();\n}`);
+    }
     return `do ${body} while (${condition});`;
   }
 
@@ -486,7 +516,16 @@ export class StatementEmitter {
     // temporary strings/arrays allocated during long loops are reclaimed
     // before memory is exhausted. ts_gc_maybe_collect() is a no-op when
     // the allocation threshold hasn't been reached, so overhead is minimal.
-    body = body.replace(/\n\}$/, `\n  ts_gc_maybe_collect();\n}`);
+    // Also free any TSString* variables declared inside the loop body so
+    // the conservative GC stack scan doesn't keep dead temporaries alive.
+    const loopTsVars: string[] = [];
+    body.replace(/TSString\*\s+(\w+)\s*=/g, (_m: string, v: string) => { loopTsVars.push(v); return _m; });
+    if (loopTsVars.length > 0) {
+      const freeLines = loopTsVars.map(v => `  ts_string_free(${v}); ${v} = NULL;`).join("\n");
+      body = body.replace(/\n\}$/, `\n${freeLines}\n  ts_gc_maybe_collect();\n}`);
+    } else {
+      body = body.replace(/\n\}$/, `\n  ts_gc_maybe_collect();\n}`);
+    }
     return `for (${init}; ${condition}; ${update}) ${body}`;
   }
 

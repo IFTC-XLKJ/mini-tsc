@@ -46,6 +46,9 @@ export class ExpressionEmitter {
   private localSymbols: Set<string> = new Set();
   /** Map of original names to mangled names for imported symbols */
   private importedSymbols: Map<string, string> = new Map();
+  /** Maps variable names to their inline char expression when assigned from ts_string_new_len((char[]){ts_string_char_at(X,Y),0},1). 
+   *  Used to avoid creating a wasteful TSString* just to extract a char back. */
+  private charAtInlineMap: Map<string, string> = new Map();
   /** Tracks the last builtin module function call for special argument handling */
   private _lastBuiltinCall: string | null = null;
   /** Map of namespace import names to their module file paths (for `import * as X from "..."`) */
@@ -75,6 +78,16 @@ export class ExpressionEmitter {
     if (!this.varTypes.has(name)) return true;
     // Namespace imports (e.g. `import * as fs from "fs"`) are still modules
     return this.namespaceModulePaths.has(name);
+  }
+
+  /** Register that a variable was assigned from ts_string_new_len((char[]){ts_string_char_at(X,Y),0},1). */
+  registerCharInline(varName: string, innerExpr: string): void {
+    this.charAtInlineMap.set(varName, innerExpr);
+  }
+
+  /** Look up whether a variable is a charAt-inline alias. Returns the inner ts_string_char_at(...) expr or null. */
+  lookupCharInline(varName: string): string | null {
+    return this.charAtInlineMap.get(varName) || null;
   }
 
   /** Register an imported symbol mapping */
@@ -600,6 +613,11 @@ export class ExpressionEmitter {
         if (leftCharMatch) {
           return `ts_string_char_at(${leftCharMatch[1]}, ${leftCharMatch[2]}) ${eq} '${rightLit}'`;
         }
+        // Optimization: if left is a charAt-inlined variable, use its inner expression directly
+        const leftInline = this.charAtInlineMap.get(left);
+        if (leftInline) {
+          return `${leftInline} ${eq} '${rightLit}'`;
+        }
         return `ts_string_char_at(${left}, 0) ${eq} '${rightLit}'`;
       }
       if (leftLit !== undefined && leftLit.length === 1) {
@@ -609,6 +627,11 @@ export class ExpressionEmitter {
         const rightCharMatch = right.match(charAtRe);
         if (rightCharMatch) {
           return `ts_string_char_at(${rightCharMatch[1]}, ${rightCharMatch[2]}) ${eq} '${leftLit}'`;
+        }
+        // Optimization: if right is a charAt-inlined variable, use its inner expression directly
+        const rightInline = this.charAtInlineMap.get(right);
+        if (rightInline) {
+          return `${rightInline} ${eq} '${leftLit}'`;
         }
         return `ts_string_char_at(${right}, 0) ${eq} '${leftLit}'`;
       }
