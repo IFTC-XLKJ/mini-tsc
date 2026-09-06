@@ -1488,7 +1488,15 @@ extern TsErrorContext _ts_current_error;
       CompilerDriver._lldCached = useLld;
     }
     // LTO needs lld on this toolchain; enables cross-file dead-code elimination.
-    const lldFlags = useLld ? ["-fuse-ld=lld", "-flto"] : [];
+    // NOTE: we deliberately do NOT pass -flto here. Whole-program LTO lets the
+    // optimizer keep GC-managed object pointers (e.g. TSString*) in registers
+    // instead of on the stack, so the runtime's conservative mark-sweep GC
+    // (which scans the raw stack memory range in gc.c) fails to see live objects
+    // and collects them prematurely -> use-after-free / heap corruption
+    // (observed as 0xC0000005 or 0xC0000374 on Windows). Section dead-code
+    // stripping (-Wl,/OPT:REF,/OPT:ICF below) still removes unused code without
+    // requiring -flto. Users who really want LTO can opt in via --clang -flto.
+    const lldFlags = useLld ? ["-fuse-ld=lld"] : [];
 
     // Windows: embed VERSIONINFO (+ optional icon) from app.json build metadata
     let resourceObj: string | undefined;
