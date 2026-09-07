@@ -93,3 +93,223 @@ static void net_fire_listeners(TSHashMap* listeners, const char* ev, Value* args
     }
   }
 }
+static NetServer* net_server_from(Value self) {
+  if (self.tag != TAG_OBJECT || !self.as.object) return NULL;
+  Value impl = ts_hashmap_get((TSHashMap*)self.as.object, ts_string_new("_impl"));
+  if (impl.tag != TAG_OBJECT || !impl.as.object) return NULL;
+  NetServer* s = (NetServer*)impl.as.object;
+  return (s && s->type_tag == NET_SERVER_TAG) ? s : NULL;
+}
+static NetConn* net_conn_from(Value self) {
+  if (self.tag != TAG_OBJECT || !self.as.object) return NULL;
+  Value impl = ts_hashmap_get((TSHashMap*)self.as.object, ts_string_new("_impl"));
+  if (impl.tag != TAG_OBJECT || !impl.as.object) return NULL;
+  NetConn* c = (NetConn*)impl.as.object;
+  return (c && c->type_tag == NET_CONN_TAG) ? c : NULL;
+}
+static void net_obj_set(Value self, const char* k, Value v) {
+  TSHashMap* m = (TSHashMap*)self.as.object;
+  if (m) ts_hashmap_set(m, ts_string_new(k), v);
+}
+static Value net_socket_new(int fd, int isClient) {
+  TSHashMap* o = ts_hashmap_new();
+  NetConn* c = (NetConn*)malloc(sizeof(NetConn));
+  c->type_tag = NET_CONN_TAG; c->fd = fd; c->closed = 0; c->isClient = isClient;
+  c->connectFired = 0; c->listeners = ts_hashmap_new(); c->next = g_conns; g_conns = c;
+  ts_hashmap_set(o, ts_string_new("_impl"), ts_value_object(c));
+  ts_hashmap_set(o, ts_string_new("_listeners"), ts_value_object(c->listeners));
+  ts_hashmap_set(o, ts_string_new("_fd"), ts_value_number((double)fd));
+  ts_hashmap_set(o, ts_string_new("connecting"), ts_value_boolean(isClient ? 1 : 0));
+  ts_hashmap_set(o, ts_string_new("destroyed"), ts_value_boolean(0));
+  ts_hashmap_set(o, ts_string_new("readable"), ts_value_boolean(1));
+  ts_hashmap_set(o, ts_string_new("writable"), ts_value_boolean(1));
+  c->obj = ts_value_object(o);
+  return ts_value_object(o);
+}
+static Value net_server_new(Value callback) {
+  TSHashMap* o = ts_hashmap_new();
+  NetServer* s = (NetServer*)malloc(sizeof(NetServer));
+  s->type_tag = NET_SERVER_TAG; s->fd = -1; s->listening = 0; s->closed = 0;
+  s->callback = callback; s->listeners = ts_hashmap_new(); s->backlog = 128;
+  s->q_head = s->q_tail = NULL;
+#ifdef _WIN32
+  InitializeCriticalSection(&s->q_mu); s->thread = NULL;
+#else
+  pthread_mutex_init(&s->q_mu, NULL);
+#endif
+  s->next = g_servers; g_servers = s;
+  ts_hashmap_set(o, ts_string_new("_impl"), ts_value_object(s));
+  ts_hashmap_set(o, ts_string_new("_listeners"), ts_value_object(s->listeners));
+  ts_hashmap_set(o, ts_string_new("listening"), ts_value_boolean(0));
+  return ts_value_object(o);
+}
+static void net_socket_close(Value self, NetConn* c) {
+  if (!c || c->closed) return;
+  if (c->fd >= 0) { CLOSE_SOCKET(c->fd); c->fd = -1; }
+  c->closed = 1;
+  net_obj_set(self, "destroyed", ts_value_boolean(1));
+  net_obj_set(self, "readable", ts_value_boolean(0));
+  net_obj_set(self, "writable", ts_value_boolean(0));
+  NetConn** p = &g_conns;
+  while (*p) { if (*p == c) { *p = c->next; break; } p = &(*p)->next; }
+}
+
+static void net_q_push(NetServer* s, NetAccept* a) {
+#ifdef _WIN32
+  EnterCriticalSection(&s->q_mu);
+#else
+  pthread_mutex_lock(&s->q_mu);
+#endif
+  a->next = NULL;
+  if (s->q_tail) s->q_tail->next = a; else s->q_head = a;
+  s->q_tail = a;
+#ifdef _WIN32
+  LeaveCriticalSection(&s->q_mu);
+#else
+  pthread_mutex_unlock(&s->q_mu);
+#endif
+}
+static NetAccept* net_q_pop(NetServer* s) {
+  NetAccept* a = NULL;
+#ifdef _WIN32
+  EnterCriticalSection(&s->q_mu);
+#else
+  pthread_mutex_lock(&s->q_mu);
+#endif
+  if (s->q_head) { a = s->q_head; s->q_head = a->next; if (!s->q_head) s->q_tail = NULL; }
+#ifdef _WIN32
+  LeaveCriticalSection(&s->q_mu);
+#else
+  pthread_mutex_unlock(&s->q_mu);
+#endif
+  return a;
+}
+#ifdef _WIN32
+static DWORD WINAPI net_accept_thread(LPVOID arg) ;
+#else
+static void* net_accept_thread(void* arg) {
+#endif
+  NetServer* s = (NetServer*)arg;
+  for (;;) {
+    if (s->closed || s->fd < 0) break;
+    struct sockaddr_in caddr; socklen_t clen = sizeof(caddr);
+    int fd = (int)accept(s->fd, (struct sockaddr*)&caddr, &clen);
+    if (fd < 0) {
+#ifdef _WIN32
+      Sleep(5);
+#else
+      usleep(5000);
+#endif
+      continue;
+    }
+    net_set_nonblocking(fd);
+    NetAccept* na = (NetAccept*)malloc(sizeof(NetAccept));
+    na->fd = fd; na->addr = caddr; na->next = NULL;
+    net_q_push(s, na);
+  }
+#ifdef _WIN32
+  return 0;
+#else
+  return NULL;
+#endif
+static int net_resolve_port(Value pv) {
+  if (pv.tag == TAG_STRING && pv.as.string) return atoi(pv.as.string->data);
+  return (int)ts_to_number(pv);
+}
+Value node_net_createServer(Value callback) {
+  net_ensure_wsa();
+  return net_server_new(callback);
+}
+Value node_net_server_listen(Value serverVal, Value portVal, Value callback) {
+  NetServer* s = net_server_from(serverVal);
+  if (!s) { TS_THROW(ts_value_string(ts_string_new("Invalid net Server"))); return ts_value_undefined(); }
+  net_ensure_wsa();
+  if (s->closed) { TS_THROW(ts_value_string(ts_string_new("Server closed"))); return ts_value_undefined(); }
+  if (s->listening) return serverVal;
+  int port = net_resolve_port(portVal);
+  s->fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+  if (s->fd < 0) { TS_THROW(ts_value_string(ts_string_new("socket failed"))); return ts_value_undefined(); }
+  int opt = 1;
+  setsockopt(s->fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons((uint16_t)port);
+  if (bind(s->fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    CLOSE_SOCKET(s->fd); s->fd = -1;
+    Value err = ts_value_string(ts_string_new("bind failed"));
+    net_fire_listeners(s->listeners, "error", &err, 1);
+    TS_THROW(err); return ts_value_undefined();
+  }
+  if (listen(s->fd, s->backlog) < 0) { CLOSE_SOCKET(s->fd); s->fd = -1; TS_THROW(ts_value_string(ts_string_new("listen failed"))); return ts_value_undefined(); }
+  s->listening = 1;
+  net_obj_set(serverVal, "listening", ts_value_boolean(1));
+  unsigned short lp = net_local_port(s->fd);
+  net_obj_set(serverVal, "localPort", ts_value_number((double)lp));
+#ifdef _WIN32
+  s->thread = CreateThread(NULL, 0, net_accept_thread, s, 0, NULL);
+#else
+  pthread_create(&s->thread, NULL, net_accept_thread, s);
+#endif
+  net_fire_listeners(s->listeners, "listening", NULL, 0);
+  if (callback.tag == TAG_FUNCTION && callback.as.function) ts_value_call(callback, NULL, 0);
+  return serverVal;
+}
+Value node_net_server_on(Value serverVal, Value event, Value callback) {
+  NetServer* s = net_server_from(serverVal);
+  if (!s) return serverVal;
+  TSString* ev = ts_to_string(event);
+  if (ev && ev->data && callback.tag == TAG_FUNCTION) {
+    if (strcmp(ev->data, "connection") == 0) s->callback = callback;
+    net_add_listener(s->listeners, ev->data, callback);
+  }
+  return serverVal;
+}
+Value node_net_server_once(Value serverVal, Value event, Value callback) {
+  NetServer* s = net_server_from(serverVal);
+  if (!s) return serverVal;
+  TSString* ev = ts_to_string(event);
+  if (ev && ev->data && callback.tag == TAG_FUNCTION) net_add_listener(s->listeners, ev->data, callback);
+  return serverVal;
+}
+Value node_net_server_off(Value serverVal, Value event, Value callback) {
+  NetServer* s = net_server_from(serverVal);
+  if (!s) return serverVal;
+  TSString* ev = ts_to_string(event);
+  if (ev && ev->data) net_remove_listener(s->listeners, ev->data, callback);
+  return serverVal;
+}
+Value node_net_server_close(Value serverVal, Value callback) {
+  NetServer* s = net_server_from(serverVal);
+  if (!s) return serverVal;
+  if (!s->closed) {
+    s->closed = 1;
+    if (s->fd >= 0) { CLOSE_SOCKET(s->fd); s->fd = -1; }
+    s->listening = 0;
+    net_obj_set(serverVal, "listening", ts_value_boolean(0));
+    net_fire_listeners(s->listeners, "close", NULL, 0);
+  }
+  if (callback.tag == TAG_FUNCTION && callback.as.function) ts_value_call(callback, NULL, 0);
+  return serverVal;
+}
+Value node_net_server_address(Value serverVal) {
+  NetServer* s = net_server_from(serverVal);
+  if (!s) return ts_value_null();
+  TSHashMap* info = ts_hashmap_new();
+  unsigned short p = s->listening ? net_local_port(s->fd) : 0;
+  ts_hashmap_set(info, ts_string_new("address"), ts_value_string(ts_string_new("0.0.0.0")));
+  ts_hashmap_set(info, ts_string_new("port"), ts_value_number((double)p));
+  ts_hashmap_set(info, ts_string_new("family"), ts_value_string(ts_string_new("IPv4")));
+  return ts_value_object(info);
+}
+Value node_net_server_getConnections(Value serverVal, Value callback) {
+  int count = 0;
+  for (NetConn* c = g_conns; c; c = c->next) if (!c->isClient && !c->closed) count++;
+  if (callback.tag == TAG_FUNCTION && callback.as.function) {
+    Value args[2]; args[0] = ts_value_null(); args[1] = ts_value_number((double)count);
+    ts_value_call(callback, args, 2);
+  }
+  return ts_value_number((double)count);
+}
+Value node_net_server_ref(Value serverVal) { return serverVal; }
+Value node_net_server_unref(Value serverVal) { return serverVal; }
+}
