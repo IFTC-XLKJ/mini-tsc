@@ -91,10 +91,264 @@ static void net_ensure_wsa(void) {
 
 static void net_set_nonblocking(int fd) {
 #ifdef _WIN32
-  u_long mode =  ?1;
-  ioctlsocket((SOCKET)fd,, FIONBIO,, &mode);
+  u_long mode = 1;
+  ioctlsocket((SOCKET)fd, FIONBIO, &mode);
 #else
-  int fl = fcntl(fd,, F_GETFL,, 0);
-  if (fl >= 0) fcntl(fd,, F_SETFL,, fl | O_NONBLOCK);
+  int fl = fcntl(fd, F_GETFL, 0);
+  if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 #endif
+}
+static const char* net_addr_string(struct sockaddr_in* a, char* out, int cap) {
+  char tmp[INET_ADDRSTRLEN];
+  const char* p = inet_ntop(AF_INET, &a->sin_addr, tmp, sizeof(tmp));
+  if (p) { snprintf(out, cap, "%s", p); } else { snprintf(out, cap, "0.0.0.0"); }
+  return out;
+}
+
+static unsigned short net_local_port(int fd) {
+  struct sockaddr_in a;
+  socklen_t len = sizeof(a);
+  memset(&a, 0, sizeof(a));
+  if (getsockname((SOCKET)fd, (struct sockaddr*)&a, &len) == 0)
+    return ntohs(a.sin_port);
+  return 0;
+}
+
+static unsigned short net_remote_port(int fd) {
+  struct sockaddr_in a;
+  socklen_t len = sizeof(a);
+  memset(&a, 0, sizeof(a));
+  if (getpeername((SOCKET)fd, (struct sockaddr*)&a, &len) == 0)
+    return ntohs(a.sin_port);
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Listener helpers (listeners hashmap: event -> TSArray of callbacks) */
+/* ------------------------------------------------------------------ */
+static void net_add_listener(TSHashMap* listeners, const char* ev, Value cb) {
+  if (!listeners || ev == NULL) return;
+  TSString* key = ts_string_new(ev);
+  Value arrVal = ts_hashmap_get(listeners, key);
+  TSArray* arr = NULL;
+  if (arrVal.tag == TAG_ARRAY && arrVal.as.array) {
+    arr = arrVal.as.array;
+  } else {
+    arr = ts_array_new();
+    ts_hashmap_set(listeners, key, ts_value_array(arr));
+  }
+  ts_array_push(arr, cb);
+}
+
+static void net_remove_listener(TSHashMap* listeners, const char* ev, Value cb) {
+  if (!listeners || ev == NULL) return;
+  TSString* key = ts_string_new(ev);
+  Value arrVal = ts_hashmap_get(listeners, key);
+  if (arrVal.tag == TAG_ARRAY && arrVal.as.array) {
+    TSArray* arr = arrVal.as.array;
+    for (int i = 0; i < arr->length; i++) {
+      Value cur = ts_array_get(arr, i);
+      int match = 0;
+      if (cb.tag == TAG_FUNCTION && cur.tag == TAG_FUNCTION)
+        match = (cur.as.function == cb.as.function);
+      else if (cb.tag == TAG_OBJECT && cur.tag == TAG_OBJECT)
+        match = (cur.as.object == cb.as.object);
+      if (match) {
+        TSArray* neu = ts_array_new();
+        for (int j = 0; j < arr->length; j++)
+          if (j != i) ts_array_push(neu, ts_array_get(arr, j));
+        ts_hashmap_set(listeners, key, ts_value_array(neu));
+        break;
+      }
+    }
+  }
+}
+
+static void net_fire_listeners(TSHashMap* listeners, const char* ev, Value* args, int argc) {
+  if (!listeners || ev == NULL) return;
+  Value arrVal = ts_hashmap_get(listeners, ts_string_new(ev));
+  if (arrVal.tag == TAG_ARRAY && arrVal.as.array) {
+    TSArray* arr = arrVal.as.array;
+    for (int i = 0; i < arr->length; i++) {
+      Value fn = ts_array_get(arr, i);
+      if (fn.tag == TAG_FUNCTION && fn.as.function)
+        ts_value_call(fn, args, argc);
+    }
+/* ------------------------------------------------------------------ */
+/* Object→NetConn/NetServer extraction                                  */
+/* ------------------------------------------------------------------ */
+static NetServer* net_server_from(Value self) {
+  if (self.tag != TAG_OBJECT || !self.as.object) return NULL;
+  TSHashMap* map = (TSHashMap*)self.as.object;
+  Value impl = ts_hashmap_get(map, ts_string_new("_impl"));
+  if (impl.tag != TAG_OBJECT || !impl.as.object) return NULL;
+  NetServer* s = (NetServer*)impl.as.object;
+  return (s && s->type_tag == NET_SERVER_TAG) ? s : NULL;
+}
+
+static NetConn* net_conn_from(Value self) {
+  if (self.tag != TAG_OBJECT || !self.as.object) return NULL;
+  TSHashMap* map = (TSHashMap*)self.as.object;
+  Value impl = ts_hashmap_get(map, ts_string_new("_impl"));
+  if (impl.tag != TAG_OBJECT || !impl.as.object) return NULL;
+  NetConn* c = (NetConn*)impl.as.object;
+  return (c && c->type_tag == NET_CONN_TAG) ? c : NULL;
+}
+
+static void net_conn_setprop(Value self, const char* k, Value v) {
+  TSHashMap* m = (TSHashMap*)self.as.object;
+  if (m) ts_hashmap_set(m, ts_string_new(k), v);
+}
+
+static Value net_socket_new(int fd, int isClient) {
+  TSHashMap* o = ts_hashmap_new();
+  NetConn* c = (NetConn*)malloc(sizeof(NetConn));
+  c->type_tag = NET_CONN_TAG;
+  c->fd = fd;
+  c->closed = 0;
+  c->isClient = isClient;
+  c->connectFired = 0;
+  c->listeners = ts_hashmap_new();
+  c->next = g_conns;
+  g_conns = c;
+  ts_hashmap_set(o, ts_string_new("_impl"), ts_value_object(c));
+  ts_hashmap_set(o, ts_string_new("_listeners"), ts_value_object(c->listeners));
+  ts_hashmap_set(o, ts_string_new("_fd"), ts_value_number((double)fd));
+  ts_hashmap_set(o, ts_string_new("connecting"), ts_value_boolean(isClient ? 1 : 0));
+  ts_hashmap_set(o, ts_string_new("destroyed"), ts_value_boolean(0));
+  ts_hashmap_set(o, ts_string_new("readable"), ts_value_boolean(1));
+  ts_hashmap_set(o, ts_string_new("writable"), ts_value_boolean(1));
+  c->obj = ts_value_object(o);
+  return ts_value_object(o);
+}
+
+static Value net_server_new(Value callback) {
+  TSHashMap* o = ts_hashmap_new();
+  NetServer* s = (NetServer*)malloc(sizeof(NetServer));
+  s->type_tag = NET_SERVER_TAG;
+  s->fd = -1;
+  s->listening = 0;
+  s->closed = 0;
+  s->callback = callback;
+  s->listeners = ts_hashmap_new();
+  s->backlog = 128;
+  s->q_head = s->q_tail = NULL;
+#ifdef _WIN32
+  InitializeCriticalSection(&s->q_mu);
+  s->thread = NULL;
+#else
+  pthread_mutex_init(&s->q_mu, NULL);
+#endif
+  s->next = g_servers;
+  g_servers = s;
+  ts_hashmap_set(o, ts_string_new("_impl"), ts_value_object(s));
+  ts_hashmap_set(o, ts_string_new("_listeners"), ts_value_object(s->listeners));
+  ts_hashmap_set(o, ts_string_new("listening"), ts_value_boolean(0));
+  return ts_value_object(o);
+}
+
+static void net_socket_close(Value self, NetConn* c) {
+  if (!c || c->closed) return;
+  if (c->fd >= 0) { CLOSE_SOCKET(c->fd); c->fd = -1; }
+  c->closed = 1;
+  net_conn_setprop(self, "destroyed", ts_value_boolean(1));
+  net_conn_setprop(self, "readable", ts_value_boolean(0));
+  net_conn_setprop(self, "writable", ts_value_boolean(0));
+  NetConn** p = &g_conns;
+  while (*p) {
+    if (*p == c) { *p = c->next; break; }
+    p = &(*p)->next;
+  }
+}
+
+static void net_fire_event(Value self, const char* ev, Value* args, int argc) {
+  NetConn* c = net_conn_from(self);
+  if (c) net_fire_listeners(c->listeners, ev, args, argc);
+}
+
+/* ------------------------------------------------------------------ */
+/* Server accept queue + thread                                        */
+/* ------------------------------------------------------------------ */
+static void net_q_push(NetServer* s, NetAccept* a) {
+#ifdef _WIN32
+  EnterCriticalSection(&s->q_mu);
+#else
+  pthread_mutex_lock(&s->q_mu);
+#endif
+  a->next = NULL;
+  if (s->q_tail) s->q_tail->next = a;
+  else s->q_head = a;
+  s->q_tail = a;
+#ifdef _WIN32
+  LeaveCriticalSection(&s->q_mu);
+#else
+  pthread_mutex_unlock(&s->q_mu);
+#endif
+}
+
+static NetAccept* net_q_pop(NetServer* s) {
+  NetAccept* a = NULL;
+#ifdef _WIN32
+  EnterCriticalSection(&s->q_mu);
+#else
+  pthread_mutex_lock(&s->q_mu);
+#endif
+  if (s->q_head) {
+    a = s->q_head;
+    s->q_head = a->next;
+    if (!s->q_head) s->q_tail = NULL;
+  }
+#ifdef _WIN32
+  LeaveCriticalSection(&s->q_mu);
+#else
+  pthread_mutex_unlock(&s->q_mu);
+#endif
+  return a;
+}
+
+#ifdef _WIN32
+static DWORD WINAPI net_accept_thread(LPVOID arg) {
+#else
+static void* net_accept_thread(void* arg) {
+#endif
+  NetServer* s = (NetServer*)arg;
+  for (;;) {
+    if (s->closed || s->fd < 0) break;
+    struct sockaddr_in caddr;
+    socklen_t clen = sizeof(caddr);
+    int fd = (int)accept(s->fd, (struct sockaddr*)&caddr, &clen);
+    if (fd < 0) {
+#ifdef _WIN32
+      Sleep(5);
+#else
+      usleep(5000);
+#endif
+      continue;
+    }
+    net_set_nonblocking(fd);
+    NetAccept* na = (NetAccept*)malloc(sizeof(NetAccept));
+    na->fd = fd;
+    na->addr = caddr;
+    na->next = NULL;
+    net_q_push(s, na);
+  }
+#ifdef _WIN32
+  return 0;
+#else
+  return NULL;
+#endif
+}
+  }
+  char onceKey[256];
+  snprintf(onceKey, sizeof(onceKey), "%s##once", ev);
+  Value onceVal = ts_hashmap_get(listeners, ts_string_new(onceKey));
+  if (onceVal.tag == TAG_ARRAY && onceVal.as.array) {
+    TSArray* oarr = onceVal.as.array;
+    for (int i = 0; i < oarr->length; i++) {
+      Value fn = ts_array_get(oarr, i);
+      if (fn.tag == TAG_FUNCTION && fn.as.function)
+        ts_value_call(fn, args, argc);
+    }
+    ts_hashmap_set(listeners, ts_string_new(onceKey), ts_value_array(ts_array_new()));
+  }
 }
