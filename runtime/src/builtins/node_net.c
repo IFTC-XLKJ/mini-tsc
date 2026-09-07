@@ -416,10 +416,6 @@ Value node_net_server_listen(Value serverVal, Value portVal, Value callback) {
   /* Listen callback */
   if (callback.tag == TAG_FUNCTION && callback.as.function) {
     ts_value_call(callback, NULL, 0);
-    /* Also treat the first arg as the connection listener if passed */
-    if (s->callback.tag != TAG_FUNCTION && s->callback.as.function == NULL) {
-      s->callback = callback;
-    }
   }
   return serverVal;
 }
