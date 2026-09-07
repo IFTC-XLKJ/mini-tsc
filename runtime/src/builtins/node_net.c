@@ -592,6 +592,94 @@ Value node_net_socket_write(Value self, Value data) {
 }
 
 Value node_net_socket_end(Value self, Value data) {
+Value node_net_socket_on(Value self, Value event, Value callback) {
+  NetConn* c = net_conn_from(self);
+  if (!c) return self;
+  TSString* ev = ts_to_string(event);
+  if (ev && ev->data && callback.tag == TAG_FUNCTION) {
+    net_add_listener(c->listeners, ev->data, callback);
+    if (strcmp(ev->data, "connect") == 0 && c->isClient && !c->connectFired) {
+      c->connectFired = 1;
+      ts_value_call(callback, NULL, 0);
+    }
+  }
+  return self;
+}
+
+Value node_net_socket_once(Value self, Value event, Value callback) {
+  NetConn* c = net_conn_from(self);
+  if (!c) return self;
+  TSString* ev = ts_to_string(event);
+  if (ev && ev->data && callback.tag == TAG_FUNCTION) {
+    char onceKey[256];
+    snprintf(onceKey, sizeof(onceKey), "%s##once", ev->data);
+    net_add_listener(c->listeners, onceKey, callback);
+  }
+  return self;
+}
+
+Value node_net_socket_off(Value self, Value event, Value callback) {
+  NetConn* c = net_conn_from(self);
+  if (!c) return self;
+  TSString* ev = ts_to_string(event);
+  if (ev && ev->data) {
+    net_remove_listener(c->listeners, ev->data, callback);
+  }
+  return self;
+}
+
+Value node_net_socket_pause(Value self) { return self; }
+Value node_net_socket_resume(Value self) { return self; }
+Value node_net_socket_setEncoding(Value self, Value enc) {
+  (void)enc;
+  return self;
+}
+Value node_net_socket_setTimeout(Value self, Value ms, Value cb) {
+  (void)ms; (void)cb;
+  return self;
+}
+Value node_net_socket_setNoDelay(Value self, Value flag) {
+  (void)flag;
+  NetConn* c = net_conn_from(self);
+  if (c && c->fd >= 0) {
+    int one = 1;
+    setsockopt(c->fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
+  }
+  return self;
+}
+Value node_net_socket_setKeepAlive(Value self, Value enable, Value delay) {
+  NetConn* c = net_conn_from(self);
+  if (c && c->fd >= 0) {
+    (void)delay;
+    int e = ts_to_number(enable) ? 1 : 0;
+    setsockopt(c->fd, SOL_SOCKET, SO_KEEPALIVE, (const char*)&e, sizeof(e));
+  }
+  return self;
+}
+Value node_net_socket_ref(Value self) { return self; }
+Value node_net_socket_unref(Value self) { return self; }
+
+Value node_net_socket_address(Value self) {
+  NetConn* c = net_conn_from(self);
+  TSHashMap* info = ts_hashmap_new();
+  if (c) {
+    char lh[64] = "0.0.0.0", rh[64] = "0.0.0.0";
+    struct sockaddr_in la, ra;
+    socklen_t llen = sizeof(la), rlen = sizeof(ra);
+    memset(&la, 0, sizeof(la)); memset(&ra, 0, sizeof(ra));
+    if (c->fd >= 0) {
+      if (getsockname((SOCKET)c->fd, (struct sockaddr*)&la, &llen) == 0)
+        net_addr_string(&la, lh, (int)sizeof(lh));
+      if (getpeername((SOCKET)c->fd, (struct sockaddr*)&ra, &rlen) == 0)
+        net_addr_string(&ra, rh, (int)sizeof(rh));
+      ts_hashmap_set(info, ts_string_new("localAddress"), ts_value_string(ts_string_new(lh)));
+      ts_hashmap_set(info, ts_string_new("localPort"), ts_value_number((double)ntohs(la.sin_port)));
+      ts_hashmap_set(info, ts_string_new("remoteAddress"), ts_value_string(ts_string_new(rh)));
+      ts_hashmap_set(info, ts_string_new("remotePort"), ts_value_number((double)ntohs(ra.sin_port)));
+    }
+  }
+  return ts_value_object(info);
+}
   NetConn* c = net_conn_from(self);
   if (c) {
     if (data.tag != TAG_UNDEFINED && data.tag != TAG_NULL) {
