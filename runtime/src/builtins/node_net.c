@@ -312,4 +312,60 @@ Value node_net_server_getConnections(Value serverVal, Value callback) {
 }
 Value node_net_server_ref(Value serverVal) { return serverVal; }
 Value node_net_server_unref(Value serverVal) { return serverVal; }
+static int net_resolve_addr(const char* host, int port, struct sockaddr_in* out) {
+  memset(out, 0, sizeof(*out));
+  out->sin_family = AF_INET; out->sin_port = htons((uint16_t)port);
+  if (!host || !host[0] || strcmp(host, "localhost") == 0) { out->sin_addr.s_addr = inet_addr("127.0.0.1"); return 1; }
+  if (inet_pton(AF_INET, host, &out->sin_addr) == 1) return 1;
+  struct hostent* he = gethostbyname(host);
+  if (he && he->h_addr_list && he->h_addr_list[0]) { memcpy(&out->sin_addr, he->h_addr_list[0], he->h_length); return 1; }
+  return 0;
+}
+Value node_net_createConnection(Value options, Value callback) {
+  net_ensure_wsa();
+  int port = 0; const char* host = "127.0.0.1";
+  if (options.tag == TAG_OBJECT && options.as.object) {
+    TSHashMap* o = (TSHashMap*)options.as.object;
+    port = (int)ts_to_number(ts_hashmap_get(o, ts_string_new("port")));
+    TSString* hs = ts_to_string(ts_hashmap_get(o, ts_string_new("host")));
+    if (hs && hs->data && hs->data[0]) host = hs->data;
+  }
+  struct sockaddr_in addr;
+  if (!net_resolve_addr(host, port, &addr)) { TS_THROW(ts_value_string(ts_string_new("Invalid host"))); return ts_value_undefined(); }
+  int sock = (int)socket(AF_INET, SOCK_STREAM, 0);
+  if (sock < 0) { TS_THROW(ts_value_string(ts_string_new("socket failed"))); return ts_value_undefined(); }
+  if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) { CLOSE_SOCKET(sock); TS_THROW(ts_value_string(ts_string_new("Connection failed"))); return ts_value_undefined(); }
+  net_set_nonblocking(sock);
+  Value self = net_socket_new(sock, 1);
+  net_fire_listeners(net_conn_from(self)->listeners, "connect", NULL, 0);
+  if (callback.tag == TAG_FUNCTION && callback.as.function) ts_value_call(callback, NULL, 0);
+  return self;
+}
+static int net_data_bytes(Value data, const char** bytes, int* len) {
+  if (data.tag == TAG_STRING && data.as.string) { *bytes = data.as.string->data; *len = data.as.string->length; return 1; }
+  TSString* s = ts_to_string(data);
+  if (s) { *bytes = s->data; *len = s->length; return 1; }
+  return 0;
+}
+Value node_net_socket_write(Value self, Value data) {
+  NetConn* c = net_conn_from(self);
+  if (!c || c->closed || c->fd < 0) return ts_value_boolean(0);
+  const char* bytes = ""; int len = 0;
+  if (!net_data_bytes(data, &bytes, &len)) return ts_value_boolean(0);
+  int sent = send(c->fd, bytes, len, 0);
+  return ts_value_boolean(sent >= 0 ? 1 : 0);
+}
+Value node_net_socket_end(Value self, Value data) {
+  NetConn* c = net_conn_from(self);
+  if (c) {
+    if (data.tag != TAG_UNDEFINED && data.tag != TAG_NULL) node_net_socket_write(self, data);
+    if (c->fd >= 0) shutdown(c->fd, 1);
+  }
+  return ts_value_undefined();
+}
+Value node_net_socket_destroy(Value self) {
+  NetConn* c = net_conn_from(self);
+  if (c) { net_obj_set(self, "destroyed", ts_value_boolean(1)); if (c->fd >= 0) { CLOSE_SOCKET(c->fd); c->fd = -1; } }
+  return ts_value_undefined();
+}
 }
