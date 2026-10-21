@@ -629,7 +629,12 @@ typedef enum {
 } JSClosureTypeEnum;
 
 typedef struct JSClosureVar {
-    JSClosureTypeEnum closure_type : 3;
+    /* MSVC (and clang targeting the MSVC ABI) treat an enum-typed bit-field
+     * as *signed*, so a 3-bit field cannot hold JS_CLOSURE_GLOBAL_DECL (4) and
+     * above — they round-trip to negative values and abort() in the closure
+     * switch. Force an unsigned field so all eight JSClosureTypeEnum values
+     * fit. Upstream QuickJS uses `JSClosureTypeEnum closure_type : 3` here. */
+    unsigned int closure_type : 3;
     uint8_t is_lexical : 1; /* lexical variable */
     uint8_t is_const : 1; /* const variable (is_lexical = 1 if is_const = 1 */
     uint8_t var_kind : 4; /* see JSVarKindEnum */

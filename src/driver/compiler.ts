@@ -1520,6 +1520,26 @@ extern TsErrorContext _ts_current_error;
     // requiring -flto. Users who really want LTO can opt in via --clang -flto.
     const lldFlags = useLld ? ["-fuse-ld=lld"] : [];
 
+    // Windows: clang + lld-link does not auto-link compiler-rt builtins on this
+    // toolchain, so 128-bit integer helpers (__udivti3/__divti3 — emitted by
+    // BigInt code, e.g. inside the vendored QuickJS engine) fail to resolve.
+    // Locate the builtins archive via the resource dir and link it explicitly.
+    let clangBuiltinsLib: string | undefined;
+    if (isWindows) {
+      try {
+        const resDir = execSync("clang -print-resource-dir", { encoding: "utf-8" }).trim();
+        for (const arch of ["x86_64", "aarch64", "i686"]) {
+          const candidate = path.join(resDir, "lib", "windows", `clang_rt.builtins-${arch}.lib`);
+          if (fs.existsSync(candidate)) {
+            clangBuiltinsLib = candidate;
+            break;
+          }
+        }
+      } catch {
+        /* no clang resource dir; skip (builtins may be linked by other means) */
+      }
+    }
+
     // Windows: embed VERSIONINFO (+ optional icon) from app.json build metadata
     let resourceObj: string | undefined;
     if (isWindows && !options.shared && options.appBuild) {
@@ -1539,7 +1559,18 @@ extern TsErrorContext _ts_current_error;
       `-I${runtimeInclude}`,
       `-I${builtinInclude}`,
       ...(needSqlite ? [`-I${sqliteInclude}`] : []),
-      ...(needQuickjs ? [`-I${quickjsInclude}`, `-DCONFIG_VERSION="${quickjsVersion}"`] : []),
+      ...(needQuickjs
+        ? [
+            `-I${quickjsInclude}`,
+            // Windows: MSVC-target clang has no POSIX/MingW sysroot, so the
+            // vendored QuickJS engine (<sys/time.h>, <pthread.h>) is built
+            // against a local compat shim. On Unix the real headers are used.
+            ...(isWindows ? [`-I${path.join(quickjsInclude, "compat")}`] : []),
+            // Backslash-escaped quotes survive the shell string join so clang
+            // sees a string literal: #define CONFIG_VERSION "2026-06-04".
+            `-DCONFIG_VERSION=\\"${quickjsVersion}\\"`,
+          ]
+        : []),
       ...(needWebview && isWindows
         ? [`-I${path.join(resolvedProjectRoot, "runtime/third_party/webview2_sdk/build/native/include")}`]
         : []),
@@ -1561,6 +1592,9 @@ extern TsErrorContext _ts_current_error;
       ...(needFfi && isUnix ? ["-ldl"] : []),
       // quickjs: dtoa/libregexp need libm on Unix; pthread already linked above
       ...(needQuickjs && isUnix ? ["-lm"] : []),
+      // Windows: explicit compiler-rt builtins (128-bit int helpers, e.g. BigInt).
+      // Quoted because the resource dir often contains spaces ("C:\Program Files\…").
+      ...(clangBuiltinsLib ? [`"${clangBuiltinsLib}"`] : []),
       // webview: WebView2 loader + system libs (Win) / WebKitGTK (Linux)
       ...(needWebview && isWindows
         ? [
