@@ -158,6 +158,199 @@ console.log(quickjs.getMemoryUsage(ctx).mallocSize); // 例如 175672
 
 ---
 
+## 引擎控制
+
+### `quickjs.setTimeLimit(ctx, ms)`
+
+设置单次 `eval` / `evalModule` / `call` 的墙钟时间上限（毫秒）。超过后该次运行会被中断，并以 TS 异常形式抛出。`0`、负数或非有限值表示**取消限制**。
+
+```typescript
+quickjs.setTimeLimit(ctx, 200);
+try {
+  quickjs.eval(ctx, 'while (true) {}'); // 死循环会被中断
+} catch (e: any) {
+  console.log('超时'); // 进入此处
+}
+quickjs.setTimeLimit(ctx, 0); // 取消
+```
+
+### `quickjs.getTimeLimit(ctx)`
+
+返回当前配置的单次运行时间上限（毫秒，`0` 表示无限制）。
+
+### `quickjs.gc(ctx)`
+
+执行一次完整的垃圾回收。
+
+### `quickjs.setGCThreshold(ctx, bytes)`
+
+当自上次 GC 以来累计分配的字节数超过 `bytes` 时触发自动 GC（`0`/负数恢复引擎默认）。
+
+### `quickjs.setMaxStackSize(ctx, bytes)`
+
+限制 JS 调用栈的字节上限。
+
+### `quickjs.setRuntimeInfo(ctx, info)`
+
+为运行时附加一段描述性字符串（出现在引擎诊断信息中）。
+
+### `quickjs.version()`
+
+返回内嵌 QuickJS 引擎的版本字符串。
+
+### `quickjs.runPendingJobs(ctx)`
+
+驱动 Promise 微任务队列直至清空，返回执行的任务数。
+
+```typescript
+quickjs.eval(ctx, "Promise.resolve().then(function () { order.push('micro'); });");
+console.log(quickjs.runPendingJobs(ctx)); // > 0
+```
+
+---
+
+## 求值变体
+
+### `quickjs.evalModule(ctx, code)`
+
+以 **ES 模块** 语义求值 `code`（用途在于副作用 / 全局绑定，模块体的完成值为 `undefined`）。
+
+```typescript
+quickjs.evalModule(ctx, 'globalThis.x = 6 * 7;');
+console.log(quickjs.getGlobal(ctx, 'x')); // 42
+```
+
+### `quickjs.compile(ctx, code)`
+
+把脚本编译为可调用的句柄但不立即运行；用 `quickjs.call` 调用它。语法错误时抛出。
+
+### `quickjs.evalRef(ctx, code)`
+
+与 `eval` 类似，但对象 / 数组结果以**存活的句柄**返回（供反射 API 使用），而不是立即结构化拷贝。
+
+### `quickjs.evalJSON(ctx, code)`
+
+求值 `code` 后经 JSON 深拷贝结果跨越边界。结果不可 JSON 序列化时抛出。
+
+---
+
+## JSON 助手
+
+### `quickjs.parseJSON(ctx, json)`
+
+通过引擎解析 JSON 字符串，返回 TS 值。
+
+### `quickjs.stringify(ctx, value)`
+
+对 TS 值 / 句柄做深层 `JSON.stringify`，返回 JSON 文本；不可序列化时返回 `undefined`。
+
+```typescript
+const o = quickjs.parseJSON(ctx, '{"a":1,"b":[2,3]}');
+console.log(o.a);                        // 1
+console.log(quickjs.stringify(ctx, o));  // {"a":1,"b":[2,3]}
+```
+
+---
+
+## 全局反射 / JSON 传输
+
+### `quickjs.hasGlobal(ctx, name)` / `quickjs.deleteGlobal(ctx, name)`
+
+判断全局绑定是否存在 / 删除全局绑定（返回是否成功）。
+
+### `quickjs.globalKeys(ctx)`
+
+返回可枚举全局属性名的数组。
+
+### `quickjs.typeofGlobal(ctx, name)`
+
+返回某个全局绑定的 JS `typeof`（字符串）。
+
+### `quickjs.setGlobalJSON(ctx, name, value)` / `quickjs.getGlobalJSON(ctx, name)`
+
+经由 JSON 往返来定义 / 读取全局：深层、隔离、不产生跨堆别名。
+
+---
+
+## 函数句柄
+
+### `quickjs.apply(ctx, fn, thisVal, args?)`
+
+以显式 `this` 调用函数句柄，`args` 为可选参数数组（最多 8 个）。
+
+```typescript
+quickjs.eval(ctx, "function greet(p) { return p + ':' + this.name; }");
+const greet = quickjs.getGlobal(ctx, 'greet');
+const who = quickjs.ref(ctx, quickjs.eval(ctx, "({ name: 'Bob' })"));
+console.log(quickjs.apply(ctx, greet, who, ['hi'])); // "hi:Bob"
+```
+
+### `quickjs.newInstance(ctx, ctor, args?)`
+
+以 `new` 调用构造器句柄。
+
+### `quickjs.isCallable(v)`
+
+`v` 是否可调用（JS 函数句柄或 TS 函数）。
+
+---
+
+## 值句柄：对存活 JS 对象的反射
+
+### `quickjs.ref(ctx, value)` / `quickjs.deref(ctx, handle)`
+
+把 TS 值变为存活的 JS 句柄 / 把句柄拷回普通 TS 值。
+
+### `quickjs.releaseHandle(ctx, handle)`
+
+提前释放句柄持有的引擎引用（`dispose` 之前）。
+
+### `quickjs.getProperty` / `setProperty` / `hasProperty` / `deleteProperty`
+
+对句柄读写 / 判断 / 删除属性。
+
+### `quickjs.getKeys` / `getValues` / `getEntries`
+
+返回句柄自身的可枚举字符串键 / 值 / `[key, value]` 对。
+
+### `quickjs.createObject(ctx, props?)` / `quickjs.createArray(ctx, items?)`
+
+创建新的 JS 对象 / 数组句柄。
+
+### `quickjs.arrayPush(ctx, arr, value)` / `quickjs.arrayLength(ctx, arr)`
+
+向数组句柄追加一个元素（返回新长度）/ 取长度。
+
+```typescript
+const o = quickjs.evalRef(ctx, "({ name: 'Alice', age: 30 })");
+console.log(quickjs.getKeys(ctx, o));          // [ 'name', 'age' ]
+console.log(quickjs.getProperty(ctx, o, 'name')); // "Alice"
+quickjs.setProperty(ctx, o, 'age', 31);
+console.log(quickjs.deref(ctx, o));            // { name: 'Alice', age: 31 }
+```
+
+---
+
+## 类型内省与强制转换
+
+### `quickjs.typeofValue(v)`
+
+返回 TS 值 / 句柄的 JS `typeof` 字符串（句柄分别为 `"function"` / `"object"`）。
+
+### 谓词
+
+`isArray`, `isObject`, `isFunction`, `isString`, `isNumber`, `isBoolean`, `isNull`, `isUndefined`。
+
+### `quickjs.toNumber(ctx, v)` / `quickjs.toStringValue(ctx, v)` / `quickjs.toBoolean(ctx, v)`
+
+强制转换，会尊重句柄自身的 `valueOf` / `toString`。
+
+### `quickjs.strictEqual(ctx, a, b)`
+
+两个值 / 句柄之间的 JS `===`。
+
+---
+
 ## 完整示例
 
 ```typescript
