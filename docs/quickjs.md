@@ -173,7 +173,7 @@ main();
 
 ## 实现说明
 
-- 引擎源码位于 `runtime/src/quickjs/`（QuickJS 上游发布版，MIT 许可）。
+- 引擎源码位于 `runtime/src/quickjs/`（QuickJS 上游发布版，MIT 许可）。该目录相对上游有少量**刻意**改动（仅用于在本项目的 Windows/MSVC 目标 clang 工具链上构建），每条改动的说明与重新引入步骤见 `runtime/src/quickjs/UPSTREAM-DEVIATIONS.md`。重新同步上游时必须按该清单重新套用。
 - 包装层为 `runtime/src/builtins/node_quickjs.c`。
 - 使用 `quickjs` 模块时，编译器自动链接 QuickJS 引擎源码并定义 `CONFIG_VERSION`（读取 `runtime/src/quickjs/VERSION`）。
 - Windows 下引擎通过 `runtime/src/quickjs/compat/` 的 POSIX 兼容头（`sys/time.h`、`pthread.h`）在 MSVC 目标 clang 上构建，无需 MinGW 工具链；链接时由编译器自动补上 `clang_rt.builtins-*.lib` 与 `compat` 头路径。Linux 下使用系统头并自动加 `-lm -ldl -lpthread`。
