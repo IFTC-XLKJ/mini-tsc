@@ -161,7 +161,7 @@ export class CompilerDriver {
           usedBuiltins.add(builtin);
         }
       }
-      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype", "mouse"];
+      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype", "mouse", "quickjs"];
       for (const builtin of globalBuiltins) {
         if (cEmitter.unitUsesBuiltin(unit, builtin)) {
           usedBuiltins.add(builtin);
@@ -1382,6 +1382,7 @@ extern TsErrorContext _ts_current_error;
     const needSqlite = usage?.modules.has("sqlite") ?? false;
     const needFfi = usage?.modules.has("ffi") ?? false;
     const needWebview = usage?.modules.has("webview") ?? false;
+    const needQuickjs = usage?.modules.has("quickjs") ?? false;
     const coreRuntime: string[] = [];
     if (needsTsRuntime) {
       // string_ops holds core strings + indexOf/substring/replace/… (linker GC drops unused)
@@ -1410,6 +1411,17 @@ extern TsErrorContext _ts_current_error;
       if (needFfi) {
         coreRuntime.push("node_ffi.c");
       }
+      if (needQuickjs) {
+        // QuickJS engine sources live under runtime/src/quickjs/ (not builtins/);
+        // node_quickjs.c wrapper is emitted via generateBuiltinFiles.
+        const qjsDir = path.join(runtimeDir, "quickjs");
+        // Core engine only — quickjs-libc.c (os/std modules) pulls in heavy POSIX
+        // deps and is not used by the node_quickjs.c wrapper.
+        for (const qjs of ["quickjs.c", "cutils.c", "dtoa.c", "libregexp.c", "libunicode.c"]) {
+          const p = path.join(qjsDir, qjs);
+          if (fs.existsSync(p)) runtimeSrcFiles.push(p);
+        }
+      }
       // node_webview.c is emitted via generateBuiltinFiles (featureUsage.modules)
     }
     // Automatic GC is always linked: main() always calls ts_gc_init / set_stack_bottom
@@ -1428,6 +1440,16 @@ extern TsErrorContext _ts_current_error;
     const runtimeInclude = path.join(resolvedProjectRoot, "runtime/include");
     const builtinInclude = path.join(resolvedProjectRoot, "runtime/src/builtins");
     const sqliteInclude = path.join(resolvedProjectRoot, "runtime/src/sqlite");
+    const quickjsInclude = path.join(resolvedProjectRoot, "runtime/src/quickjs");
+    // QuickJS references CONFIG_VERSION at compile time (quickjs.c); read it from VERSION.
+    let quickjsVersion = "unknown";
+    if (needQuickjs) {
+      try {
+        quickjsVersion = fs.readFileSync(path.join(quickjsInclude, "VERSION"), "utf-8").trim() || "unknown";
+      } catch {
+        /* keep default */
+      }
+    }
 
     const isWindows = (options.target || process.platform) === "win32" || options.target === "windows";
     // Android/Termux reports process.platform === "android" (or linux) — not win32
@@ -1517,6 +1539,7 @@ extern TsErrorContext _ts_current_error;
       `-I${runtimeInclude}`,
       `-I${builtinInclude}`,
       ...(needSqlite ? [`-I${sqliteInclude}`] : []),
+      ...(needQuickjs ? [`-I${quickjsInclude}`, `-DCONFIG_VERSION="${quickjsVersion}"`] : []),
       ...(needWebview && isWindows
         ? [`-I${path.join(resolvedProjectRoot, "runtime/third_party/webview2_sdk/build/native/include")}`]
         : []),
@@ -1536,6 +1559,8 @@ extern TsErrorContext _ts_current_error;
       ...(needSqlite && isUnix ? ["-lm"] : []),
       // ffi needs dl library on Unix
       ...(needFfi && isUnix ? ["-ldl"] : []),
+      // quickjs: dtoa/libregexp need libm on Unix; pthread already linked above
+      ...(needQuickjs && isUnix ? ["-lm"] : []),
       // webview: WebView2 loader + system libs (Win) / WebKitGTK (Linux)
       ...(needWebview && isWindows
         ? [

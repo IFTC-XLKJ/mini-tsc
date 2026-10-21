@@ -442,6 +442,19 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "equal", cName: "node_ctype_equal", signature: "Value node_ctype_equal(Value a, Value b)" },
     ],
   }],
+  ["quickjs", {
+    name: "quickjs",
+    headerFile: "node_quickjs.h",
+    cSourceFile: "node_quickjs.c",
+    functions: [
+      { tsName: "createContext", cName: "node_quickjs_createContext", signature: "Value node_quickjs_createContext(void)" },
+      { tsName: "eval", cName: "node_quickjs_eval", signature: "Value node_quickjs_eval(Value ctx, Value code)" },
+      { tsName: "evalFile", cName: "node_quickjs_evalFile", signature: "Value node_quickjs_evalFile(Value ctx, Value path)" },
+      { tsName: "setGlobal", cName: "node_quickjs_setGlobal", signature: "Value node_quickjs_setGlobal(Value ctx, Value name, Value value)" },
+      { tsName: "getGlobal", cName: "node_quickjs_getGlobal", signature: "Value node_quickjs_getGlobal(Value ctx, Value name)" },
+      { tsName: "dispose", cName: "node_quickjs_dispose", signature: "Value node_quickjs_dispose(Value ctx)" },
+    ],
+  }],
   ["mouse", {
     name: "mouse",
     headerFile: "node_mouse.h",

@@ -1900,7 +1900,7 @@ export class ExpressionEmitter {
     if (callee.kind === "property_access" &&
         callee.object.kind === "identifier") {
       const moduleName = callee.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "mouse"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "mouse", "quickjs"];
       if (builtinModules.includes(moduleName) && this.canTreatAsBuiltinModule(moduleName)) {
         const funcName = `node_${moduleName}_${callee.property}`;
         // Wrap each argument in Value constructors
@@ -4100,7 +4100,7 @@ export class ExpressionEmitter {
     // must emit as function calls: node_process_argv()
     if (node.object.kind === "identifier") {
       const moduleName = node.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "mouse"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "mouse", "quickjs"];
       if (builtinModules.includes(moduleName) && this.canTreatAsBuiltinModule(moduleName)) {
         const funcName = `node_${moduleName}_${node.property}`;
         this._lastBuiltinCall = funcName;

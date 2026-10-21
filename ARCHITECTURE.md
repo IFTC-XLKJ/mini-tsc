@@ -638,6 +638,7 @@ const BUILTIN_REGISTRY: Map<string, BuiltinModule> = new Map([
 | `net` | POSIX sockets (`socket/bind/listen/accept/connect`) |
 | `os` | `sysinfo`, `uname`, platform detection |
 | `child_process` | `fork()` (Linux) / `CreateProcess` (Windows) |
+| `quickjs` | Embedded QuickJS engine (`runtime/src/quickjs/`) for JS evaluation |
 
 ### 10. Cross-Platform Strategy (`src/codegen/c-emitter.ts`)
 

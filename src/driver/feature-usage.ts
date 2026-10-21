@@ -4,7 +4,7 @@ import { BUILTIN_MODULES } from "../builtins/registry.js";
 /** Node built-in module names we can tree-shake. */
 export const BUILTIN_MODULE_NAMES = [
   "fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto",
-  "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype", "mouse",
+  "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype", "mouse", "quickjs",
 ] as const;
 
 export type BuiltinModuleName = (typeof BUILTIN_MODULE_NAMES)[number];
@@ -724,7 +724,7 @@ export function analyzeFeatureUsage(
   }
   const modulesNeedingHashArray = [
     "fs", "path", "http", "net", "events", "child_process",
-    "crypto", "assert", "readline", "os", "worker_threads", "sqlite", "webview", "ffi", "uuid", "mouse",
+    "crypto", "assert", "readline", "os", "worker_threads", "sqlite", "webview", "ffi", "uuid", "mouse", "quickjs",
   ];
   for (const m of modulesNeedingHashArray) {
     if (usage.modules.has(m)) {
@@ -825,6 +825,18 @@ export function analyzeFeatureUsage(
     addMethod(usage, "node_sqlite_update");
     addMethod(usage, "node_sqlite_remove");
     addMethod(usage, "node_sqlite_count");
+    usage.features.add("hashmap");
+    usage.features.add("array");
+  }
+
+  // quickjs: eval/context API; wrapper builds objects/arrays from JS values
+  if (usage.modules.has("quickjs")) {
+    addMethod(usage, "node_quickjs_createContext");
+    addMethod(usage, "node_quickjs_eval");
+    addMethod(usage, "node_quickjs_evalFile");
+    addMethod(usage, "node_quickjs_setGlobal");
+    addMethod(usage, "node_quickjs_getGlobal");
+    addMethod(usage, "node_quickjs_dispose");
     usage.features.add("hashmap");
     usage.features.add("array");
   }
