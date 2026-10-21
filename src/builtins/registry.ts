@@ -452,6 +452,7 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "evalFile", cName: "node_quickjs_evalFile", signature: "Value node_quickjs_evalFile(Value ctx, Value path)" },
       { tsName: "setGlobal", cName: "node_quickjs_setGlobal", signature: "Value node_quickjs_setGlobal(Value ctx, Value name, Value value)" },
       { tsName: "getGlobal", cName: "node_quickjs_getGlobal", signature: "Value node_quickjs_getGlobal(Value ctx, Value name)" },
+      { tsName: "call", cName: "node_quickjs_call", signature: "Value node_quickjs_call(Value ctx, Value fn, Value args)" },
       { tsName: "dispose", cName: "node_quickjs_dispose", signature: "Value node_quickjs_dispose(Value ctx)" },
     ],
   }],

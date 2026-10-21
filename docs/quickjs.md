@@ -14,7 +14,10 @@
 | `null` / `undefined` | `undefined` |
 | `Array` | 数组 |
 | 普通对象 | 对象 |
-| 函数及其他特殊值 | `undefined` |
+| 函数 | 可调用的不透明句柄（见 `quickjs.call`） |
+| 其他特殊值 | `undefined` |
+
+反向（TS → JS）时，传给 `setGlobal` 的函数会成为 JS 中可调用的函数；其余值按上表反向转换。
 
 ## API 列表
 
@@ -67,6 +70,16 @@ quickjs.setGlobal(ctx, 'answer', 42);
 console.log(quickjs.eval(ctx, 'answer * 2')); // 84
 ```
 
+如果 `value` 是一个函数（箭头函数、函数表达式），它会被暴露为 JS 中可调用的函数。
+JS 调用它时会转回 TS 执行（最多 4 个参数，无 `this`）：
+
+```typescript
+quickjs.setGlobal(ctx, 'tag', (s: any) => 'ts:' + s);
+console.log(quickjs.eval(ctx, "tag('a')"));                       // "ts:a"
+console.log(quickjs.eval(ctx, "[1,2,3].map(function(n){ return tag('n'+n); }).join(',')"));
+// "ts:n1,ts:n2,ts:n3"
+```
+
 ---
 
 ### `quickjs.getGlobal(ctx, name)`
@@ -77,6 +90,30 @@ console.log(quickjs.eval(ctx, 'answer * 2')); // 84
 ```typescript
 quickjs.eval(ctx, "var greeting = 'hi from js';");
 console.log(quickjs.getGlobal(ctx, 'greeting')); // "hi from js"
+```
+
+若该绑定是一个 JS 函数，返回的是可调用句柄，可直接传给 `quickjs.call`。
+
+---
+
+### `quickjs.call(ctx, fn, args?)`
+
+调用一个 JS 函数句柄。`fn` 来自 `eval` / `evalFile` / `getGlobal` 的函数结果；
+`args` 是可选的可调用参数数组（省略或空数组表示不传参）。JS 的返回值会转回 TS 值。
+
+**参数**:
+- `ctx`: 上下文
+- `fn`: JS 函数句柄
+- `args`: 参数数组（可选，最多 8 个）
+
+**示例**:
+```typescript
+const double = quickjs.eval(ctx, '(x) => x * 2');
+console.log(quickjs.call(ctx, double, [21])); // 42
+
+quickjs.eval(ctx, 'function triple(x) { return x * 3; }');
+const triple = quickjs.getGlobal(ctx, 'triple');
+console.log(quickjs.call(ctx, triple, [5]));  // 15
 ```
 
 ---
@@ -111,6 +148,14 @@ function main(): void {
   quickjs.setGlobal(ctx, 'answer', 42);
   console.log(quickjs.eval(ctx, 'answer * 2')); // 84
 
+  // 函数句柄与调用
+  const double = quickjs.eval(ctx, '(x) => x * 2');
+  console.log(quickjs.call(ctx, double, [21])); // 42
+
+  // TS 函数注入 JS 并在 JS 中调用
+  quickjs.setGlobal(ctx, 'tag', (s: any) => 'ts:' + s);
+  console.log(quickjs.eval(ctx, "tag('a')"));   // "ts:a"
+
   // 错误以异常形式抛出
   try {
     quickjs.eval(ctx, "throw new Error('boom');");
@@ -130,8 +175,9 @@ main();
 
 - 引擎源码位于 `runtime/src/quickjs/`（QuickJS 上游发布版，MIT 许可）。
 - 包装层为 `runtime/src/builtins/node_quickjs.c`。
-- 使用 `quickjs` 模块时，编译器自动链接 QuickJS 引擎源码并定义 `CONFIG_VERSION`。
-- Linux 下需要 `-lm -ldl -lpthread`（编译器自动添加）；Windows 下需支持 pthread 的工具链（MinGW）。
+- 使用 `quickjs` 模块时，编译器自动链接 QuickJS 引擎源码并定义 `CONFIG_VERSION`（读取 `runtime/src/quickjs/VERSION`）。
+- Windows 下引擎通过 `runtime/src/quickjs/compat/` 的 POSIX 兼容头（`sys/time.h`、`pthread.h`）在 MSVC 目标 clang 上构建，无需 MinGW 工具链；链接时由编译器自动补上 `clang_rt.builtins-*.lib` 与 `compat` 头路径。Linux 下使用系统头并自动加 `-lm -ldl -lpthread`。
+- `closure_type` 位域在新版 MSVC 目标 clang 下需为 `unsigned int`（见 `quickjs.c` 中的注释），否则闭包分派会 `abort()`。
 
 ## 许可证
 

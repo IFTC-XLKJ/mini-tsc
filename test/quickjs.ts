@@ -32,6 +32,27 @@ function main(): void {
   quickjs.eval(ctx, "var greeting = 'hi from js';");
   console.log(quickjs.getGlobal(ctx, "greeting"));
 
+  // eval returning a JS function -> callable handle; call it with args.
+  const scale = quickjs.eval(ctx, "(x) => x * 10");
+  console.log(quickjs.call(ctx, scale, [4]));
+
+  // Several args, string result.
+  const join2 = quickjs.eval(ctx, "(a, b) => a + '-' + b");
+  console.log(quickjs.call(ctx, join2, ["x", "y"]));
+
+  // No args (empty array).
+  const seven = quickjs.eval(ctx, "() => 7");
+  console.log(quickjs.call(ctx, seven, []));
+
+  // getGlobal on a JS-defined function -> callable handle.
+  const dbl = quickjs.getGlobal(ctx, "double");
+  console.log(quickjs.call(ctx, dbl, [50]));
+
+  // A TS function handed to JS; JS invokes it and returns the result.
+  quickjs.setGlobal(ctx, "tag", (s: any) => "ts:" + s);
+  console.log(quickjs.eval(ctx, "tag('a')"));
+  console.log(quickjs.eval(ctx, "[1, 2, 3].map(function (n) { return tag('n' + n); }).join(',')"));
+
   // Errors surface as thrown TS errors.
   try {
     quickjs.eval(ctx, "throw new Error('boom');");

@@ -7,8 +7,9 @@
  *
  * A QjsContext wraps a JSRuntime + JSContext pair. Values crossing the
  * boundary are converted between QuickJS JSValue and mini-tsc Value
- * (number/string/boolean/null/array/object). Functions and other exotic
- * JS values surface as undefined.
+ * (number/string/boolean/null/array/object). A JS function surfaces as an
+ * opaque callable handle (see node_quickjs_call); other exotic values become
+ * undefined. A TS function passed to setGlobal is callable from JS.
  */
 
 /* createContext(): new isolated JS context. Returns an opaque QjsContext. */
@@ -21,6 +22,8 @@ Value node_quickjs_evalFile(Value ctx, Value path);
 Value node_quickjs_setGlobal(Value ctx, Value name, Value value);
 /* getGlobal(ctx, name): read a global binding. */
 Value node_quickjs_getGlobal(Value ctx, Value name);
+/* call(ctx, fn, args): invoke a JS function handle with an optional args array. */
+Value node_quickjs_call(Value ctx, Value fn, Value args);
 /* dispose(ctx): release the runtime. Idempotent. */
 Value node_quickjs_dispose(Value ctx);
 

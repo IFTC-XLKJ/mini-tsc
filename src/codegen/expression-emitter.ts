@@ -1943,6 +1943,10 @@ export class ExpressionEmitter {
             if (varType === "Value") {
               return emitted;
             }
+            // A function passed by name (setGlobal(ctx, "f", f)) → callable Value
+            if (varType && varType.includes("(*)")) {
+              return `ts_value_function((void*)${emitted})`;
+            }
           }
           // Nested calls that already return Value (path.parse, fs.statSync, etc.)
           if (a.kind === "call_expression" ||
@@ -1950,8 +1954,11 @@ export class ExpressionEmitter {
               emitted.startsWith("ts_fetch_") || emitted.startsWith("ts_json_")) {
             return emitted;
           }
-          // Object / array literals already emit Value
-          if (a.kind === "object_literal" || a.kind === "array_literal") {
+          // Object / array literals already emit Value (or a raw TSArray* when empty)
+          if (a.kind === "array_literal") {
+            return emitted.startsWith("ts_value_") ? emitted : `ts_value_array(${emitted})`;
+          }
+          if (a.kind === "object_literal") {
             return emitted.startsWith("ts_value_") ? emitted : `ts_value_object(${emitted})`;
           }
           // Default: wrap as string
@@ -3917,13 +3924,20 @@ export class ExpressionEmitter {
             if (varType === "Value") {
               return emitted;
             }
+            // A function passed by name → callable Value
+            if (varType && varType.includes("(*)")) {
+              return `ts_value_function((void*)${emitted})`;
+            }
           }
           if (a.kind === "call_expression" ||
               emitted.startsWith("node_") || emitted.startsWith("ts_value_") ||
               emitted.startsWith("ts_fetch_") || emitted.startsWith("ts_json_")) {
             return emitted;
           }
-          if (a.kind === "object_literal" || a.kind === "array_literal") {
+          if (a.kind === "array_literal") {
+            return emitted.startsWith("ts_value_") ? emitted : `ts_value_array(${emitted})`;
+          }
+          if (a.kind === "object_literal") {
             return emitted.startsWith("ts_value_") ? emitted : `ts_value_object(${emitted})`;
           }
           return `ts_value_string(ts_to_string(${emitted}))`;

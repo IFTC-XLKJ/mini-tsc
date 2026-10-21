@@ -6,15 +6,30 @@
 #include <stdlib.h>
 
 #define QJS_CONTEXT_TAG 0x514A5343  /* 'QJSC' */
+#define QJS_FUNCTION_TAG 0x514A5346 /* 'QJSF' */
 
 /* Opaque handle stored as TAG_OBJECT. JSRuntime/JSContext are raw QuickJS
- * objects; lifetime is owned here and released in dispose(). */
+ * objects; lifetime is owned here and released in dispose(). Function handles
+ * created under this context are tracked so dispose() can release their
+ * JSValue references. */
+typedef struct QjsFunction QjsFunction;
 typedef struct {
   int32_t type_tag;
   JSRuntime* rt;
   JSContext* ctx;
   int disposed;
+  QjsFunction* functions; /* singly-linked list of live function handles */
 } QjsContext;
+
+/* Opaque handle for a JS function value, so TS can hold and later call it.
+ * Holds a JSValue (a reference owned by this handle) and links into the
+ * owning context's list for release at dispose(). */
+struct QjsFunction {
+  int32_t type_tag;
+  Value ctx; /* owning context handle, kept alive */
+  JSValue fn;
+  QjsFunction* next;
+};
 
 static Value qjs_throw(const char* msg) {
   TS_THROW(ts_value_string(ts_string_new(msg ? msg : "quickjs error")));
@@ -28,6 +43,40 @@ static QjsContext* as_context(Value v) {
   return c;
 }
 
+static QjsFunction* as_function(Value v) {
+  if (v.tag != TAG_OBJECT || !v.as.object) return NULL;
+  QjsFunction* f = (QjsFunction*)v.as.object;
+  if (f->type_tag != QJS_FUNCTION_TAG) return NULL;
+  return f;
+}
+
+/* Convert a QuickJS JSValue to a mini-tsc Value. Objects/arrays are copied
+ * structurally; functions and other exotic values become undefined. */
+static Value js_to_value(JSContext* ctx, JSValueConst js, int depth);
+
+/* Wrap a JS function as an opaque TS handle. The handle owns a JSValue
+ * reference; it is released in dispose() along with the context. */
+static Value make_function_handle(Value ctxVal, JSValueConst js) {
+  QjsContext* c = as_context(ctxVal);
+  if (!c || c->disposed) return ts_value_undefined();
+  QjsFunction* f = (QjsFunction*)calloc(1, sizeof(QjsFunction));
+  if (!f) return ts_value_undefined();
+  f->type_tag = QJS_FUNCTION_TAG;
+  f->ctx = ctxVal;
+  f->fn = JS_DupValue(c->ctx, js);
+  f->next = c->functions;
+  c->functions = f;
+  return ts_value_object(f);
+}
+
+/* Top-level JS->TS conversion: like js_to_value but represents JS functions as
+ * callable handles. Used by eval/evalFile/getGlobal/call, where the owning
+ * context handle is known. */
+static Value js_to_value_top(Value ctxVal, JSContext* ctx, JSValueConst js) {
+  if (JS_IsFunction(ctx, js)) return make_function_handle(ctxVal, js);
+  return js_to_value(ctx, js, 0);
+}
+
 static const char* value_cstr(Value v) {
   if (v.tag == TAG_STRING && v.as.string && v.as.string->data) return v.as.string->data;
   TSString* s = ts_to_string(v);
@@ -36,8 +85,6 @@ static const char* value_cstr(Value v) {
 
 /* Convert a QuickJS JSValue to a mini-tsc Value. Objects/arrays are copied
  * structurally; functions and other exotic values become undefined. */
-static Value js_to_value(JSContext* ctx, JSValueConst js, int depth);
-
 static Value js_to_value(JSContext* ctx, JSValueConst js, int depth) {
   if (depth > 32) return ts_value_undefined();
   if (JS_IsException(js)) return ts_value_undefined();
@@ -79,7 +126,7 @@ static Value js_to_value(JSContext* ctx, JSValueConst js, int depth) {
         const char* key = JS_AtomToCString(ctx, props[i].atom);
         if (key) {
           JSValue item = JS_GetProperty(ctx, js, props[i].atom);
-          /* ts_hashmap_set stores the key pointer (no retain) — transfer ownership. */
+          /* ts_hashmap_set stores the key pointer (no retain) �?transfer ownership. */
           ts_hashmap_set(map, ts_string_new(key), js_to_value(ctx, item, depth + 1));
           JS_FreeValue(ctx, item);
           JS_FreeCString(ctx, key);
@@ -131,6 +178,82 @@ static JSValue value_to_js(JSContext* ctx, Value v) {
   }
 }
 
+/* The TS callback a JS-side wrapper carries. Stored on the C heap and owned by
+ * the JSValue returned from JS_NewCFunctionData: our generic_callback frees it. */
+typedef struct {
+  Value fn; /* TAG_FUNCTION or BoundFn */
+} QjsCallback;
+
+static JSClassID callback_class_id;
+
+/* Trampoline: JS calls the wrapper we handed it, and we forward to the TS
+ * function stored in func_data[0]'s opaque payload. Mirrors the runtime's
+ * 4-arg ceiling and has no `this`. */
+static JSValue generic_callback(JSContext* ctx, JSValueConst this_val,
+                                int argc, JSValueConst* argv, int magic,
+                                JSValue* func_data) {
+  (void)this_val;
+  (void)magic;
+  QjsCallback* cb = (QjsCallback*)JS_GetOpaque(func_data[0], callback_class_id);
+  if (!cb) return JS_UNDEFINED;
+  Value args[4];
+  for (int i = 0; i < 4; i++) {
+    args[i] = (i < argc) ? js_to_value(ctx, argv[i], 0) : ts_value_undefined();
+  }
+  Value result = ts_value_call(cb->fn, args, argc > 4 ? 4 : argc);
+  return value_to_js(ctx, result);
+}
+
+static void callback_finalizer(JSRuntime* rt, JSValue val) {
+  (void)rt;
+  QjsCallback* cb = (QjsCallback*)JS_GetOpaque(val, callback_class_id);
+  if (cb) {
+    JS_SetOpaque(val, NULL);
+    free(cb);
+  }
+}
+
+static JSClassDef callback_class = {
+    "TSCallback",
+    callback_finalizer,
+};
+
+/* Allocate the class id + register the class on the runtime once. */
+static int ensure_callback_class(JSRuntime* rt) {
+  if (callback_class_id) return 0;
+  JS_NewClassID(&callback_class_id);
+  if (JS_NewClass(rt, callback_class_id, &callback_class) < 0) return -1;
+  return 0;
+}
+
+/* True for a plain generated function or a bound-function object. */
+static int is_callable(Value v) {
+  if (v.tag == TAG_FUNCTION && v.as.function) return 1;
+  if (v.tag == TAG_OBJECT && v.as.object &&
+      *(int32_t*)v.as.object == BOUND_FN_TAG) {
+    return 1;
+  }
+  return 0;
+}
+
+/* Wrap a TS function as a JS function. Returns JS_UNDEFINED when `v` is not
+ * callable, so callers can fall back to the plain data conversion. */
+static JSValue wrap_callback(JSContext* ctx, Value v) {
+  if (!is_callable(v)) return JS_UNDEFINED;
+  QjsCallback* cb = (QjsCallback*)malloc(sizeof(QjsCallback));
+  if (!cb) return JS_UNDEFINED;
+  cb->fn = v;
+  JSValue data = JS_NewObjectClass(ctx, callback_class_id);
+  if (JS_IsException(data)) {
+    free(cb);
+    return JS_UNDEFINED;
+  }
+  JS_SetOpaque(data, cb);
+  JSValue fn = JS_NewCFunctionData(ctx, generic_callback, 0, 0, 1, &data);
+  JS_FreeValue(ctx, data);
+  return fn;
+}
+
 /* Read the pending exception into a TSString and throw it as a mini-tsc error. */
 static Value throw_pending_exception(JSContext* ctx) {
   JSValue ex = JS_GetException(ctx);
@@ -164,6 +287,12 @@ Value node_quickjs_createContext(void) {
     free(c);
     return qjs_throw("quickjs: failed to create context");
   }
+  if (ensure_callback_class(c->rt) < 0) {
+    JS_FreeContext(c->ctx);
+    JS_FreeRuntime(c->rt);
+    free(c);
+    return qjs_throw("quickjs: failed to register callback class");
+  }
   return ts_value_object(c);
 }
 
@@ -175,7 +304,7 @@ Value node_quickjs_eval(Value ctxVal, Value codeVal) {
   if (JS_IsException(result)) {
     return throw_pending_exception(c->ctx);
   }
-  Value out = js_to_value(c->ctx, result, 0);
+  Value out = js_to_value_top(ctxVal, c->ctx, result);
   JS_FreeValue(c->ctx, result);
   return out;
 }
@@ -206,7 +335,7 @@ Value node_quickjs_evalFile(Value ctxVal, Value pathVal) {
   if (JS_IsException(result)) {
     return throw_pending_exception(c->ctx);
   }
-  Value out = js_to_value(c->ctx, result, 0);
+  Value out = js_to_value_top(ctxVal, c->ctx, result);
   JS_FreeValue(c->ctx, result);
   return out;
 }
@@ -216,7 +345,9 @@ Value node_quickjs_setGlobal(Value ctxVal, Value nameVal, Value valueVal) {
   if (!c || c->disposed) return qjs_throw("quickjs.setGlobal: invalid or disposed context");
   const char* name = value_cstr(nameVal);
   JSValue global = JS_GetGlobalObject(c->ctx);
-  JSValue js = value_to_js(c->ctx, valueVal);
+  /* A TS function crosses as a callable JS function so JS can invoke it. */
+  JSValue js = wrap_callback(c->ctx, valueVal);
+  if (JS_IsUndefined(js)) js = value_to_js(c->ctx, valueVal);
   JS_SetPropertyStr(c->ctx, global, name, js);
   JS_FreeValue(c->ctx, global);
   return ts_value_undefined();
@@ -232,14 +363,50 @@ Value node_quickjs_getGlobal(Value ctxVal, Value nameVal) {
   if (JS_IsException(val)) {
     return throw_pending_exception(c->ctx);
   }
-  Value out = js_to_value(c->ctx, val, 0);
+  Value out = js_to_value_top(ctxVal, c->ctx, val);
   JS_FreeValue(c->ctx, val);
+  return out;
+}
+
+/* Call a JS function. `fnVal` is a handle from eval/evalFile/getGlobal whose
+ * result was a function; `argsVal` is an optional TS array of arguments
+ * (missing/undefined = no args). The JS return value is converted back. */
+Value node_quickjs_call(Value ctxVal, Value fnVal, Value argsVal) {
+  QjsContext* c = as_context(ctxVal);
+  if (!c || c->disposed) return qjs_throw("quickjs.call: invalid or disposed context");
+  QjsFunction* f = as_function(fnVal);
+  if (!f) return qjs_throw("quickjs.call: argument is not a JS function");
+  JSValue argv[8];
+  int argc = 0;
+  if (argsVal.tag == TAG_ARRAY && argsVal.as.array) {
+    TSArray* arr = argsVal.as.array;
+    for (int32_t i = 0; i < arr->length && argc < 8; i++) {
+      argv[argc++] = value_to_js(c->ctx, arr->items[i]);
+    }
+  }
+  JSValue result = JS_Call(c->ctx, f->fn, JS_UNDEFINED, argc, argv);
+  for (int i = 0; i < argc; i++) JS_FreeValue(c->ctx, argv[i]);
+  if (JS_IsException(result)) {
+    return throw_pending_exception(c->ctx);
+  }
+  Value out = js_to_value_top(ctxVal, c->ctx, result);
+  JS_FreeValue(c->ctx, result);
   return out;
 }
 
 Value node_quickjs_dispose(Value ctxVal) {
   QjsContext* c = as_context(ctxVal);
   if (!c || c->disposed) return ts_value_undefined();
+  /* Release JSValue refs held by function handles before tearing down. */
+  QjsFunction* f = c->functions;
+  while (f) {
+    QjsFunction* next = f->next;
+    if (c->ctx) JS_FreeValue(c->ctx, f->fn);
+    f->type_tag = 0;
+    free(f);
+    f = next;
+  }
+  c->functions = NULL;
   if (c->ctx) {
     JS_FreeContext(c->ctx);
     c->ctx = NULL;
