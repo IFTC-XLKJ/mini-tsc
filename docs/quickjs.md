@@ -124,6 +124,40 @@ console.log(quickjs.call(ctx, triple, [5]));  // 15
 
 ---
 
+### `quickjs.setMemoryLimit(ctx, bytes)`
+
+设置该运行时允许分配的内存上限（字节）。超过上限后，引擎会在下一次分配时抛出 JS 的 "out of memory" 错误，该错误经 `eval` / `call` 以 TS 异常形式抛出。
+
+**参数**:
+- `ctx`: 上下文
+- `bytes`: 上限字节数；`0`、负数或非有限值表示**取消限制**（与底层 `JS_SetMemoryLimit` 语义一致）
+
+**示例**:
+```typescript
+quickjs.setMemoryLimit(ctx, 16 * 1024 * 1024); // 16 MiB
+try {
+  quickjs.eval(ctx, "var a = []; for (var i = 0; i < 1e6; i++) a.push('x'.repeat(16));");
+} catch (e: any) {
+  console.log('超出内存限制'); // 触发时进入此处
+}
+quickjs.setMemoryLimit(ctx, 0); // 取消限制
+```
+
+---
+
+### `quickjs.getMemoryUsage(ctx)`
+
+返回该运行时内存统计的一次快照（普通对象）。字段以字节为单位，名字以 `Count` 结尾的为对象计数。
+
+**返回字段**: `mallocSize`, `mallocLimit`, `memoryUsedSize`, `mallocCount`, `memoryUsedCount`, `atomCount`, `strCount`, `strSize`, `objCount`, `objSize`
+
+**示例**:
+```typescript
+console.log(quickjs.getMemoryUsage(ctx).mallocSize); // 例如 175672
+```
+
+---
+
 ## 完整示例
 
 ```typescript
@@ -162,6 +196,11 @@ function main(): void {
   } catch (e: any) {
     console.log('caught:', e.message); // "boom"
   }
+
+  // 内存限制与用量观测
+  console.log(quickjs.getMemoryUsage(ctx).mallocSize); // 当前用量（字节）
+  quickjs.setMemoryLimit(ctx, 16 * 1024 * 1024);       // 16 MiB 上限
+  quickjs.setMemoryLimit(ctx, 0);                      // 取消限制
 
   quickjs.dispose(ctx);
 }

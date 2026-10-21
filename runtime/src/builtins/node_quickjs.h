@@ -26,5 +26,10 @@ Value node_quickjs_getGlobal(Value ctx, Value name);
 Value node_quickjs_call(Value ctx, Value fn, Value args);
 /* dispose(ctx): release the runtime. Idempotent. */
 Value node_quickjs_dispose(Value ctx);
+/* setMemoryLimit(ctx, bytes): cap the runtime's total malloc'd bytes.
+ * 0/negative = unlimited. Exceeding it throws a JS "out of memory" error. */
+Value node_quickjs_setMemoryLimit(Value ctx, Value bytes);
+/* getMemoryUsage(ctx): snapshot of the runtime memory accounting as an object. */
+Value node_quickjs_getMemoryUsage(Value ctx);
 
 #endif /* NODE_QUICKJS_H */

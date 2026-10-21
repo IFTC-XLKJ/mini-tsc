@@ -60,6 +60,27 @@ function main(): void {
     console.log("caught:", e.message);
   }
 
+  // Memory accounting is observable, and a limit is enforceable.
+  const usage = quickjs.getMemoryUsage(ctx);
+  console.log("usage mallocSize:", usage.mallocSize);
+
+  // Set a comfortable limit, then confirm a heavy allocation trips it.
+  quickjs.setMemoryLimit(ctx, 256 * 1024 * 1024);
+  console.log(quickjs.eval(ctx, "'under limit'"));
+
+  quickjs.setMemoryLimit(ctx, 1024 * 1024);
+  let tripped = false;
+  try {
+    quickjs.eval(ctx, "var a = []; for (var i = 0; i < 1000000; i++) a.push('xxxxxxxxxx');");
+  } catch (e: any) {
+    tripped = true;
+  }
+  console.log("limit tripped:", tripped);
+
+  // 0 disables the limit again.
+  quickjs.setMemoryLimit(ctx, 0);
+  console.log(quickjs.eval(ctx, "'unlimited again'"));
+
   quickjs.dispose(ctx);
   console.log("quickjs tests passed!");
 }

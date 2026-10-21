@@ -1924,6 +1924,13 @@ export class ExpressionEmitter {
           if (a.kind === "number_literal") {
             return `ts_value_number(${emitted})`;
           }
+          // Numeric binary expression (e.g. 256 * 1024 * 1024) → ts_value_number(...)
+          if (a.kind === "binary_expression" && a.leftType === "number") {
+            const compOps = ["<", ">", "<=", ">=", "==", "===", "!=", "!=="];
+            return compOps.includes(a.operator)
+              ? `ts_value_boolean(${emitted})`
+              : `ts_value_number(${emitted})`;
+          }
           // Boolean literal → ts_value_boolean(...)
           if (a.kind === "boolean_literal") {
             return `ts_value_boolean(${emitted})`;
@@ -3906,6 +3913,13 @@ export class ExpressionEmitter {
           }
           if (a.kind === "number_literal") {
             return `ts_value_number(${emitted})`;
+          }
+          // Numeric binary expression (e.g. 256 * 1024 * 1024) → ts_value_number(...)
+          if (a.kind === "binary_expression" && a.leftType === "number") {
+            const compOps = ["<", ">", "<=", ">=", "==", "===", "!=", "!=="];
+            return compOps.includes(a.operator)
+              ? `ts_value_boolean(${emitted})`
+              : `ts_value_number(${emitted})`;
           }
           if (a.kind === "boolean_literal") {
             return `ts_value_boolean(${emitted})`;

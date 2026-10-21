@@ -837,6 +837,8 @@ export function analyzeFeatureUsage(
     addMethod(usage, "node_quickjs_setGlobal");
     addMethod(usage, "node_quickjs_getGlobal");
     addMethod(usage, "node_quickjs_dispose");
+    addMethod(usage, "node_quickjs_setMemoryLimit");
+    addMethod(usage, "node_quickjs_getMemoryUsage");
     usage.features.add("hashmap");
     usage.features.add("array");
   }

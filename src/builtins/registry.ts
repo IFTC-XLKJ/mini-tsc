@@ -454,6 +454,8 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "getGlobal", cName: "node_quickjs_getGlobal", signature: "Value node_quickjs_getGlobal(Value ctx, Value name)" },
       { tsName: "call", cName: "node_quickjs_call", signature: "Value node_quickjs_call(Value ctx, Value fn, Value args)" },
       { tsName: "dispose", cName: "node_quickjs_dispose", signature: "Value node_quickjs_dispose(Value ctx)" },
+      { tsName: "setMemoryLimit", cName: "node_quickjs_setMemoryLimit", signature: "Value node_quickjs_setMemoryLimit(Value ctx, Value bytes)" },
+      { tsName: "getMemoryUsage", cName: "node_quickjs_getMemoryUsage", signature: "Value node_quickjs_getMemoryUsage(Value ctx)" },
     ],
   }],
   ["mouse", {

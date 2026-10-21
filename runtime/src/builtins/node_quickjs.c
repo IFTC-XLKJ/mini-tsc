@@ -418,3 +418,44 @@ Value node_quickjs_dispose(Value ctxVal) {
   c->disposed = 1;
   return ts_value_undefined();
 }
+
+/* setMemoryLimit(ctx, bytes): cap the runtime's total malloc'd bytes. A
+ * negative or non-finite value disables the limit (0 = unlimited, matching
+ * JS_SetMemoryLimit). Once the cap is exceeded, the engine throws a JS
+ * "out of memory" error on the next allocation, which surfaces as a TS
+ * exception via eval/call. */
+Value node_quickjs_setMemoryLimit(Value ctxVal, Value bytesVal) {
+  QjsContext* c = as_context(ctxVal);
+  if (!c || c->disposed) return qjs_throw("quickjs.setMemoryLimit: invalid or disposed context");
+  double n = ts_to_number(bytesVal);
+  if (!(n > 0.0)) {
+    /* 0/negative/NaN/Infinity → unlimited (matches JS_SetMemoryLimit). */
+    JS_SetMemoryLimit(c->rt, (size_t)-1);
+    return ts_value_undefined();
+  }
+  JS_SetMemoryLimit(c->rt, (size_t)n);
+  return ts_value_undefined();
+}
+
+/* getMemoryUsage(ctx): a snapshot of the runtime's memory accounting as a TS
+ * object with the most useful JSMemoryUsage fields (bytes unless named
+ * `*_count`). Handy for observing setMemoryLimit in action. */
+Value node_quickjs_getMemoryUsage(Value ctxVal) {
+  QjsContext* c = as_context(ctxVal);
+  if (!c || c->disposed) return qjs_throw("quickjs.getMemoryUsage: invalid or disposed context");
+  JSMemoryUsage u;
+  memset(&u, 0, sizeof(u));
+  JS_ComputeMemoryUsage(c->rt, &u);
+  TSHashMap* map = ts_hashmap_new();
+  ts_hashmap_set(map, ts_string_new("mallocSize"), ts_value_number((double)u.malloc_size));
+  ts_hashmap_set(map, ts_string_new("mallocLimit"), ts_value_number((double)u.malloc_limit));
+  ts_hashmap_set(map, ts_string_new("memoryUsedSize"), ts_value_number((double)u.memory_used_size));
+  ts_hashmap_set(map, ts_string_new("mallocCount"), ts_value_number((double)u.malloc_count));
+  ts_hashmap_set(map, ts_string_new("memoryUsedCount"), ts_value_number((double)u.memory_used_count));
+  ts_hashmap_set(map, ts_string_new("atomCount"), ts_value_number((double)u.atom_count));
+  ts_hashmap_set(map, ts_string_new("strCount"), ts_value_number((double)u.str_count));
+  ts_hashmap_set(map, ts_string_new("strSize"), ts_value_number((double)u.str_size));
+  ts_hashmap_set(map, ts_string_new("objCount"), ts_value_number((double)u.obj_count));
+  ts_hashmap_set(map, ts_string_new("objSize"), ts_value_number((double)u.obj_size));
+  return ts_value_object(map);
+}
