@@ -19,6 +19,21 @@
 
 反向（TS → JS）时，传给 `setGlobal` 的函数会成为 JS 中可调用的函数；其余值按上表反向转换。
 
+除自动转换外，`evalRef` / `ref` 还可把对象 / 数组作为**存活的句柄**跨越边界（保留引擎内的引用），供反射 API（`getProperty`、`getKeys`、`setProperty` 等）直接读写；用完可 `deref` 拷回普通 TS 值，或 `releaseHandle` 提前释放。
+
+## API 分组索引
+
+| 分组 | 函数 |
+|---|---|
+| 上下文与求值 | `createContext`, `eval`, `evalFile`, `dispose` |
+| 全局绑定 | `setGlobal`, `getGlobal`, `hasGlobal`, `deleteGlobal`, `globalKeys`, `typeofGlobal`, `setGlobalJSON`, `getGlobalJSON` |
+| 函数与调用 | `call`, `apply`, `newInstance`, `compile`, `isCallable` |
+| 求值变体 | `evalModule`, `evalRef`, `evalJSON` |
+| JSON | `parseJSON`, `stringify` |
+| 值句柄与反射 | `ref`, `deref`, `releaseHandle`, `getProperty`, `setProperty`, `hasProperty`, `deleteProperty`, `getKeys`, `getValues`, `getEntries`, `createObject`, `createArray`, `arrayPush`, `arrayLength` |
+| 类型内省与转换 | `typeofValue`, `isArray`, `isObject`, `isFunction`, `isString`, `isNumber`, `isBoolean`, `isNull`, `isUndefined`, `toNumber`, `toStringValue`, `toBoolean`, `strictEqual` |
+| 引擎控制 | `setMemoryLimit`, `getMemoryUsage`, `setTimeLimit`, `getTimeLimit`, `gc`, `setGCThreshold`, `setMaxStackSize`, `setRuntimeInfo`, `version`, `runPendingJobs` |
+
 ## API 列表
 
 ### `quickjs.createContext()`
@@ -120,7 +135,7 @@ console.log(quickjs.call(ctx, triple, [5]));  // 15
 
 ### `quickjs.dispose(ctx)`
 
-释放上下文及其运行时。可重复调用。
+释放上下文及其运行时。会自动释放该上下文下所有未释放的函数句柄与值句柄持有的引擎引用。可重复调用。
 
 ---
 
@@ -374,6 +389,8 @@ function main(): void {
   // 注入全局并回读
   quickjs.setGlobal(ctx, 'answer', 42);
   console.log(quickjs.eval(ctx, 'answer * 2')); // 84
+  console.log(quickjs.hasGlobal(ctx, 'answer')); // true
+  console.log(quickjs.typeofGlobal(ctx, 'answer')); // "number"
 
   // 函数句柄与调用
   const double = quickjs.eval(ctx, '(x) => x * 2');
@@ -383,6 +400,21 @@ function main(): void {
   quickjs.setGlobal(ctx, 'tag', (s: any) => 'ts:' + s);
   console.log(quickjs.eval(ctx, "tag('a')"));   // "ts:a"
 
+  // JSON 往返（深层拷贝）
+  const cfg = quickjs.parseJSON(ctx, '{"a":1,"b":[2,3]}');
+  console.log(cfg.a);                            // 1
+  console.log(quickjs.stringify(ctx, cfg));      // {"a":1,"b":[2,3]}
+
+  // 值句柄：对存活 JS 对象做反射
+  const o = quickjs.evalRef(ctx, "({ name: 'Bob', age: 20 })");
+  console.log(quickjs.getKeys(ctx, o));          // [ 'name', 'age' ]
+  quickjs.setProperty(ctx, o, 'age', 21);
+  console.log(quickjs.getProperty(ctx, o, 'age')); // 21
+
+  // 类型内省
+  console.log(quickjs.typeofValue(double));      // "function"
+  console.log(quickjs.isArray(arr));             // true
+
   // 错误以异常形式抛出
   try {
     quickjs.eval(ctx, "throw new Error('boom');");
@@ -390,10 +422,20 @@ function main(): void {
     console.log('caught:', e.message); // "boom"
   }
 
-  // 内存限制与用量观测
-  console.log(quickjs.getMemoryUsage(ctx).mallocSize); // 当前用量（字节）
-  quickjs.setMemoryLimit(ctx, 16 * 1024 * 1024);       // 16 MiB 上限
-  quickjs.setMemoryLimit(ctx, 0);                      // 取消限制
+  // 引擎信息与内存限制
+  console.log(quickjs.version());                       // 例如 "2026-06-04"
+  console.log(quickjs.getMemoryUsage(ctx).mallocSize);  // 当前用量（字节）
+  quickjs.setMemoryLimit(ctx, 16 * 1024 * 1024);        // 16 MiB 上限
+  quickjs.setMemoryLimit(ctx, 0);                       // 取消限制
+
+  // 单次运行超时（防止死循环）
+  quickjs.setTimeLimit(ctx, 200);
+  try {
+    quickjs.eval(ctx, 'while (true) {}');
+  } catch (e: any) {
+    console.log('超时'); // 进入此处
+  }
+  quickjs.setTimeLimit(ctx, 0);
 
   quickjs.dispose(ctx);
 }
