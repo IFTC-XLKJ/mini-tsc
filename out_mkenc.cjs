@@ -86,11 +86,14 @@ function coderEntry(methodIdBytes, props) {
 function folderBytes() {
   const parts = [];
   parts.push(writeNumber(2));
-  parts.push(coderEntry(Buffer.from([0x00]), Buffer.alloc(0)));   // Copy
+  // Coder[0] MUST be the pack-stream consumer. For 7zAES the packed bytes are
+  // encrypted, so AES is coder[0] and the main decoder (Copy) is coder[1]:
+  //   packed -> AES (coder0) -> Copy (coder1) -> output.
   parts.push(coderEntry(Buffer.from([0x06, 0xf1, 0x07, 0x01]), aesProps)); // AES
+  parts.push(coderEntry(Buffer.from([0x00]), Buffer.alloc(0)));            // Copy
   // numBonds = numCoders - 1 is implicit (not stored).
-  parts.push(writeNumber(1));   // InIndex = 1 (AES input stream)
-  parts.push(writeNumber(0));   // OutIndex = 0 (Copy output -> coder 0)
+  parts.push(writeNumber(1));   // InIndex = 1 (Copy input <- coder0 output)
+  parts.push(writeNumber(0));   // OutIndex = 0 (AES output feeds it)
   // numPackStreams = numInStreams - numBindPairs = 1, so no explicit packed
   // stream index is written (the decoder infers the single unused input).
   return Buffer.concat(parts);
@@ -112,11 +115,24 @@ function streamsInfo() {
   parts.push(folderBytes());
   parts.push(Buffer.from([0x0c]));       // CodersUnpackSize
   // One entry per coder OUTPUT (numCodersOutStreams = numCoders = 2 here):
-  //   coder0 = Copy  -> output = file size
-  //   coder1 = AES   -> output = decrypted (still-framed) size = file size
-  parts.push(writeNumber(FILE_DATA.length)); // Copy output
+  //   coder0 = AES   -> output = plaintext size
+  //   coder1 = Copy  -> output = plaintext size
   parts.push(writeNumber(FILE_DATA.length)); // AES output
+  parts.push(writeNumber(FILE_DATA.length)); // Copy output
   parts.push(Buffer.from([0x00]));       // END of UnpackInfo
+
+  // SubStreamsInfo (0x08) with a CRC (0x0a) of the plaintext. This is what
+  // lets the decoder detect a wrong password: AES-CBC has no integrity check,
+  // so a bad key yields same-length garbage that only the CRC catches.
+  const fileCrc = crc32(FILE_DATA);
+  const crcBuf = Buffer.alloc(4);
+  crcBuf.writeUInt32LE(fileCrc, 0);
+  parts.push(Buffer.from([0x08]));       // SubStreamsInfo
+  parts.push(Buffer.from([0x0a]));       // CRC
+  parts.push(Buffer.from([0x01]));       // AllAreDefined
+  parts.push(crcBuf);                    // CRC value (plaintext)
+  parts.push(Buffer.from([0x00]));       // END of SubStreamsInfo
+
   parts.push(Buffer.from([0x00]));       // END of StreamsInfo
   return Buffer.concat(parts);
 }
@@ -133,16 +149,18 @@ function filesInfo() {
   parts.push(Buffer.from([0x00]));       // not external
   parts.push(nameBuf);
 
-  // Attributes (0x15): Size, External(0x00), AttributeExist(BooleanList), UINT32[]
-  //   AllDefined(0x00) + bitfield(1 byte for 1 file) + 4-byte attribute
-  const attrBody = Buffer.concat([
-    Buffer.from([0x00]),                 // AllDefined
-    Buffer.from([0x01]),                 // bitfield byte: file0 defined
+  // Attributes (0x15). Writer order (7zOut.cpp WriteAlignedBools):
+  //   type, Size, BoolVector_numDefined(Defs), External(0), UINT32[per defined]
+  // Size = numDefined*4 + bvSize + 2, where bvSize = 0 when all files defined.
+  const numDefined = 1;
+  const attrDataSize = numDefined * 4 + 0 + 2;
+  const attrPayload = Buffer.concat([
+    Buffer.from([0x01]),                 // numDefined==numFiles -> single byte 1
+    Buffer.from([0x00]),                 // External: 0 (inline)
     Buffer.from([0x20, 0x00, 0x00, 0x00])// FILE_ATTRIBUTE_ARCHIVE
   ]);
-  const attrPayload = Buffer.concat([Buffer.from([0x00]), attrBody]); // External + body
   parts.push(Buffer.from([0x15]));
-  parts.push(writeNumber(attrPayload.length));
+  parts.push(writeNumber(attrDataSize));
   parts.push(attrPayload);
 
   parts.push(Buffer.from([0x00]));       // END

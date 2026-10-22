@@ -696,6 +696,44 @@ static SRes SzFolder_Decode2_Inner(const CSzFolder *folder,
 }
 
 
+/* Build a reduced copy of `folder` with the 7zAES coder removed.
+ *
+ * For 7zAES the on-disk folder places AES as coder[0]: it consumes the single
+ * packed stream and its output (OutIndex 0) feeds the coder below it via the
+ * bond {InIndex=1, OutIndex=0}. Once the wrapper has decrypted the packed
+ * stream into memory, the AES coder is fully handled and must not appear in
+ * the folder handed to SzFolder_Decode2_Inner (which would otherwise reject it
+ * in CheckSupportedFolder). Removing coder `rm` drops the bond whose OutIndex
+ * is `rm` (it routed the removed coder's output) and shifts the remaining
+ * coder numbers down; the survivors then read the decrypted stream directly
+ * as pack stream 0. For the canonical [AES, main] shape this leaves a
+ * single-coder folder. */
+static void SzFolder_StripCoder(const CSzFolder *src, UInt32 rm, CSzFolder *dst)
+{
+  UInt32 i;
+  UInt32 j;
+  *dst = *src;
+  for (i = rm; i + 1 < src->NumCoders; i++)
+    dst->Coders[i] = src->Coders[i + 1];
+  dst->NumCoders = src->NumCoders - 1;
+
+  j = 0;
+  for (i = 0; i < src->NumBonds; i++)
+  {
+    CSzBond b = src->Bonds[i];
+    if (b.OutIndex == rm)
+      continue;                       /* this bond fed the removed coder */
+    if (b.OutIndex > rm)
+      b.OutIndex--;                   /* coder numbering shifted down */
+    dst->Bonds[j++] = b;
+  }
+  dst->NumBonds = j;
+  dst->NumPackStreams = 1;
+  dst->PackStreams[0] = 0;
+  dst->UnpackStream = 0;
+}
+
+
 /* AES-aware folder decode.
  *
  * When `folder` carries a 7zAES coder (always the outermost coder, consuming
@@ -735,8 +773,9 @@ static SRes SzFolder_Decode2(const CSzFolder *folder,
     const CSzCoderInfo *aesCoder = &folder->Coders[aesCi];
     UInt64 offset, inSize;
 
-    /* AES must be the outermost coder and not the only one. */
-    if (aesCi != folder->NumCoders - 1 || folder->NumCoders < 2)
+    /* AES must be the pack-stream consumer (coder 0), which is how 7-Zip
+     * writes an encrypted folder, and not the only coder. */
+    if (aesCi != 0 || folder->NumCoders < 2)
       return SZ_ERROR_UNSUPPORTED;
     if (folder->NumPackStreams != 1)
       return SZ_ERROR_UNSUPPORTED;
@@ -770,9 +809,29 @@ static SRes SzFolder_Decode2(const CSzFolder *folder,
     }
   }
 
-  Z7MemLook_CreateVTable(&decryptedStream, decryptedBuf, decryptedSize);
-  res = SzFolder_Decode2_Inner(folder, propsData, unpackSizes, packPositions,
-      &decryptedStream.vt, startPos, outBuffer, outSize, allocMain, tempBuf);
+  {
+    /* Run the inner decoder over the decrypted bytes with a folder that no
+     * longer contains the AES coder. The surviving coders now read the
+     * decrypted memory stream as pack stream 0, and their unpack sizes are
+     * the original entries shifted down past the removed coder. The AES
+     * coder's declared output size is the unpadded plaintext length: the
+     * decrypted buffer is longer (CBC pads to the block size) but only that
+     * many leading bytes are the real payload, so that becomes the pack
+     * span handed to the inner decoder. The memory look-stream has its own
+     * origin, so the inner decode starts at position 0. */
+    CSzFolder reduced;
+    UInt64 reducedPackPositions[2];
+    reducedPackPositions[0] = 0;
+    reducedPackPositions[1] = unpackSizes[aesCi];
+    SzFolder_StripCoder(folder, aesCi, &reduced);
+    Z7MemLook_CreateVTable(&decryptedStream, decryptedBuf, decryptedSize);
+    res = SzFolder_Decode2_Inner(&reduced, propsData, unpackSizes + aesCi,
+        reducedPackPositions, &decryptedStream.vt, 0,
+        outBuffer, outSize, allocMain, tempBuf);
+    fprintf(stderr, "[z7trace] inner res=%d reducedNumCoders=%u mainMethod=0x%x decSize=%zu aesOutSize=%llu outSize=%zu\n",
+        (int)res, (unsigned)reduced.NumCoders, (unsigned)reduced.Coders[0].MethodID,
+        decryptedSize, (unsigned long long)unpackSizes[aesCi], (size_t)outSize);
+  }
 
   if (decryptedBuf)
     ISzAlloc_Free(allocMain, decryptedBuf);
