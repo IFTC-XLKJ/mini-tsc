@@ -243,6 +243,7 @@ typedef struct {
   int fileOpen;
   int opened;
   int closed;
+  char* password;         /* UTF-8 decryption password, or NULL */
 } Z7Archive;
 
 static void z7_archive_close_inner(Z7Archive* a) {
@@ -264,11 +265,19 @@ static void z7_archive_close_inner(Z7Archive* a) {
     File_Close(&a->stream.file);
     a->fileOpen = 0;
   }
+  if (a->password) {
+    /* wipe before freeing so the password does not linger in the heap */
+    size_t n = strlen(a->password);
+    memset(a->password, 0, n);
+    free(a->password);
+    a->password = NULL;
+  }
   a->closed = 1;
 }
 
-/* Returns NULL on error (see z7_last_error()). */
-static Z7Archive* z7_archive_open(const char* path) {
+/* Returns NULL on error (see z7_last_error()).
+ * `password` (UTF-8, may be NULL) is kept for later 7zAES folder decryption. */
+static Z7Archive* z7_archive_open_pw(const char* path, const char* password) {
   if (!path || !path[0]) {
     z7_fail("empty archive path");
     return NULL;
@@ -280,9 +289,23 @@ static Z7Archive* z7_archive_open(const char* path) {
     return NULL;
   }
   a->blockIndex = 0xFFFFFFFF;
+  if (password && password[0]) {
+    size_t n = strlen(password);
+    a->password = (char*)malloc(n + 1);
+    if (!a->password) {
+      free(a);
+      z7_fail("out of memory");
+      return NULL;
+    }
+    memcpy(a->password, password, n + 1);
+  }
 
   WRes wres = InFile_Open(&a->stream.file, path);
   if (wres != 0) {
+    if (a->password) {
+      memset(a->password, 0, strlen(a->password));
+      free(a->password);
+    }
     free(a);
     z7_fail("cannot open archive file");
     return NULL;
@@ -317,6 +340,11 @@ static Z7Archive* z7_archive_open(const char* path) {
   return a;
 }
 
+/* Convenience wrapper for callers that pass no password. */
+static Z7Archive* z7_archive_open(const char* path) {
+  return z7_archive_open_pw(path, NULL);
+}
+
 /* Entry name as UTF-8 (malloc'd by caller contract → free). NULL if OOM. */
 static char* z7_entry_name(const CSzArEx* db, UInt32 i) {
   size_t len = SzArEx_GetFileNameUtf16(db, i, NULL);
@@ -346,15 +374,25 @@ static int z7_find_entry(const CSzArEx* db, const char* name) {
   return -1;
 }
 
+/* Optional password argument: an absent value (undefined/null) or an empty
+ * string means "no password". Returns NULL in that case, else the C string. */
+static const char* z7_opt_password(Value v, char* numBuf, size_t numBufLen) {
+  if (v.tag == TAG_NULL) return NULL;
+  const char* s = z7_value_cstr(v, numBuf, numBufLen);
+  if (!s || !s[0]) return NULL;
+  return s;
+}
+
 /* Extract entry `index` into memory. Caller frees *out (via free). */
 static SRes z7_extract_to_memory(Z7Archive* a, UInt32 index, Byte** out, size_t* outSize) {
   size_t offset = 0;
   size_t outSizeProcessed = 0;
-  SRes res = SzArEx_Extract(
+  SRes res = SzArEx_Extract2(
       &a->db, &a->look.vt, index,
       &a->blockIndex, &a->outBuffer, &a->outBufferSize,
       &offset, &outSizeProcessed,
-      &g_Alloc, &g_AllocTemp);
+      &g_Alloc, &g_AllocTemp,
+      a->password);
   if (res != SZ_OK) return res;
 
   Byte* copy = (Byte*)malloc(outSizeProcessed > 0 ? outSizeProcessed : 1);
@@ -594,10 +632,11 @@ static Value z7_read_buf(Z7Archive* a, const char* entryName) {
 
 /* -------------------------------- public API ------------------------------- */
 
-Value node_7zip_list(Value archivePath) {
-  char nb[64];
+Value node_7zip_list(Value archivePath, Value password) {
+  char nb[64], nb2[64];
   const char* path = z7_value_cstr(archivePath, nb, sizeof(nb));
-  Z7Archive* a = z7_archive_open(path);
+  const char* pw = z7_opt_password(password, nb2, sizeof(nb2));
+  Z7Archive* a = z7_archive_open_pw(path, pw);
   if (!a) return ts_value_null();
   Value result = z7_list_entries(a);
   z7_archive_close_inner(a);
@@ -605,12 +644,13 @@ Value node_7zip_list(Value archivePath) {
   return result;
 }
 
-Value node_7zip_extractToDir(Value archivePath, Value destDir) {
-  char nb[64], nb2[64];
+Value node_7zip_extractToDir(Value archivePath, Value destDir, Value password) {
+  char nb[64], nb2[64], nb3[64];
   const char* path = z7_value_cstr(archivePath, nb, sizeof(nb));
   const char* dest = z7_value_cstr(destDir, nb2, sizeof(nb2));
+  const char* pw = z7_opt_password(password, nb3, sizeof(nb3));
 
-  Z7Archive* a = z7_archive_open(path);
+  Z7Archive* a = z7_archive_open_pw(path, pw);
   if (!a) return ts_value_null();
   /* Create destDir only after the archive opened, so a failed open does not
    * leave a stray empty directory behind. */
@@ -621,13 +661,14 @@ Value node_7zip_extractToDir(Value archivePath, Value destDir) {
   return result;
 }
 
-Value node_7zip_extractMatching(Value archivePath, Value prefix, Value destDir) {
-  char nb[64], nb2[64], nb3[64];
+Value node_7zip_extractMatching(Value archivePath, Value prefix, Value destDir, Value password) {
+  char nb[64], nb2[64], nb3[64], nb4[64];
   const char* path = z7_value_cstr(archivePath, nb, sizeof(nb));
   const char* pre = z7_value_cstr(prefix, nb2, sizeof(nb2));
   const char* dest = z7_value_cstr(destDir, nb3, sizeof(nb3));
+  const char* pw = z7_opt_password(password, nb4, sizeof(nb4));
 
-  Z7Archive* a = z7_archive_open(path);
+  Z7Archive* a = z7_archive_open_pw(path, pw);
   if (!a) return ts_value_null();
   if (dest && dest[0]) z7_mkdirs(dest);
   Value result = z7_extract_all(a, dest ? dest : "", pre ? pre : "");
@@ -636,13 +677,14 @@ Value node_7zip_extractMatching(Value archivePath, Value prefix, Value destDir) 
   return result;
 }
 
-Value node_7zip_extractFile(Value archivePath, Value entryName, Value outPath) {
-  char nb[64], nb2[64], nb3[64];
+Value node_7zip_extractFile(Value archivePath, Value entryName, Value outPath, Value password) {
+  char nb[64], nb2[64], nb3[64], nb4[64];
   const char* path = z7_value_cstr(archivePath, nb, sizeof(nb));
   const char* entry = z7_value_cstr(entryName, nb2, sizeof(nb2));
   const char* out = z7_value_cstr(outPath, nb3, sizeof(nb3));
+  const char* pw = z7_opt_password(password, nb4, sizeof(nb4));
 
-  Z7Archive* a = z7_archive_open(path);
+  Z7Archive* a = z7_archive_open_pw(path, pw);
   if (!a) return ts_value_null();
   Value result = z7_extract_one(a, entry, out);
   z7_archive_close_inner(a);
@@ -650,12 +692,13 @@ Value node_7zip_extractFile(Value archivePath, Value entryName, Value outPath) {
   return result;
 }
 
-Value node_7zip_readFile(Value archivePath, Value entryName) {
-  char nb[64], nb2[64];
+Value node_7zip_readFile(Value archivePath, Value entryName, Value password) {
+  char nb[64], nb2[64], nb3[64];
   const char* path = z7_value_cstr(archivePath, nb, sizeof(nb));
   const char* entry = z7_value_cstr(entryName, nb2, sizeof(nb2));
+  const char* pw = z7_opt_password(password, nb3, sizeof(nb3));
 
-  Z7Archive* a = z7_archive_open(path);
+  Z7Archive* a = z7_archive_open_pw(path, pw);
   if (!a) return ts_value_null();
   Value result = z7_read_one(a, entry);
   z7_archive_close_inner(a);
@@ -663,12 +706,13 @@ Value node_7zip_readFile(Value archivePath, Value entryName) {
   return result;
 }
 
-Value node_7zip_readFileBuffer(Value archivePath, Value entryName) {
-  char nb[64], nb2[64];
+Value node_7zip_readFileBuffer(Value archivePath, Value entryName, Value password) {
+  char nb[64], nb2[64], nb3[64];
   const char* path = z7_value_cstr(archivePath, nb, sizeof(nb));
   const char* entry = z7_value_cstr(entryName, nb2, sizeof(nb2));
+  const char* pw = z7_opt_password(password, nb3, sizeof(nb3));
 
-  Z7Archive* a = z7_archive_open(path);
+  Z7Archive* a = z7_archive_open_pw(path, pw);
   if (!a) return ts_value_null();
   Value result = z7_read_buf(a, entry);
   z7_archive_close_inner(a);
@@ -676,12 +720,13 @@ Value node_7zip_readFileBuffer(Value archivePath, Value entryName) {
   return result;
 }
 
-Value node_7zip_hasEntry(Value archivePath, Value entryName) {
-  char nb[64], nb2[64];
+Value node_7zip_hasEntry(Value archivePath, Value entryName, Value password) {
+  char nb[64], nb2[64], nb3[64];
   const char* path = z7_value_cstr(archivePath, nb, sizeof(nb));
   const char* entry = z7_value_cstr(entryName, nb2, sizeof(nb2));
+  const char* pw = z7_opt_password(password, nb3, sizeof(nb3));
 
-  Z7Archive* a = z7_archive_open(path);
+  Z7Archive* a = z7_archive_open_pw(path, pw);
   if (!a) return ts_value_boolean(0);
   int found = z7_find_entry(&a->db, entry) >= 0;
   z7_archive_close_inner(a);
@@ -689,12 +734,13 @@ Value node_7zip_hasEntry(Value archivePath, Value entryName) {
   return ts_value_boolean(found ? 1 : 0);
 }
 
-Value node_7zip_getEntry(Value archivePath, Value entryName) {
-  char nb[64], nb2[64];
+Value node_7zip_getEntry(Value archivePath, Value entryName, Value password) {
+  char nb[64], nb2[64], nb3[64];
   const char* path = z7_value_cstr(archivePath, nb, sizeof(nb));
   const char* entry = z7_value_cstr(entryName, nb2, sizeof(nb2));
+  const char* pw = z7_opt_password(password, nb3, sizeof(nb3));
 
-  Z7Archive* a = z7_archive_open(path);
+  Z7Archive* a = z7_archive_open_pw(path, pw);
   if (!a) return ts_value_null();
   Value result = z7_get_entry(a, entry);
   z7_archive_close_inner(a);
@@ -702,11 +748,12 @@ Value node_7zip_getEntry(Value archivePath, Value entryName) {
   return result;
 }
 
-Value node_7zip_entryNames(Value archivePath) {
-  char nb[64];
+Value node_7zip_entryNames(Value archivePath, Value password) {
+  char nb[64], nb2[64];
   const char* path = z7_value_cstr(archivePath, nb, sizeof(nb));
+  const char* pw = z7_opt_password(password, nb2, sizeof(nb2));
 
-  Z7Archive* a = z7_archive_open(path);
+  Z7Archive* a = z7_archive_open_pw(path, pw);
   if (!a) return ts_value_null();
   Value result = z7_list_names(a);
   z7_archive_close_inner(a);
@@ -714,12 +761,13 @@ Value node_7zip_entryNames(Value archivePath) {
   return result;
 }
 
-Value node_7zip_size(Value archivePath, Value entryName) {
-  char nb[64], nb2[64];
+Value node_7zip_size(Value archivePath, Value entryName, Value password) {
+  char nb[64], nb2[64], nb3[64];
   const char* path = z7_value_cstr(archivePath, nb, sizeof(nb));
   const char* entry = z7_value_cstr(entryName, nb2, sizeof(nb2));
+  const char* pw = z7_opt_password(password, nb3, sizeof(nb3));
 
-  Z7Archive* a = z7_archive_open(path);
+  Z7Archive* a = z7_archive_open_pw(path, pw);
   if (!a) return ts_value_number(-1);
   double result = z7_size_of(a, entry);
   z7_archive_close_inner(a);
@@ -727,11 +775,12 @@ Value node_7zip_size(Value archivePath, Value entryName) {
   return ts_value_number(result);
 }
 
-Value node_7zip_info(Value archivePath) {
-  char nb[64];
+Value node_7zip_info(Value archivePath, Value password) {
+  char nb[64], nb2[64];
   const char* path = z7_value_cstr(archivePath, nb, sizeof(nb));
+  const char* pw = z7_opt_password(password, nb2, sizeof(nb2));
 
-  Z7Archive* a = z7_archive_open(path);
+  Z7Archive* a = z7_archive_open_pw(path, pw);
   if (!a) return ts_value_null();
   Value result = z7_info_obj(a);
   z7_archive_close_inner(a);
@@ -769,10 +818,11 @@ static Z7Archive* z7_as_archive(Value v) {
   return a;
 }
 
-Value node_7zip_open(Value archivePath) {
-  char nb[64];
+Value node_7zip_open(Value archivePath, Value password) {
+  char nb[64], nb2[64];
   const char* path = z7_value_cstr(archivePath, nb, sizeof(nb));
-  Z7Archive* a = z7_archive_open(path);
+  const char* pw = z7_opt_password(password, nb2, sizeof(nb2));
+  Z7Archive* a = z7_archive_open_pw(path, pw);
   if (!a) return ts_value_null();
   return ts_value_object(a);
 }

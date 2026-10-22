@@ -25,47 +25,49 @@ declare module "7zip" {
     totalSize: number;
   }
 
-  /* ---- one-shot helpers (open + close the archive internally) ---- */
+  /* ---- one-shot helpers (open + close the archive internally) ----
+ * The optional trailing `password` decrypts 7zAES-encrypted archives; omit it
+ * (or pass undefined) for unencrypted ones. */
 
-  /** List every entry in the archive without extracting. null when the
-     * archive cannot be opened (see lastError()). */
-  function list(archivePath: string): ArchiveEntry[] | null;
+/** List every entry in the archive without extracting. null when the
+   * archive cannot be opened (see lastError()). */
+  function list(archivePath: string, password?: string): ArchiveEntry[] | null;
 
   /** Extract all entries into destDir (created if it does not exist).
      * Returns the number of files written; null when the archive cannot be
      * opened or extraction fails (see lastError()). */
-  function extractToDir(archivePath: string, destDir: string): number | null;
+  function extractToDir(archivePath: string, destDir: string, password?: string): number | null;
 
   /** Extract only entries at or under `prefix` into destDir. `prefix` matches a
      * whole path component ("" extracts everything). Returns the number of files
      * written; null on error (see lastError()). */
-  function extractMatching(archivePath: string, prefix: string, destDir: string): number | null;
+  function extractMatching(archivePath: string, prefix: string, destDir: string, password?: string): number | null;
 
   /** Extract a single entry to an explicit output path. */
-  function extractFile(archivePath: string, entryName: string, outPath: string): void;
+  function extractFile(archivePath: string, entryName: string, outPath: string, password?: string): void;
 
   /** Read one entry into memory and return it as a UTF-8 string.
      * Returns null when the entry or archive is missing (see lastError()). */
-  function readFile(archivePath: string, entryName: string): string | null;
+  function readFile(archivePath: string, entryName: string, password?: string): string | null;
 
   /** Read one entry into memory as a binary-safe Buffer.
      * Returns null when the entry or archive is missing (see lastError()). */
-  function readFileBuffer(archivePath: string, entryName: string): any;
+  function readFileBuffer(archivePath: string, entryName: string, password?: string): any;
 
   /** true when the archive contains the named entry. */
-  function hasEntry(archivePath: string, entryName: string): boolean;
+  function hasEntry(archivePath: string, entryName: string, password?: string): boolean;
 
   /** Metadata for a single entry, or null when absent. */
-  function getEntry(archivePath: string, entryName: string): ArchiveEntry | null;
+  function getEntry(archivePath: string, entryName: string, password?: string): ArchiveEntry | null;
 
   /** Array of entry names only; null when the archive cannot be opened. */
-  function entryNames(archivePath: string): string[] | null;
+  function entryNames(archivePath: string, password?: string): string[] | null;
 
   /** Unpacked size of an entry, or -1 when absent. */
-  function size(archivePath: string, entryName: string): number;
+  function size(archivePath: string, entryName: string, password?: string): number;
 
   /** Archive-level summary. */
-  function info(archivePath: string): ArchiveInfo | null;
+  function info(archivePath: string, password?: string): ArchiveInfo | null;
 
   /** true when the path exists and begins with the 7z signature. */
   function isArchive(archivePath: string): boolean;
@@ -75,8 +77,9 @@ declare module "7zip" {
 
   /* ---- handle API (open once, read many) ---- */
 
-  /** Open an archive for repeated access. Call close() when done. */
-  function open(archivePath: string): any;
+  /** Open an archive for repeated access. Call call close() when done.
+     * `password` decrypts 7zAES-encrypted archives (optional). */
+  function open(archivePath: string, password?: string): any;
 
   /** List every entry in an open archive; null when the handle is not open. */
   function handleList(handle: any): ArchiveEntry[] | null;

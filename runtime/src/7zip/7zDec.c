@@ -4,6 +4,7 @@
 #include "Precomp.h"
 
 #include <string.h>
+#include <stdio.h>
 
 /* #define Z7_PPMD_SUPPORT */
 
@@ -20,12 +21,80 @@
 #include "Ppmd7.h"
 #endif
 
+/* 7zAES support (decode-only). Supplied by 7zAesDec.c. */
+#include "7zAesDec.h"
+
 #define k_Copy 0
 #ifndef Z7_NO_METHOD_LZMA2
 #define k_LZMA2 0x21
 #endif
 #define k_LZMA  0x30101
 #define k_BCJ2  0x303011B
+
+/* ---- in-memory ILookInStream (used to feed decrypted bytes to inner decoders) ----
+ * 7zAES is an input filter: the packed stream is AES-CBC decrypted before the
+ * main method decompresses it. When a folder carries the 7zAES coder we read the
+ * whole packed stream, decrypt it into a memory buffer, and hand that buffer to
+ * the main-method decoder through this read-only look-stream. */
+
+typedef struct {
+  ILookInStream vt;
+  const Byte *data;
+  size_t size;
+  size_t pos;
+} CZ7MemLook;
+
+static SRes Z7MemLook_Look(ILookInStreamPtr pp, const void **buf, size_t *size) {
+  Z7_CONTAINER_FROM_VTBL_TO_DECL_VAR_pp_vt_p(CZ7MemLook)
+  {
+    size_t avail = p->size - p->pos;
+    if (*size > avail) *size = avail;
+    *buf = p->data + p->pos;
+  }
+  return SZ_OK;
+}
+
+static SRes Z7MemLook_Skip(ILookInStreamPtr pp, size_t offset) {
+  Z7_CONTAINER_FROM_VTBL_TO_DECL_VAR_pp_vt_p(CZ7MemLook)
+  if (offset > p->size - p->pos) return SZ_ERROR_INPUT_EOF;
+  p->pos += offset;
+  return SZ_OK;
+}
+
+static SRes Z7MemLook_Read(ILookInStreamPtr pp, void *buf, size_t *size) {
+  Z7_CONTAINER_FROM_VTBL_TO_DECL_VAR_pp_vt_p(CZ7MemLook)
+  {
+    size_t avail = p->size - p->pos;
+    if (*size > avail) *size = avail;
+    memcpy(buf, p->data + p->pos, *size);
+    p->pos += *size;
+  }
+  return SZ_OK;
+}
+
+static SRes Z7MemLook_Seek(ILookInStreamPtr pp, Int64 *pos, ESzSeek origin) {
+  Z7_CONTAINER_FROM_VTBL_TO_DECL_VAR_pp_vt_p(CZ7MemLook)
+  {
+    Int64 base = (origin == SZ_SEEK_SET) ? 0
+               : (origin == SZ_SEEK_CUR) ? (Int64)p->pos
+               : (Int64)p->size;
+    Int64 np = base + *pos;
+    if (np < 0 || (UInt64)np > p->size) return SZ_ERROR_INPUT_EOF;
+    p->pos = (size_t)np;
+    *pos = np;
+  }
+  return SZ_OK;
+}
+
+static void Z7MemLook_CreateVTable(CZ7MemLook *p, const Byte *data, size_t size) {
+  p->vt.Look = Z7MemLook_Look;
+  p->vt.Skip = Z7MemLook_Skip;
+  p->vt.Read = Z7MemLook_Read;
+  p->vt.Seek = Z7MemLook_Seek;
+  p->data = data;
+  p->size = size;
+  p->pos = 0;
+}
 
 #if !defined(Z7_NO_METHODS_FILTERS)
 #define Z7_USE_BRANCH_FILTER
@@ -408,7 +477,7 @@ static SRes CheckSupportedFolder(const CSzFolder *f)
 
 
 
-static SRes SzFolder_Decode2(const CSzFolder *folder,
+static SRes SzFolder_Decode2_Inner(const CSzFolder *folder,
     const Byte *propsData,
     const UInt64 *unpackSizes,
     const UInt64 *packPositions,
@@ -627,10 +696,94 @@ static SRes SzFolder_Decode2(const CSzFolder *folder,
 }
 
 
-SRes SzAr_DecodeFolder(const CSzAr *p, UInt32 folderIndex,
+/* AES-aware folder decode.
+ *
+ * When `folder` carries a 7zAES coder (always the outermost coder, consuming
+ * the packed stream), the packed bytes are read, decrypted into a temporary
+ * buffer, and the inner decoder is run against a memory look-stream over the
+ * decrypted bytes. Otherwise this is a straight pass-through to the inner
+ * decoder. `password` may be NULL when no AES coder is present. */
+static SRes SzFolder_Decode2(const CSzFolder *folder,
+    const Byte *propsData,
+    const UInt64 *unpackSizes,
+    const UInt64 *packPositions,
+    ILookInStreamPtr inStream, UInt64 startPos,
+    Byte *outBuffer, SizeT outSize, ISzAllocPtr allocMain,
+    Byte *tempBuf[],
+    const char *password)
+{
+  UInt32 ci;
+  UInt32 aesCi = (UInt32)-1;
+  CZ7MemLook decryptedStream;
+  Byte *decryptedBuf = NULL;
+  size_t decryptedSize = 0;
+  SRes res;
+
+  for (ci = 0; ci < folder->NumCoders; ci++)
+    if (z7_aes_is_aes_method((UInt32)folder->Coders[ci].MethodID))
+    {
+      aesCi = ci;
+      break;
+    }
+  fprintf(stderr, "[z7trace] decode2 NumCoders=%u aesCi=%u pw=%s\n", (unsigned)folder->NumCoders, (unsigned)aesCi, password ? "yes" : "no");
+
+  if (aesCi == (UInt32)-1)
+    return SzFolder_Decode2_Inner(folder, propsData, unpackSizes, packPositions,
+        inStream, startPos, outBuffer, outSize, allocMain, tempBuf);
+
+  {
+    const CSzCoderInfo *aesCoder = &folder->Coders[aesCi];
+    UInt64 offset, inSize;
+
+    /* AES must be the outermost coder and not the only one. */
+    if (aesCi != folder->NumCoders - 1 || folder->NumCoders < 2)
+      return SZ_ERROR_UNSUPPORTED;
+    if (folder->NumPackStreams != 1)
+      return SZ_ERROR_UNSUPPORTED;
+
+    offset = packPositions[0];
+    inSize = packPositions[1] - offset;
+    if ((inSize & 15) != 0)
+      return SZ_ERROR_DATA; /* AES-CBC requires 16-byte alignment */
+
+    if (!password || !password[0])
+      return SZ_ERROR_UNSUPPORTED; /* no password supplied for an encrypted folder */
+
+    if (inSize != 0)
+    {
+      decryptedBuf = (Byte *)ISzAlloc_Alloc(allocMain, (SizeT)inSize);
+      if (!decryptedBuf)
+        return SZ_ERROR_MEM;
+      decryptedSize = (size_t)inSize;
+      res = LookInStream_SeekTo(inStream, startPos + offset);
+      if (res == SZ_OK)
+        res = LookInStream_Read(inStream, decryptedBuf, decryptedSize);
+      if (res == SZ_OK &&
+          z7_aes_decode(propsData + aesCoder->PropsOffset, aesCoder->PropsSize,
+                        password, decryptedBuf, decryptedSize) != Z7_AES_OK)
+        res = SZ_ERROR_CRC; /* wrong password or corrupt data */
+      if (res != SZ_OK)
+      {
+        ISzAlloc_Free(allocMain, decryptedBuf);
+        return res;
+      }
+    }
+  }
+
+  Z7MemLook_CreateVTable(&decryptedStream, decryptedBuf, decryptedSize);
+  res = SzFolder_Decode2_Inner(folder, propsData, unpackSizes, packPositions,
+      &decryptedStream.vt, startPos, outBuffer, outSize, allocMain, tempBuf);
+
+  if (decryptedBuf)
+    ISzAlloc_Free(allocMain, decryptedBuf);
+  return res;
+}
+
+
+SRes SzAr_DecodeFolder2(const CSzAr *p, UInt32 folderIndex,
     ILookInStreamPtr inStream, UInt64 startPos,
     Byte *outBuffer, size_t outSize,
-    ISzAllocPtr allocMain)
+    ISzAllocPtr allocMain, const char *password)
 {
   SRes res;
   CSzFolder folder;
@@ -657,7 +810,7 @@ SRes SzAr_DecodeFolder(const CSzAr *p, UInt32 folderIndex,
         &p->CoderUnpackSizes[p->FoToCoderUnpackSizes[folderIndex]],
         p->PackPositions + p->FoStartPackStreamIndex[folderIndex],
         inStream, startPos,
-        outBuffer, (SizeT)outSize, allocMain, tempBuf);
+        outBuffer, (SizeT)outSize, allocMain, tempBuf, password);
     
     for (i = 0; i < 3; i++)
       ISzAlloc_Free(allocMain, tempBuf[i]);
@@ -669,4 +822,13 @@ SRes SzAr_DecodeFolder(const CSzAr *p, UInt32 folderIndex,
 
     return res;
   }
+}
+
+SRes SzAr_DecodeFolder(const CSzAr *p, UInt32 folderIndex,
+    ILookInStreamPtr inStream, UInt64 startPos,
+    Byte *outBuffer, size_t outSize,
+    ISzAllocPtr allocMain)
+{
+  return SzAr_DecodeFolder2(p, folderIndex, inStream, startPos,
+      outBuffer, outSize, allocMain, NULL);
 }

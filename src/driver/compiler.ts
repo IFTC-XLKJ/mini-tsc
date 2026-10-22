@@ -1432,6 +1432,8 @@ extern TsErrorContext _ts_current_error;
           "7zCrcOpt.c", "7zDec.c", "7zFile.c", "7zStream.c",
           "CpuArch.c", "Delta.c", "Bcj2.c", "Bra.c", "Bra86.c",
           "BraIA64.c", "LzmaDec.c", "Lzma2Dec.c", "Ppmd7.c", "Ppmd7Dec.c",
+          /* 7zAES decryption (AES-256-CBC + SHA-256 KDF) */
+          "7zAesDec.c", "Aes.c", "AesOpt.c", "Sha256.c", "Sha256Opt.c",
         ]) {
           const p = path.join(z7Dir, f);
           if (fs.existsSync(p)) runtimeSrcFiles.push(p);

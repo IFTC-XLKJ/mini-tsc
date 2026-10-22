@@ -2021,6 +2021,26 @@ export class ExpressionEmitter {
           }
         }
 
+        // 7zip: pad the optional trailing password argument with null.
+        if (moduleName === "7zip") {
+          const requiredArgs: Record<string, number> = {
+            list: 2, extractToDir: 3, extractMatching: 4, extractFile: 4,
+            readFile: 3, readFileBuffer: 3, hasEntry: 3, getEntry: 3,
+            entryNames: 2, size: 3, info: 2, open: 2,
+            isArchive: 1, lastError: 0,
+            handleList: 1, handleNames: 1, handleExtractAll: 2, handleExtractMatching: 3,
+            handleExtract: 3, handleRead: 2, handleReadBuffer: 2, handleHas: 2,
+            handleGetEntry: 2, handleSize: 2, handleInfo: 1, handleIsOpen: 1,
+            handleCount: 1, close: 1,
+          };
+          const required = requiredArgs[callee.property];
+          if (required !== undefined) {
+            while (args.length < required) {
+              args.push("ts_value_null()");
+            }
+          }
+        }
+
         // events: EventEmitter() zero-arg constructor; emit is variadic
         if (moduleName === "events") {
           if (callee.property === "EventEmitter") {

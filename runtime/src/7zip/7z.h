@@ -102,6 +102,13 @@ SRes SzAr_DecodeFolder(const CSzAr *p, UInt32 folderIndex,
     Byte *outBuffer, size_t outSize,
     ISzAllocPtr allocMain);
 
+/* Password-aware variant: `password` (UTF-8, may be NULL) is used to decrypt
+ * 7zAES-encrypted folders. */
+SRes SzAr_DecodeFolder2(const CSzAr *p, UInt32 folderIndex,
+    ILookInStreamPtr stream, UInt64 startPos,
+    Byte *outBuffer, size_t outSize,
+    ISzAllocPtr allocMain, const char *password);
+
 typedef struct
 {
   CSzAr db;
@@ -183,6 +190,21 @@ SRes SzArEx_Extract(
     size_t *outSizeProcessed, /* size of file in *outBuffer */
     ISzAllocPtr allocMain,
     ISzAllocPtr allocTemp);
+
+/* Password-aware variant: `password` (UTF-8, may be NULL) is used to decrypt
+ * 7zAES-encrypted folders. */
+SRes SzArEx_Extract2(
+    const CSzArEx *db,
+    ILookInStreamPtr inStream,
+    UInt32 fileIndex,
+    UInt32 *blockIndex,
+    Byte **outBuffer,
+    size_t *outBufferSize,
+    size_t *offset,
+    size_t *outSizeProcessed,
+    ISzAllocPtr allocMain,
+    ISzAllocPtr allocTemp,
+    const char *password);
 
 
 /*

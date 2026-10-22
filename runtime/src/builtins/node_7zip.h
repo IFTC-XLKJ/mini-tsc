@@ -27,42 +27,44 @@
  * the transpiler's name-based method dispatch ambiguity.
  */
 
-/* ---- one-shot helpers ---- */
+/* ---- one-shot helpers ----
+ * `password` is an optional trailing argument: pass undefined/null (or "") for
+ * unencrypted archives. It decrypts 7zAES-encrypted folders. */
 
 /* List entries: array of { name, size, isDir, mtime, cTime, attrib, index }. */
-Value node_7zip_list(Value archivePath);
+Value node_7zip_list(Value archivePath, Value password);
 
 /* Extract every entry into destDir (created if missing).
  * Returns the number of files written, or null on error (see lastError()). */
-Value node_7zip_extractToDir(Value archivePath, Value destDir);
+Value node_7zip_extractToDir(Value archivePath, Value destDir, Value password);
 
 /* Extract only entries at/under `prefix` into destDir (created if missing).
  * `prefix` matches a whole path component ("" extracts everything).
  * Returns the number of files written, or null on error. */
-Value node_7zip_extractMatching(Value archivePath, Value prefix, Value destDir);
+Value node_7zip_extractMatching(Value archivePath, Value prefix, Value destDir, Value password);
 
 /* Extract a single entry to an explicit output path. */
-Value node_7zip_extractFile(Value archivePath, Value entryName, Value outPath);
+Value node_7zip_extractFile(Value archivePath, Value entryName, Value outPath, Value password);
 
 /* Read one entry into memory and return it as a UTF-8 string. */
-Value node_7zip_readFile(Value archivePath, Value entryName);
+Value node_7zip_readFile(Value archivePath, Value entryName, Value password);
 /* Same, but returns a binary-safe Buffer of the raw bytes. */
-Value node_7zip_readFileBuffer(Value archivePath, Value entryName);
+Value node_7zip_readFileBuffer(Value archivePath, Value entryName, Value password);
 
 /* true if the archive contains the named entry. */
-Value node_7zip_hasEntry(Value archivePath, Value entryName);
+Value node_7zip_hasEntry(Value archivePath, Value entryName, Value password);
 
 /* Metadata object { name, size, isDir, mtime, cTime, attrib, index } or null. */
-Value node_7zip_getEntry(Value archivePath, Value entryName);
+Value node_7zip_getEntry(Value archivePath, Value entryName, Value password);
 
 /* Array of entry names only. */
-Value node_7zip_entryNames(Value archivePath);
+Value node_7zip_entryNames(Value archivePath, Value password);
 
 /* Unpacked size of an entry, or -1 when absent. */
-Value node_7zip_size(Value archivePath, Value entryName);
+Value node_7zip_size(Value archivePath, Value entryName, Value password);
 
 /* Archive summary { count, fileCount, dirCount, totalSize }. */
-Value node_7zip_info(Value archivePath);
+Value node_7zip_info(Value archivePath, Value password);
 
 /* true if the file exists and looks like a 7z archive. */
 Value node_7zip_isArchive(Value archivePath);
@@ -72,8 +74,9 @@ Value node_7zip_lastError(void);
 
 /* ---- handle API ---- */
 
-/* Open an archive for repeated access → opaque handle (TAG_OBJECT). */
-Value node_7zip_open(Value archivePath);
+/* Open an archive for repeated access → opaque handle (TAG_OBJECT).
+ * `password` is an optional trailing argument (undefined/null/"" for none). */
+Value node_7zip_open(Value archivePath, Value password);
 
 /* List every entry in an open archive → array of metadata objects. */
 Value node_7zip_handleList(Value handle);
