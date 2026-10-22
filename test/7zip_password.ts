@@ -17,7 +17,11 @@ function main(): void {
   const noPw: any = sevenZip.readFile(archive, "secret.txt");
   console.log("no-password read is null:", noPw === null, "|", sevenZip.lastError());
   const wrong: any = sevenZip.readFile(archive, "secret.txt", "wrong-pw");
-  console.log("wrong-password read is null:", wrong === null, "|", sevenZip.lastError());
+  console.log("wrong-password read is null:", wrong === null);
+  // AES-CBC has no integrity check, so a bad key is caught by the stored CRC.
+  console.log("wrong-password error mentions password:", sevenZip.lastError().indexOf("password") >= 0);
+  const emptyPw: any = sevenZip.readFile(archive, "secret.txt", "");
+  console.log("empty-password read is null:", emptyPw === null);
 
   // Correct password decrypts.
   const plain = sevenZip.readFile(archive, "secret.txt", password);

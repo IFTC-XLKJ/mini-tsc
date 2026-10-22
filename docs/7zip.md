@@ -2,7 +2,7 @@
 
 ## 概述
 
-`7zip` 模块基于内置的 [7-Zip](https://www.7-zip.org/) 解码器（`runtime/src/7zip/`，仅含解压所需的最小源码子集），用于在 mini-tsc 编译出的原生程序中**读取 / 解压 `.7z` 归档**。它是**只读**的：只能列出与解压，不能创建或写入归档。
+`7zip` 模块基于内置的 [7-Zip](https://www.7-zip.org/) 解码器（`runtime/src/7zip/`，仅含解压所需的最小源码子集），用于在 mini-tsc 编译出的原生程序中**读取 / 解压 `.7z` 归档**。它是**只读**的：只能列出与解压，不能创建或写入归档。支持**加密归档**（7zAES AES-256-CBC 内容加密，见下文“加密归档”）。
 
 模块提供两层 API：
 
@@ -12,6 +12,48 @@
 > 句柄层是**函数式**的：句柄作为第一个参数传入（`7zip.handleCount(h)`），而不是 `h.count()`。这是为了避开转译器基于方法名的分发歧义。
 
 所有错误处理都是**优雅降级**的：失败时返回 `null` / `false` / `-1`（不会抛出异常），可通过 `lastError()` 取回原因。
+
+## 加密归档（7zAES 密码）
+
+所有**一次性**函数以及 `open` 都接受一个**可选末位 `password` 参数**：
+
+```typescript
+sevenZip.list(path, password?)
+sevenZip.readFile(path, name, password?)
+sevenZip.extractToDir(path, dir, password?)
+sevenZip.open(path, password?)
+// … 其余一次性函数同理
+```
+
+- 省略该参数（或传 `undefined` / 空串）= 按无密码处理，行为与旧版完全一致（向后兼容）。
+- 传入密码即启用 **7zAES（AES-256-CBC）内容解密**：解压前先用密码派生密钥解密打包流，再交给内层解码器。
+- 句柄层在 `open` 时确定密码，之后所有 `handle*` 调用复用该密码（句柄层函数不再单独接受密码）。
+
+支持的加密深度：**仅内容加密（7zAES AES-256-CBC 打包流）**。**加密文件头**（文件名被加密、`EncodedHeader`）**不在支持范围**，这类归档会以 `lastError()` 报错并返回 `null`。
+
+错误契约（与无密码路径一致，均**不抛出**）：
+
+| 情况 | 返回 | `lastError()` |
+|---|---|---|
+| 未提供密码但归档已加密 | `null` | `unsupported compression method` |
+| 密码错误 | `null` | `wrong password (CRC check failed)` |
+| 密码为空串 | `null` | 同“未提供密码” |
+
+> 7zAES 采用 AES-CBC，本身**没有认证标签**，因此错误密码解出的是**等长乱码**，只能靠归档内存储的 CRC 检出。`lastError()` 因此在“有密码但 CRC 失败”时特意报告 **`wrong password (CRC check failed)`**，以区别于真正的数据损坏。若归档未存 CRC，则错误密码**无法被检测**（会返回乱码内容）——这与 7-Zip 自身的行为一致。
+
+```typescript
+import * as sevenZip from '7zip';
+
+const archive = 'secret.7z';
+console.log(sevenZip.readFile(archive, 'secret.txt'));               // null
+console.log(sevenZip.readFile(archive, 'secret.txt', 'nope'));       // null, lastError() 含 "password"
+console.log(sevenZip.readFile(archive, 'secret.txt', 's3cret-pw'));  // "top secret payload"
+sevenZip.extractToDir(archive, './out', 's3cret-pw');                // 3
+
+const h = sevenZip.open(archive, 's3cret-pw');
+console.log(sevenZip.handleRead(h, 'secret.txt'));
+sevenZip.close(h);
+```
 
 ## API 分组索引
 
@@ -43,6 +85,8 @@
 `info()` / `handleInfo()` 返回：`{ count, fileCount, dirCount, totalSize }`。
 
 ## API 列表
+
+> 下方各**一次性**函数的签名均接受**可选末位 `password` 参数**（如 `list(archivePath, password?)`、`readFile(archivePath, entryName, password?)`），用于解密 7zAES 加密归档；为简洁起见示例中省略。详见上文“加密归档”。
 
 ### `7zip.list(archivePath)`
 
@@ -294,8 +338,12 @@ main();
 
 ## 实现说明
 
-- 引擎源码位于 `runtime/src/7zip/`（7-Zip ANSI-C 发布版，公有领域 / LGPL 混合许可），已按单目录**扁平化**存放；仅链接解压所需的最小 `.c` 子集（`7zAlloc.c 7zArcIn.c 7zBuf.c 7zBuf2.c 7zCrc.c 7zCrcOpt.c 7zDec.c 7zFile.c 7zStream.c CpuArch.c Delta.c Bcj2.c Bra.c Bra86.c BraIA64.c LzmaDec.c Lzma2Dec.c Ppmd7.c Ppmd7Dec.c`）。编码器相关文件不参与链接。
+- 引擎源码位于 `runtime/src/7zip/`（7-Zip ANSI-C 发布版，公有领域 / LGPL 混合许可），已按单目录**扁平化**存放；仅链接解压所需的最小 `.c` 子集（`7zAlloc.c 7zArcIn.c 7zBuf.c 7zBuf2.c 7zCrc.c 7zCrcOpt.c 7zDec.c 7zFile.c 7zStream.c CpuArch.c Delta.c Bcj2.c Bra.c Bra86.c BraIA64.c LzmaDec.c Lzma2Dec.c Ppmd7.c Ppmd7Dec.c`），加密归档额外链接 `7zAesDec.c Aes.c AesOpt.c Sha256.c Sha256Opt.c`。编码器相关文件不参与链接。
 - 包装层为 `runtime/src/builtins/node_7zip.c`，通过 `registry.ts` 注册为内置模块。
+- **7zAES 支持是对 vendored 解码器的受控扩展**（该子集原本是 decode-only 且无密码概念）：
+  - `runtime/src/7zip/7zAesDec.c` / `.h`（新增）实现 7zAES 解码：coder 属性解析、SHA-256 KDF、UTF-8→UTF-16LE 口令编码、AES-256-CBC 原地解密。
+  - `7zDec.c` 新增 AES 感知的解码包装：识别 folder 中的 7zAES coder（在真实的 7-Zip 归档里它是 **coder[0]**，即打包流的消费者），解密打包流后**移除 AES coder**（`SzFolder_StripCoder`），再把余下的解码器链跑在解密后的内存流（`CZ7MemLook`）上。AES 的声明输出长度即明文长度（CBC 的填充被忽略）。
+  - 原有公开函数签名保留为传入 `NULL` 口令的薄包装（`SzFolder_Decode` / `SzArEx_Extract`），使 `Util/7z/7zMain.c` 等调用者仍可编译。这些改动使 vendored 树**刻意偏离**上游，若重新同步上游需重新施加。
 - 使用 `7zip` 模块时，编译器自动：
   - 把上述 `.c` 文件加入链接集；
   - 追加 `-I<runtime>/runtime/src/7zip` 与 `-DZ7_PPMD_SUPPORT`；
