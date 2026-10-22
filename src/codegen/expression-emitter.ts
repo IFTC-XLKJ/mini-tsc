@@ -1899,9 +1899,17 @@ export class ExpressionEmitter {
 
     if (callee.kind === "property_access" &&
         callee.object.kind === "identifier") {
-      const moduleName = callee.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "mouse", "quickjs"];
-      if (builtinModules.includes(moduleName) && this.canTreatAsBuiltinModule(moduleName)) {
+      // Resolve the module name: either the identifier is itself a builtin
+      // module name (`fs.readFileSync`) or a namespace alias for a builtin
+      // (`import * as sz from "7zip"` → `sz.list`).
+      let moduleName = callee.object.name;
+      const nsPath = this.namespaceModulePaths.get(callee.object.name);
+      const nsBuiltin = nsPath && nsPath.startsWith("node:") ? nsPath.slice("node:".length) : null;
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "mouse", "quickjs", "7zip"];
+      if (nsBuiltin && builtinModules.includes(nsBuiltin)) {
+        moduleName = nsBuiltin;
+      }
+      if (builtinModules.includes(moduleName) && this.canTreatAsBuiltinModule(callee.object.name)) {
         const funcName = `node_${moduleName}_${callee.property}`;
         // Wrap each argument in Value constructors
         let args = (node.arguments || []).map((a: CNode) => {
@@ -4128,7 +4136,7 @@ export class ExpressionEmitter {
     // must emit as function calls: node_process_argv()
     if (node.object.kind === "identifier") {
       const moduleName = node.object.name;
-      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "mouse", "quickjs"];
+      const builtinModules = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "mouse", "quickjs", "7zip"];
       if (builtinModules.includes(moduleName) && this.canTreatAsBuiltinModule(moduleName)) {
         const funcName = `node_${moduleName}_${node.property}`;
         this._lastBuiltinCall = funcName;
@@ -5240,13 +5248,17 @@ export class ExpressionEmitter {
     if (a.kind === "number_literal") return `ts_value_number(${emitted})`;
     // Boolean literal → wrap as Value boolean
     if (a.kind === "boolean_literal") return emitted ? "ts_value_boolean(1)" : "ts_value_boolean(0)";
-    // Numeric binary expressions — need Value wrapping
-    if (a.kind === "binary_expression" && a.leftType === "number") {
-      const compOps = ["<", ">", "<=", ">=", "==", "===", "!=", "!=="];
+    // Comparison / equality expressions always emit a C int (`!ts_to_boolean(x)`,
+    // `(a == b)`, …) regardless of operand type — wrap as a boolean Value.
+    if (a.kind === "binary_expression") {
+      const compOps = ["<", ">", "<=", ">=", "==", "===", "!=", "!==", "instanceof", "in"];
       if (compOps.includes(a.operator)) {
         return `ts_value_boolean(${emitted})`;
       }
-      return `ts_value_number(${emitted})`;
+      // Numeric binary expressions — need Value wrapping
+      if (a.leftType === "number") {
+        return `ts_value_number(${emitted})`;
+      }
     }
     // Identifier with known type
     if (a.kind === "identifier") {

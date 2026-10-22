@@ -4,7 +4,7 @@ import { BUILTIN_MODULES } from "../builtins/registry.js";
 /** Node built-in module names we can tree-shake. */
 export const BUILTIN_MODULE_NAMES = [
   "fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto",
-  "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype", "mouse", "quickjs",
+  "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype", "mouse", "quickjs", "7zip",
 ] as const;
 
 export type BuiltinModuleName = (typeof BUILTIN_MODULE_NAMES)[number];
@@ -713,6 +713,11 @@ export function analyzeFeatureUsage(
     usage.features.add("buffer");
   }
 
+  // 7zip's readFileBuffer / handleReadBuffer return a Buffer.
+  if (usage.modules.has("7zip")) {
+    usage.features.add("buffer");
+  }
+
   // Modules that construct objects/arrays pull in hashmap/array runtime units.
   // fs/path read options via ts_hashmap_get; nearly every node_* unit needs both.
   if (usage.modules.has("process") &&
@@ -724,7 +729,7 @@ export function analyzeFeatureUsage(
   }
   const modulesNeedingHashArray = [
     "fs", "path", "http", "net", "events", "child_process",
-    "crypto", "assert", "readline", "os", "worker_threads", "sqlite", "webview", "ffi", "uuid", "mouse", "quickjs",
+    "crypto", "assert", "readline", "os", "worker_threads", "sqlite", "webview", "ffi", "uuid", "mouse", "quickjs", "7zip",
   ];
   for (const m of modulesNeedingHashArray) {
     if (usage.modules.has(m)) {

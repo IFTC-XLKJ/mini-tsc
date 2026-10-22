@@ -611,7 +611,7 @@ export class AstVisitor {
       "fs", "path", "http", "https", "net", "os", "process", "child_process",
       "crypto", "url", "util", "events", "stream", "buffer", "querystring",
       "assert", "constants", "module", "repl", "tty", "zlib", "readline",
-      "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype", "mouse", "quickjs",
+      "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype", "mouse", "quickjs", "7zip",
     ]);
     if (NODE_BUILTINS.has(specifier)) {
       // Default import: import chalk from "chalk"
@@ -795,7 +795,7 @@ export class AstVisitor {
         const builtinModules = [
           "fs", "path", "process", "os", "http", "net", "child_process",
           "events", "readline", "assert", "crypto", "worker_threads",
-          "mouse",
+          "mouse", "7zip",
         ];
         let initExpr: ts.Expression | undefined = decl.initializer;
         if (initExpr && ts.isAwaitExpression(initExpr)) {
@@ -803,9 +803,19 @@ export class AstVisitor {
         }
         if (initExpr && ts.isCallExpression(initExpr) &&
             ts.isPropertyAccessExpression(initExpr.expression) &&
-            ts.isIdentifier(initExpr.expression.expression) &&
-            builtinModules.includes(initExpr.expression.expression.text)) {
-          const modName = initExpr.expression.expression.text;
+            ts.isIdentifier(initExpr.expression.expression)) {
+          // Module name is either the identifier itself (fs.readFileSync) or a
+          // namespace alias for a builtin (import * as sz from "7zip" → sz.list).
+          const objIdent = initExpr.expression.expression.text;
+          const nsPath = this.namespaceModulePaths.get(objIdent);
+          const modName = builtinModules.includes(objIdent)
+            ? objIdent
+            : (nsPath && nsPath.startsWith("node:") && builtinModules.includes(nsPath.slice(5))
+                ? nsPath.slice(5)
+                : null);
+          if (!modName) {
+            // Not a builtin call — leave cType as-is.
+          } else {
           const method = initExpr.expression.name.getText();
           const mod = getBuiltinModule(modName);
           const fn = mod?.functions.find(f => f.tsName === method);
@@ -825,6 +835,7 @@ export class AstVisitor {
           // await of async builtin still yields Value (Promise payload boxed)
           if (decl.initializer && ts.isAwaitExpression(decl.initializer)) {
             cType = "Value";
+          }
           }
         }
       }

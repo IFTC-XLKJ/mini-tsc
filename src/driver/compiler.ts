@@ -161,7 +161,7 @@ export class CompilerDriver {
           usedBuiltins.add(builtin);
         }
       }
-      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype", "mouse", "quickjs"];
+      const globalBuiltins = ["fs", "path", "process", "os", "http", "net", "child_process", "events", "readline", "assert", "crypto", "worker_threads", "chalk", "sqlite", "ffi", "webview", "uuid", "ctype", "mouse", "quickjs", "7zip"];
       for (const builtin of globalBuiltins) {
         if (cEmitter.unitUsesBuiltin(unit, builtin)) {
           usedBuiltins.add(builtin);
@@ -1383,6 +1383,7 @@ extern TsErrorContext _ts_current_error;
     const needFfi = usage?.modules.has("ffi") ?? false;
     const needWebview = usage?.modules.has("webview") ?? false;
     const needQuickjs = usage?.modules.has("quickjs") ?? false;
+    const need7zip = usage?.modules.has("7zip") ?? false;
     const coreRuntime: string[] = [];
     if (needsTsRuntime) {
       // string_ops holds core strings + indexOf/substring/replace/… (linker GC drops unused)
@@ -1422,6 +1423,20 @@ extern TsErrorContext _ts_current_error;
           if (fs.existsSync(p)) runtimeSrcFiles.push(p);
         }
       }
+      if (need7zip) {
+        // 7-Zip decoder lives under runtime/src/7zip/ (decode-only subset).
+        // 7zMain.c is intentionally excluded: it defines main().
+        const z7Dir = path.join(runtimeDir, "7zip");
+        for (const f of [
+          "7zAlloc.c", "7zArcIn.c", "7zBuf.c", "7zBuf2.c", "7zCrc.c",
+          "7zCrcOpt.c", "7zDec.c", "7zFile.c", "7zStream.c",
+          "CpuArch.c", "Delta.c", "Bcj2.c", "Bra.c", "Bra86.c",
+          "BraIA64.c", "LzmaDec.c", "Lzma2Dec.c", "Ppmd7.c", "Ppmd7Dec.c",
+        ]) {
+          const p = path.join(z7Dir, f);
+          if (fs.existsSync(p)) runtimeSrcFiles.push(p);
+        }
+      }
       // node_webview.c is emitted via generateBuiltinFiles (featureUsage.modules)
     }
     // Automatic GC is always linked: main() always calls ts_gc_init / set_stack_bottom
@@ -1441,6 +1456,7 @@ extern TsErrorContext _ts_current_error;
     const builtinInclude = path.join(resolvedProjectRoot, "runtime/src/builtins");
     const sqliteInclude = path.join(resolvedProjectRoot, "runtime/src/sqlite");
     const quickjsInclude = path.join(resolvedProjectRoot, "runtime/src/quickjs");
+    const z7Include = path.join(resolvedProjectRoot, "runtime/src/7zip");
     // QuickJS references CONFIG_VERSION at compile time (quickjs.c); read it from VERSION.
     let quickjsVersion = "unknown";
     if (needQuickjs) {
@@ -1559,6 +1575,7 @@ extern TsErrorContext _ts_current_error;
       `-I${runtimeInclude}`,
       `-I${builtinInclude}`,
       ...(needSqlite ? [`-I${sqliteInclude}`] : []),
+      ...(need7zip ? [`-I${z7Include}`, "-DZ7_PPMD_SUPPORT"] : []),
       ...(needQuickjs
         ? [
             `-I${quickjsInclude}`,
