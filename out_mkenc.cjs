@@ -111,7 +111,11 @@ function streamsInfo() {
   parts.push(Buffer.from([0x00]));       // external=0
   parts.push(folderBytes());
   parts.push(Buffer.from([0x0c]));       // CodersUnpackSize
-  parts.push(writeNumber(FILE_DATA.length));
+  // One entry per coder OUTPUT (numCodersOutStreams = numCoders = 2 here):
+  //   coder0 = Copy  -> output = file size
+  //   coder1 = AES   -> output = decrypted (still-framed) size = file size
+  parts.push(writeNumber(FILE_DATA.length)); // Copy output
+  parts.push(writeNumber(FILE_DATA.length)); // AES output
   parts.push(Buffer.from([0x00]));       // END
   return Buffer.concat(parts);
 }

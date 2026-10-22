@@ -1138,7 +1138,7 @@ static SRes SzReadHeader2(CSzArEx *p, CSzData *sd, ILookInStreamPtr inStream,
     static const UInt32 k_numFoldersMax = (UInt32)1 << 30;
     RINOK(SzReadStreamsInfo(&p->db, sd, k_numFoldersMax, tempBufs, numTempBufs,
         &p->dataPos, &ssi, allocMain))
-    fprintf(stderr, "[z7trace] after streamsInfo, remaining=%zu\n", sd->Size);
+    fprintf(stderr, "[z7trace] after streamsInfo, remaining=%zu head=%02x %02x %02x\n", sd->Size, (unsigned)sd->Data[0], (unsigned)sd->Data[1], (unsigned)sd->Data[2]);
     p->dataPos += p->startPosAfterHeader;
     RINOK(ReadID(sd, &type))
   }

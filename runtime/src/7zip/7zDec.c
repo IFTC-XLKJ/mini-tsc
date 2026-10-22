@@ -794,6 +794,7 @@ SRes SzAr_DecodeFolder2(const CSzAr *p, UInt32 folderIndex,
   sd.Size = p->FoCodersOffsets[(size_t)folderIndex + 1] - p->FoCodersOffsets[folderIndex];
   
   res = SzGetNextFolderItem(&folder, &sd);
+  fprintf(stderr, "[z7trace] GetNextFolderItem res=%d NumCoders=%u\n", (int)res, res == SZ_OK ? (unsigned)folder.NumCoders : 0u);
   
   if (res != SZ_OK)
     return res;
