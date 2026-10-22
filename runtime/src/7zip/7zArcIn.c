@@ -1157,12 +1157,14 @@ static SRes SzReadHeader2(CSzArEx *p, CSzData *sd, ILookInStreamPtr inStream,
   
   RINOK(SzReadNumber32(sd, &numFiles))
   p->NumFiles = numFiles;
+  fprintf(stderr, "[z7trace] filesInfo numFiles=%u\n", (unsigned)numFiles);
 
   for (;;)
   {
     CSzData sdSwitch;
     UInt64 type;
     RINOK(ReadID(sd, &type))
+    fprintf(stderr, "[z7trace] filesInfo prop type=%llu size=%zu\n", (unsigned long long)type, sd->Size);
     if (type == k7zIdEnd)
       break;
     {
@@ -1627,6 +1629,7 @@ SRes SzArEx_Extract2(
 {
   const UInt32 folderIndex = p->FileToFolder[fileIndex];
   SRes res = SZ_OK;
+  fprintf(stderr, "[z7trace] Extract2 file=%u folder=%u pw=%s\n", (unsigned)fileIndex, (unsigned)folderIndex, password ? "yes" : "no");
   
   *offset = 0;
   *outSizeProcessed = 0;

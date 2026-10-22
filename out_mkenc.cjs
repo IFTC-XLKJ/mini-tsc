@@ -116,7 +116,8 @@ function streamsInfo() {
   //   coder1 = AES   -> output = decrypted (still-framed) size = file size
   parts.push(writeNumber(FILE_DATA.length)); // Copy output
   parts.push(writeNumber(FILE_DATA.length)); // AES output
-  parts.push(Buffer.from([0x00]));       // END
+  parts.push(Buffer.from([0x00]));       // END of UnpackInfo
+  parts.push(Buffer.from([0x00]));       // END of StreamsInfo
   return Buffer.concat(parts);
 }
 

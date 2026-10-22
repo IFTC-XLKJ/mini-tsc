@@ -6,6 +6,13 @@ function main(): void {
 
   console.log("isArchive:", sevenZip.isArchive(archive));
 
+  const entries: any = sevenZip.list(archive, password);
+  if (entries === null) {
+    console.log("list failed |", sevenZip.lastError());
+  } else {
+    console.log("list count:", entries.length, "name:", entries[0].name);
+  }
+
   // Encrypted content cannot be read without the password.
   const noPw: any = sevenZip.readFile(archive, "secret.txt");
   console.log("no-password read is null:", noPw === null, "|", sevenZip.lastError());
