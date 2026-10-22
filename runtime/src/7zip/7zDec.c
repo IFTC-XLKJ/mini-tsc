@@ -4,7 +4,6 @@
 #include "Precomp.h"
 
 #include <string.h>
-#include <stdio.h>
 
 /* #define Z7_PPMD_SUPPORT */
 
@@ -763,7 +762,6 @@ static SRes SzFolder_Decode2(const CSzFolder *folder,
       aesCi = ci;
       break;
     }
-  fprintf(stderr, "[z7trace] decode2 NumCoders=%u aesCi=%u pw=%s\n", (unsigned)folder->NumCoders, (unsigned)aesCi, password ? "yes" : "no");
 
   if (aesCi == (UInt32)-1)
     return SzFolder_Decode2_Inner(folder, propsData, unpackSizes, packPositions,
@@ -828,9 +826,6 @@ static SRes SzFolder_Decode2(const CSzFolder *folder,
     res = SzFolder_Decode2_Inner(&reduced, propsData, unpackSizes + aesCi,
         reducedPackPositions, &decryptedStream.vt, 0,
         outBuffer, outSize, allocMain, tempBuf);
-    fprintf(stderr, "[z7trace] inner res=%d reducedNumCoders=%u mainMethod=0x%x decSize=%zu aesOutSize=%llu outSize=%zu\n",
-        (int)res, (unsigned)reduced.NumCoders, (unsigned)reduced.Coders[0].MethodID,
-        decryptedSize, (unsigned long long)unpackSizes[aesCi], (size_t)outSize);
   }
 
   if (decryptedBuf)
@@ -853,8 +848,7 @@ SRes SzAr_DecodeFolder2(const CSzAr *p, UInt32 folderIndex,
   sd.Size = p->FoCodersOffsets[(size_t)folderIndex + 1] - p->FoCodersOffsets[folderIndex];
   
   res = SzGetNextFolderItem(&folder, &sd);
-  fprintf(stderr, "[z7trace] GetNextFolderItem res=%d NumCoders=%u\n", (int)res, res == SZ_OK ? (unsigned)folder.NumCoders : 0u);
-  
+
   if (res != SZ_OK)
     return res;
 

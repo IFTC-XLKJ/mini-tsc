@@ -1,8 +1,8 @@
 #include "runtime.h"
 
-#include "test_7zip_password.h"
+#include "test_7zip_plain.h"
 
-extern void __init_test_7zip_password(void);
+extern void __init_test_7zip_plain(void);
 
 /* process.argv capture (Unix/Android); no-op storage on Windows */
 extern void node_process_set_argv(int argc, char** argv);
@@ -45,10 +45,10 @@ int main(int argc, char* argv[]) {
   ts_gc_init();
   ts_gc_set_stack_bottom((void*)&argc);
   /* Initialize modules */
-  __init_test_7zip_password();
+  __init_test_7zip_plain();
 
   /* Run entry point */
-  test_7zip_password_entry();
+  test_7zip_plain_entry();
 
   /* Final opportunistic GC before exit */
   ts_gc_maybe_collect_idle();

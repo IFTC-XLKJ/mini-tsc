@@ -4,7 +4,6 @@
 #include "Precomp.h"
 
 #include <string.h>
-#include <stdio.h>
 
 #include "7z.h"
 #include "7zBuf.h"
@@ -618,7 +617,6 @@ static SRes ReadUnpackInfo(CSzAr *p, CSzData *sd2, const UInt32 numFoldersMax,
   RINOK(WaitId(sd2, k7zIdFolder))
   
   RINOK(SzReadNumber32(sd2, &numFolders))
-  fprintf(stderr, "[z7trace] unpackInfo numFolders=%u\n", (unsigned)numFolders);
   if (numFolders > numFoldersMax)
     return SZ_ERROR_UNSUPPORTED;
   p->NumFolders = numFolders;
@@ -665,7 +663,6 @@ static SRes ReadUnpackInfo(CSzAr *p, CSzData *sd2, const UInt32 numFoldersMax,
       SZ_READ_BYTE_2(mainByte)
       if ((mainByte & 0xC0) != 0)
         return SZ_ERROR_UNSUPPORTED;
-      fprintf(stderr, "[z7trace] folder scan mainByte=0x%02x\n", (unsigned)mainByte);
       idSize = (mainByte & 0xF);
       if (idSize > 8)
         return SZ_ERROR_UNSUPPORTED;
@@ -692,7 +689,6 @@ static SRes ReadUnpackInfo(CSzAr *p, CSzData *sd2, const UInt32 numFoldersMax,
         RINOK(SzReadNumber32(&sd, &propsSize))
         if (propsSize > sd.Size)
           return SZ_ERROR_ARCHIVE;
-        fprintf(stderr, "[z7trace] scan propsSize=%u\n", (unsigned)propsSize);
         SKIP_DATA2(sd, propsSize)
       }
     }
@@ -721,13 +717,11 @@ static SRes ReadUnpackInfo(CSzAr *p, CSzData *sd2, const UInt32 numFoldersMax,
           UInt32 index;
           
           RINOK(SzReadNumber32(&sd, &index))
-          fprintf(stderr, "[z7trace] bond InIndex=%u (numInStreams=%u) nextByte=0x%02x\n", (unsigned)index, (unsigned)numInStreams, (unsigned)sd.Data[0]);
           if (index >= numInStreams || streamUsed[index])
             return SZ_ERROR_ARCHIVE;
           streamUsed[index] = True;
           
           RINOK(SzReadNumber32(&sd, &index))
-          fprintf(stderr, "[z7trace] bond OutIndex=%u (numCoders=%u)\n", (unsigned)index, (unsigned)numCoders);
           if (index >= numCoders || coderUsed[index])
             return SZ_ERROR_ARCHIVE;
           coderUsed[index] = True;
@@ -925,15 +919,12 @@ static SRes SzReadStreamsInfo(CSzAr *p,
 
   *dataOffset = 0;
   RINOK(ReadID(sd, &type))
-  fprintf(stderr, "[z7trace] streams type=%llu size=%zu\n", (unsigned long long)type, sd->Size);
   if (type == k7zIdPackInfo)
   {
     RINOK(ReadNumber(sd, dataOffset))
-    fprintf(stderr, "[z7trace] dataOffset=%llu\n", (unsigned long long)*dataOffset);
     if (*dataOffset > p->RangeLimit)
       return SZ_ERROR_ARCHIVE;
     RINOK(ReadPackInfo(p, sd, alloc))
-    fprintf(stderr, "[z7trace] numPackStreams=%u\n", (unsigned)p->NumPackStreams);
     if (p->PackPositions[p->NumPackStreams] > p->RangeLimit - *dataOffset)
       return SZ_ERROR_ARCHIVE;
     RINOK(ReadID(sd, &type))
@@ -942,7 +933,6 @@ static SRes SzReadStreamsInfo(CSzAr *p,
   {
     RINOK(ReadUnpackInfo(p, sd, numFoldersMax, tempBufs, numTempBufs, alloc))
     RINOK(ReadID(sd, &type))
-    fprintf(stderr, "[z7trace] after unpackInfo type=%llu size=%zu\n", (unsigned long long)type, sd->Size);
   }
   if (type == k7zIdSubStreamsInfo)
   {
@@ -1138,14 +1128,12 @@ static SRes SzReadHeader2(CSzArEx *p, CSzData *sd, ILookInStreamPtr inStream,
     static const UInt32 k_numFoldersMax = (UInt32)1 << 30;
     RINOK(SzReadStreamsInfo(&p->db, sd, k_numFoldersMax, tempBufs, numTempBufs,
         &p->dataPos, &ssi, allocMain))
-    fprintf(stderr, "[z7trace] after streamsInfo, remaining=%zu head=%02x %02x %02x\n", sd->Size, (unsigned)sd->Data[0], (unsigned)sd->Data[1], (unsigned)sd->Data[2]);
     p->dataPos += p->startPosAfterHeader;
     RINOK(ReadID(sd, &type))
   }
 
   if (type == k7zIdEnd)
     return SZ_OK;
-  fprintf(stderr, "[z7trace] post-streams type=%llu size=%zu\n", (unsigned long long)type, sd->Size);
   if (type != k7zIdFilesInfo)
     return SZ_ERROR_ARCHIVE;
 }
@@ -1157,14 +1145,12 @@ static SRes SzReadHeader2(CSzArEx *p, CSzData *sd, ILookInStreamPtr inStream,
   
   RINOK(SzReadNumber32(sd, &numFiles))
   p->NumFiles = numFiles;
-  fprintf(stderr, "[z7trace] filesInfo numFiles=%u\n", (unsigned)numFiles);
 
   for (;;)
   {
     CSzData sdSwitch;
     UInt64 type;
     RINOK(ReadID(sd, &type))
-    fprintf(stderr, "[z7trace] filesInfo prop type=%llu size=%zu\n", (unsigned long long)type, sd->Size);
     if (type == k7zIdEnd)
       break;
     {
@@ -1629,7 +1615,6 @@ SRes SzArEx_Extract2(
 {
   const UInt32 folderIndex = p->FileToFolder[fileIndex];
   SRes res = SZ_OK;
-  fprintf(stderr, "[z7trace] Extract2 file=%u folder=%u pw=%s\n", (unsigned)fileIndex, (unsigned)folderIndex, password ? "yes" : "no");
   
   *offset = 0;
   *outSizeProcessed = 0;

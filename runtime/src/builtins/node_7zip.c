@@ -69,6 +69,16 @@ static Value z7_fail_res(SRes res) {
   return z7_fail(z7_res_msg(res));
 }
 
+/* Like z7_fail_res, but when a password was supplied a CRC failure is far
+ * more likely a wrong password than corruption: 7zAES is AES-CBC with no
+ * authentication, so a bad key yields same-length garbage that only the
+ * stored CRC rejects. Report that distinctly instead of the generic message. */
+static Value z7_fail_res_pw(SRes res, const char* password) {
+  if (res == SZ_ERROR_CRC && password && password[0])
+    return z7_fail("wrong password (CRC check failed)");
+  return z7_fail_res(res);
+}
+
 /* --------------------------------- helpers --------------------------------- */
 
 static const char* z7_value_cstr(Value v, char* numBuf, size_t numBufLen) {
