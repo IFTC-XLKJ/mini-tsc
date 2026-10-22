@@ -93,7 +93,7 @@ static const char* z7_value_cstr(Value v, char* numBuf, size_t numBufLen) {
   return (s && s->data) ? s->data : "";
 }
 
-/* UTF-16LE (7z entry names) â†’ freshly malloc'd UTF-8. Caller frees. */
+/* UTF-16LE (7z entry names) â†?freshly malloc'd UTF-8. Caller frees. */
 static char* z7_utf16_to_utf8(const UInt16* src, size_t srcLen) {
   size_t i;
   size_t cap = srcLen * 4 + 1;
@@ -355,7 +355,7 @@ static Z7Archive* z7_archive_open(const char* path) {
   return z7_archive_open_pw(path, NULL);
 }
 
-/* Entry name as UTF-8 (malloc'd by caller contract â†’ free). NULL if OOM. */
+/* Entry name as UTF-8 (malloc'd by caller contract â†?free). NULL if OOM. */
 static char* z7_entry_name(const CSzArEx* db, UInt32 i) {
   size_t len = SzArEx_GetFileNameUtf16(db, i, NULL);
   if (len == 0) {
@@ -415,7 +415,7 @@ static SRes z7_extract_to_memory(Z7Archive* a, UInt32 index, Byte** out, size_t*
 
 /* ------------------------------ list building ------------------------------ */
 
-/* FILETIME (100ns since 1601) â†’ Unix seconds. */
+/* FILETIME (100ns since 1601) â†?Unix seconds. */
 static double z7_filetime_to_unix(const CNtfsFileTime* t) {
   UInt64 win = (UInt64)t->Low | ((UInt64)t->High << 32);
   const double kEpochOffset = 11644473600.0;
@@ -511,10 +511,10 @@ static double z7_size_of(Z7Archive* a, const char* entryName) {
 
 /* ------------------------------ extraction --------------------------------- */
 
-/* Extract every entry under destDir (empty string â†’ current directory).
+/* Extract every entry under destDir (empty string â†?current directory).
  * `prefix` (may be NULL/empty) restricts extraction to entries whose sanitized
  * name equals the prefix or starts with "prefix/". Returns the number of files
- * written, or a negative Value (null) on error â€” callers surface lastError(). */
+ * written, or a negative Value (null) on error â€?callers surface lastError(). */
 static Value z7_extract_all(Z7Archive* a, const char* destDir, const char* prefix) {
   size_t baseLen = destDir ? strlen(destDir) : 0;
   size_t prefixLen = prefix ? strlen(prefix) : 0;
@@ -567,7 +567,7 @@ static Value z7_extract_all(Z7Archive* a, const char* destDir, const char* prefi
     size_t size = 0;
     SRes res = z7_extract_to_memory(a, i, &data, &size);
     free(name);
-    if (res != SZ_OK) return z7_fail_res(res);
+    if (res != SZ_OK) return z7_fail_res_pw(res, a->password);
 
     FILE* f = fopen(full, "wb");
     if (!f) {
@@ -592,7 +592,7 @@ static Value z7_extract_one(Z7Archive* a, const char* entryName, const char* out
   Byte* data = NULL;
   size_t size = 0;
   SRes res = z7_extract_to_memory(a, (UInt32)idx, &data, &size);
-  if (res != SZ_OK) return z7_fail_res(res);
+  if (res != SZ_OK) return z7_fail_res_pw(res, a->password);
 
   z7_mkparents(outPath);
   FILE* f = fopen(outPath, "wb");
@@ -615,7 +615,7 @@ static Value z7_read_one(Z7Archive* a, const char* entryName) {
   Byte* data = NULL;
   size_t size = 0;
   SRes res = z7_extract_to_memory(a, (UInt32)idx, &data, &size);
-  if (res != SZ_OK) return z7_fail_res(res);
+  if (res != SZ_OK) return z7_fail_res_pw(res, a->password);
 
   TSString* s = ts_string_new_len((const char*)data, (int32_t)size);
   free(data);
@@ -631,7 +631,7 @@ static Value z7_read_buf(Z7Archive* a, const char* entryName) {
   Byte* data = NULL;
   size_t size = 0;
   SRes res = z7_extract_to_memory(a, (UInt32)idx, &data, &size);
-  if (res != SZ_OK) return z7_fail_res(res);
+  if (res != SZ_OK) return z7_fail_res_pw(res, a->password);
 
   TSString* s = ts_string_new_len((const char*)data, (int32_t)size);
   free(data);
@@ -937,7 +937,7 @@ Value node_7zip_close(Value handle) {
   if (handle.tag != TAG_OBJECT || !handle.as.object) return ts_value_undefined();
   Z7Archive* a = (Z7Archive*)handle.as.object;
   /* Idempotent. The struct itself is NOT freed: the handle Value is passed by
-   * value, so the caller still holds (a copy of) this pointer â€” freeing it here
+   * value, so the caller still holds (a copy of) this pointer â€?freeing it here
    * would leave a dangling Value and a second close() would use-after-free.
    * Instead we free all owned resources and leave a small (~200 byte) tombstone
    * whose `closed` flag makes every later z7_as_archive()/close() a safe no-op.
