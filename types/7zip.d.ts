@@ -25,6 +25,46 @@ declare module "7zip" {
     totalSize: number;
   }
 
+  /* ---- compress options ---- */
+
+  /** Options for compress(). All keys are optional; defaults are shown. */
+  interface CompressOptions {
+    /** Archive format. Only "7z" is currently supported. @default "7z" */
+    format?: "7z";
+    /** Compression method: "lzma2" (default) or "copy" (store-only, fast). @default "lzma2" */
+    method?: "lzma2" | "copy";
+    /** Compression level 0..9 (0 = fastest, 9 = best ratio). @default 6 */
+    level?: number;
+    /** LZMA dictionary size in bytes (power of two). 0 = auto from level. */
+    dictSize?: number;
+    /** LZMA "word size" (literal context bits, lc) 0..8. 0 = default (3). */
+    wordSize?: number;
+    /** Solid data block size in bytes. 0 = single solid block. */
+    solidSize?: number;
+    /** CPU thread count (1..N). 0 = single-threaded. */
+    threads?: number;
+    /** Memory budget (informational; not enforced). */
+    memory?: number;
+    /** Volume split size in bytes. 0 = single .7z file. */
+    volumeSize?: number;
+    /** 7zAES password. When set, the archive is encrypted. */
+    password?: string;
+  }
+
+  /** Result of a compress() call. */
+  interface CompressResult {
+    /** Number of files in the archive. */
+    filesCount: number;
+    /** Total unpacked size in bytes. */
+    totalUnpacked: number;
+    /** Total packed size in bytes. */
+    totalPacked: number;
+    /** Number of volume files written (1 when volumeSize is 0). */
+    volumeCount: number;
+    /** Empty string on success; error message on failure. */
+    error: string;
+  }
+
   /* ---- one-shot helpers (open + close the archive internally) ----
  * The optional trailing `password` decrypts 7zAES-encrypted archives; omit it
  * (or pass undefined) for unencrypted ones. */
@@ -127,12 +167,20 @@ declare module "7zip" {
   /** Close an open archive and release its resources. */
   function close(handle: any): void;
 
+  /* ---- compression ---- */
+
+  /** Compress `srcPath` (a file or a directory, recursively) into `outPath`
+   * (.7z archive). Returns a result object; `null` on failure (see
+   * lastError()). Pass a password in `options` to encrypt with 7zAES. */
+  function compress(srcPath: string, outPath: string, options?: CompressOptions): CompressResult | null;
+
   export {
-    ArchiveEntry, ArchiveInfo,
+    ArchiveEntry, ArchiveInfo, CompressOptions, CompressResult,
     list, extractToDir, extractMatching, extractFile, readFile, readFileBuffer,
     hasEntry, getEntry, entryNames, size, info, isArchive, lastError,
     open, handleList, handleNames, handleExtractAll, handleExtractMatching, handleExtract, handleRead,
     handleReadBuffer, handleHas, handleGetEntry, handleSize, handleInfo,
     handleIsOpen, handleCount, close,
+    compress,
   };
 }

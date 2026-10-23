@@ -119,7 +119,18 @@ Value node_7zip_handleIsOpen(Value handle);
 /* Number of entries in the open archive. */
 Value node_7zip_handleCount(Value handle);
 
-/* Close an open archive and release its resources. */
+ /* Close an open archive and release its resources. */
 Value node_7zip_close(Value handle);
+
+/* ---- compress API ---- */
+
+/* Compress `srcPath` (a file or a directory, recursively) into `outPath`
+ * (.7z). `optsObj` is an object with any of: format ("7z"), method
+ * ("lzma2"/"copy"), level (0-9), dictSize (bytes), wordSize (LZMA lc,
+ * 0-8), solidSize (bytes), threads (1-N), memory (informational),
+ * volumeSize (bytes, 0 = single file), password (string, 7zAES).
+ * Returns { filesCount, totalUnpacked, totalPacked, volumeCount, error },
+ * or null on failure (see lastError()). */
+Value node_7zip_compress(Value srcPath, Value outPath, Value optsObj);
 
 #endif /* NODE_7ZIP_H */

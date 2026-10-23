@@ -30,6 +30,7 @@ size_t z7_aes_pad_to_block(size_t size);
 
 /* 7zAES coder method id (0x06F10701). */
 UInt32 z7_aes_method_id(void);
+#define Z7_AES_METHOD_ID 0x06F10701u
 
 /* Total length of the coder properties block. */
 size_t z7_aes_props_size(void);

@@ -22,6 +22,9 @@
 
 #include <string.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define AES_ENC_BLOCK 16
 #define AES_ENC_KEY_SIZE 32
@@ -80,7 +83,6 @@ static void aes_enc_derive_key(const Byte* password16, size_t password16_len,
  * missing entropy source does not hard-fail. */
 static void aes_enc_random(Byte* data, size_t n) {
 #ifdef _WIN32
-  extern BOOL RtlGenRandom(PVOID Buffer, ULONG BufferLen);
   RtlGenRandom(data, (ULONG)n);
 #else
   FILE* f = fopen("/dev/urandom", "rb");
@@ -174,7 +176,7 @@ int z7_aes_encode(const char* password,
 
   if (out_props_size)
     *out_props_size = 2 + AES_ENC_SALT_SIZE + AES_ENC_IV_SIZE;
-  return Z7_AES_OK;
+  return Z7_AES_ENC_OK;
 }
 
 size_t z7_aes_pad_to_block(size_t size) {

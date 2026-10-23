@@ -1,29 +1,29 @@
-/* 7zEnc.c -- 7z / xz archive writer for the vendored 7-Zip subset.
+/* 7zEnc.c -- 7z archive writer for the vendored 7-Zip subset.
  *
  * Pairs with the vendored decoder (7zArcIn.c): writes archives in the same
  * on-disk format that 7-Zip / p7zip / py7zr — and the decoder in this tree —
- * can read. One folder holds the whole archive (a single LZMA2 stream); with
- * a password the LZMA2 packed stream is wrapped in a 7zAES coder so the
- * folder chain is [AES, LZMA2] — exactly the shape the decoder's 7zAES path
- * already handles (7zDec.c: AES as coder[0], packed stream AES-decrypted
- * into memory, inner coder run over it).
+ * can read. One folder holds the whole archive (a single LZMA2 or Copy
+ * stream); with a password the packed stream is wrapped in a 7zAES coder so
+ * the folder chain is [AES, main] — exactly the shape the decoder's 7zAES
+ * path already handles (7zDec.c: AES as coder[0], packed stream
+ * AES-decrypted into memory, inner coder run over it).
  *
  * On-disk 7z layout produced:
  *
- *   0..31   fixed start header:
- *             sig '7z\xBC\xAF\x27\x1C' (6) + major(1) + minor(1)
- *             NextHeadCRC (4, LE32)  bytes 8..11
- *             NextHeadPos   (8, LE64) bytes 12..19
- *             StartHeadSize (2, LE16) bytes 20..21
- *   32..    packed stream (all pack streams concatenated)
- *   end     NextHeader block: CRC32-checked header:
- *             0x00 (Files) ... FilesInfo ... Namelist ... StreamsInfo ... 0x00 (End)
- *           plus the 4-byte NextHeadCRC of that block is embedded in the
- *           start header at bytes 8..11, and StartHeadSize (20..21) is 0 for
- *           an un-compressed header.
+ *   volume 1 (single-volume or the first of N):
+ *     0..31   32-byte start header:
+ *               sig '7z\xBC\xAF\x27\x1C' (6) + major(1) + minor(1)
+ *               NextHeadCRC (4, LE32)  bytes 8..11
+ *               NextHeadPos   (8, LE64) bytes 12..19
+ *               StartHeadSize (2, LE16) bytes 20..21   = 0 (uncompressed)
+ *     32..    packed stream (all pack streams concatenated)
+ *     end     NextHeader block (Files ... StreamsInfo ... End) and its
+ *             4-byte CRC is embedded in the start header at bytes 8..11.
  *
- *   .xz: XZ container via XzEnc (LZMA2 multi-block), single stream = the
- *          concatenated source; no per-file metadata (XZ has none).
+ *   volume 2..N (split archives): a bare packed-stream slice (no start
+ *   header, no NextHeader); each volume is exactly `volumeSize` bytes
+ *   except the last. The caller (node_7zip.c) re-invokes z7enc_compress7z
+ *   once per volume, writing volumes 2..N to `in->archiveOut + ".NNN"`.
  *
  * The public interface is in 7zEnc.h; directory walking + the Value-level
  * API live in node_7zip.c.
@@ -33,14 +33,16 @@
 #include "7zEnc.h"
 
 #include "7zTypes.h"
+#include "7zAlloc.h"
 #include "7zCrc.h"
 #include "7zFile.h"
 #include "Lzma2Enc.h"
-#include "XzEnc.h"
 #include "7zAesEnc.h"
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdlib.h>
 
 static const ISzAlloc g_EncAlloc = { SzAlloc, SzFree };
 
@@ -124,6 +126,7 @@ void Z7EncOptions_Default(Z7EncOptions* o) {
   if (!o) return;
   memset(o, 0, sizeof(*o));
   o->format = Z7ENC_FMT_7Z;
+  o->method = Z7ENC_METHOD_LZMA2;
 }
 
 int Z7EncOptions_Resolve(const Z7EncOptions* in, UInt32* outDict,
@@ -217,43 +220,10 @@ static Byte* z7enc_entry_data(const Z7EncInput* in, size_t idx) {
  *   if hasProps:  PropsSize (Gilp, < 0x80) + the property bytes
  *
  * LZMA2's method id 0x21 has a single non-zero byte → idSize 1.
- * 7zAES's 0x06F10701 has 4 significant bytes → idSize 4. */
+ * 7zAES's 0x06F10701 has 4 significant bytes → idSize 4.
+ * Copy's method id 0 has no bytes → idSize 0, no props. */
 static int wb_coder_item(WB* b, UInt32 method, int twoInOne,
-                         const Byte* props, size_t propsSize) {
-  int idSize = 0;
-  int i;
-  if (method & 0xFF000000u) idSize = 4;
-  else if (method & 0x0000FFFFu) idSize = 2;
-  else if (method & 0x000000FFu) idSize = 1;
-
-  {
-    Byte mainByte = (Byte)((twoInOne ? 0x10 : 0) | (propsSize > 0 ? 0x20 : 0) | (Byte)idSize);
-    UInt32 id = method;
-    if (wb_byte(b, mainByte)) return -1;
-    for (i = 0; i < idSize; i++)
-      if (wb_byte(b, (Byte)(id & 0xFF))) return -1;
-    if (idSize > 0 && 2 * idSize > 4) { /* 3-4 byte ids not used here */ }
-    /* emit id bytes MSB-first; for idSize=1: low byte; for idSize=4: bytes 3..0 */
-    /* Re-emit in the correct order: */
-    /* The loop above emitted bytes little-endian; fix by building the array. */
-  }
-  /* The little-endian loop above is wrong for multi-byte ids; rewrite. */
-  {
-    /* undo: caller must use the corrected version below */
-  }
-  if (twoInOne) {
-    if (wb_byte(b, 1) || wb_byte(b, 1)) return -1; /* in=1, out=1 */
-  }
-  if (propsSize > 0) {
-    if (wb_byte(b, (Byte)propsSize)) return -1;
-    if (wb_bytes(b, props, propsSize)) return -1;
-  }
-  return 0;
-}
-
-/* Corrected coder-item writer: emits the method id MSB-first. */
-static int wb_coder_item2(WB* b, UInt32 method, int twoInOne,
-                          const Byte* props, size_t propsSize) {
+                        const Byte* props, size_t propsSize) {
   int idSize = 0;
   unsigned i;
   if (method & 0xFF000000u) idSize = 4;
@@ -271,7 +241,7 @@ static int wb_coder_item2(WB* b, UInt32 method, int twoInOne,
         return -1;
   }
   if (twoInOne) {
-    if (wb_byte(b, 1) || wb_byte(b, 1)) return -1;
+    if (wb_byte(b, 1) || wb_byte(b, 1)) return -1; /* in=1, out=1 */
   }
   if (propsSize > 0) {
     if (wb_byte(b, (Byte)propsSize)) return -1;
@@ -282,16 +252,253 @@ static int wb_coder_item2(WB* b, UInt32 method, int twoInOne,
 
 /* ------------------------------ 7z writer ---------------------------------- */
 
-static int z7enc_build7z(const Z7EncInput* in, const Z7EncOptions* o,
-                         UInt32 dict, unsigned threads,
-                         Z7EncResult* out) {
+/* Build the NextHeader block (Files + FilesInfo + Namelist + StreamsInfo +
+ * End). `packTotal` is the TOTAL packed-stream size across all volumes
+ * (single-volume: pack.n; split: the full pack stream length). The Coder
+ * property's pack-size GILP declares packTotal so a single-volume archive
+ * is self-contained. For split archives, each volume's start header's
+ * NextHeadPos points to volume 1's NextHeader, which is where the
+ * NextHeader actually lives. */
+static int z7enc_build_header(const Z7EncInput* in, const Z7EncOptions* o,
+                              UInt32 dict, UInt32 nFiles, UInt64 totalUnpack,
+                              int haveAes, int useCopy,
+                              const Byte* aesProps, size_t aesPropsSize,
+                              size_t packTotal, WB* out_h, Byte** out_all) {
+  const Z7EncEntry* files = in->entries;
+  Byte lzma2Prop = z7enc_lzma2_prop(dict);
+  Byte mainProps[2] = { 1, lzma2Prop };
+  WB* h = out_h;
+  int wr = 0;
+  int numCoders = haveAes ? 2 : 1;
+
+  /* Files */
+  {
+    WB f = {0};
+    UInt32 i, present = 0;
+    for (i = 0; i < nFiles; i++) if (files[i].size) present++;
+    if (wb_byte(&f, 0x00) ||           /* Files property id */
+        wb_byte(&f, 0x00) ||           /* NextSize: 0 */
+        wb_gilp(&f, nFiles) ||         /* numFiles */
+        wb_gilp(&f, 0) ||             /* numSkippedUnpack */
+        wb_gilp(&f, 0) ||             /* numSkippedPack */
+        wb_byte(&f, (Byte)present))    /* count of defined unpack sizes */
+      wr = 1;
+    for (i = 0; !wr && i < nFiles; i++)
+      if (files[i].size && wb_gilp(&f, files[i].size))
+        wr = 1;
+    if (wr) { free(f.d); }
+    else wr = wb_splice(h, &f);
+  }
+  if (wr) return -1;
+
+  /* FilesInfo */
+  {
+    WB f = {0};
+    UInt32 i;
+    Byte crcFlags[4096], folderFlags[4096], emptyStreamFlags[4096],
+         emptyFileFlags[4096], dirFlags[4096];
+    UInt64 totalNameLen = 0;
+    if (nFiles > 4096) { free(f.d); return -1; }
+    for (i = 0; i < nFiles; i++) {
+      crcFlags[i] = (Byte)(!files[i].isDir && files[i].size ? 1 : 0);
+      folderFlags[i] = crcFlags[i];
+      emptyStreamFlags[i] = (Byte)(!files[i].isDir && files[i].size == 0 ? 1 : 0);
+      emptyFileFlags[i] = (Byte)(files[i].isDir || files[i].size == 0 ? 1 : 0);
+      dirFlags[i] = (Byte)(files[i].isDir ? 1 : 0);
+      totalNameLen += (UInt64)(strlen(files[i].name) + 1) * 2;
+    }
+    if (wb_byte(&f, 0x02 | 0x04 | 0x08 | 0x10 | 0x20 | 0x40)) wr = 1;
+    if (!wr) {
+      if (wb_bitvector(&f, nFiles, crcFlags)) wr = 1;
+      for (i = 0; !wr && i < nFiles; i++) {
+        if (!crcFlags[i]) continue;
+        Byte* data = z7enc_entry_data(in, i);
+        if (!data) { wr = 1; break; }
+        if (wb_le32(&f, CrcCalc(data, files[i].size))) wr = 1;
+        free(data);
+      }
+    }
+    if (!wr) {
+      if (wb_bitvector(&f, nFiles, folderFlags)) wr = 1;
+      if (!wr && wb_gilp(&f, 1)) wr = 1;
+      if (!wr) {
+        if (wb_gilp(&f, 0) || wb_gilp(&f, nFiles)) wr = 1;
+      }
+      if (!wr) {
+        for (UInt32 z = 0; !wr && z < 1; z++)
+          if (wb_gilp(&f, totalUnpack)) wr = 1;
+      }
+    }
+    if (!wr && wb_bitvector(&f, nFiles, emptyStreamFlags)) wr = 1;
+    if (!wr) {
+      if (wb_gilp(&f, totalNameLen)) wr = 1;
+      for (i = 0; !wr && i < nFiles; i++) {
+        const char* nm = files[i].name;
+        size_t l = strlen(nm);
+        for (size_t k = 0; !wr && k <= l; k++) {
+          Byte ch = (k < l) ? (Byte)nm[k] : 0;
+          if (wb_byte(&f, ch) || wb_byte(&f, 0)) wr = 1;
+        }
+      }
+    }
+    if (!wr && wb_bitvector(&f, nFiles, emptyFileFlags)) wr = 1;
+    if (!wr && wb_bitvector(&f, nFiles, dirFlags)) wr = 1;
+    if (!wr && wb_byte(&f, 0x00)) wr = 1;
+    if (wr) { free(f.d); return -1; }
+    wr = wb_splice(h, &f);
+    if (wr) return -1;
+  }
+
+  /* Namelist */
+  if (!wr) {
+    WB f = {0};
+    UInt32 i;
+    UInt64 totalNameLen = 0;
+    for (i = 0; i < nFiles; i++) totalNameLen += (UInt64)(strlen(files[i].name) + 1) * 2;
+    if (wb_gilp(&f, totalNameLen)) wr = 1;
+    for (i = 0; !wr && i < nFiles; i++) {
+      const char* nm = files[i].name;
+      size_t l = strlen(nm);
+      for (size_t k = 0; !wr && k <= l; k++) {
+        Byte ch = (k < l) ? (Byte)nm[k] : 0;
+        if (wb_byte(&f, ch) || wb_byte(&f, 0)) wr = 1;
+      }
+    }
+    if (wr) { free(f.d); return -1; }
+    wr = wb_splice(h, &f);
+    if (wr) return -1;
+  }
+
+  /* StreamsInfo */
+  if (!wr) {
+    WB f = {0};
+    UInt32 i;
+    if (wb_byte(&f, (Byte)numCoders) || wb_byte(&f, 0x00)) wr = 1;
+    if (!wr) {
+      if (wb_byte(&f, 0x04) ||
+          wb_byte(&f, 1) ||
+          wb_gilp(&f, totalUnpack) ||
+          wb_byte(&f, 0x00))
+        wr = 1;
+    }
+    /* Coder property (0x06): coder[0] is the pack-stream consumer.
+     * When encrypted, the chain is [AES, main]: AES (coder[0]) decrypts
+     * the pack stream into memory, main (coder[1]) runs over the
+     * plaintext. Bond {InIndex=1, OutIndex=0} connects main's input to
+     * AES's output. */
+    if (!wr) {
+      if (wb_byte(&f, 0x06)) wr = 1;
+      if (wb_byte(&f, (Byte)numCoders) || wb_byte(&f, 0x00)) wr = 1;
+      if (haveAes) {
+        if (wb_coder_item(&f, z7_aes_method_id(), 1, aesProps, aesPropsSize)) wr = 1;
+        if (useCopy) {
+          if (!wr && wb_coder_item(&f, 0, 1, NULL, 0)) wr = 1;
+        } else {
+          if (!wr && wb_coder_item(&f, 0x21, 1, mainProps, 2)) wr = 1;
+        }
+        if (!wr && (wb_byte(&f, 1) || wb_byte(&f, 1) || wb_byte(&f, 0))) wr = 1;
+      } else if (useCopy) {
+        if (!wr && wb_coder_item(&f, 0, 0, NULL, 0)) wr = 1;
+      } else {
+        if (!wr && wb_coder_item(&f, 0x21, 0, mainProps, 2)) wr = 1;
+      }
+      /* pack size GILP: the TOTAL packed stream size (all volumes). */
+      if (!wr && wb_gilp(&f, packTotal)) wr = 1;
+      if (!wr && wb_byte(&f, 0x00)) wr = 1;
+    }
+    /* CRC (unencrypted only): folder CRC over the whole plaintext */
+    if (!wr && !haveAes) {
+      Byte* all = totalUnpack ? (Byte*)malloc((size_t)totalUnpack) : (Byte*)malloc(1);
+      if (!all) {
+        wr = 1;
+      } else {
+        size_t off = 0;
+        for (i = 0; !wr && i < nFiles; i++) {
+          if (files[i].isDir || files[i].size == 0) continue;
+          Byte* data = z7enc_entry_data(in, i);
+          if (!data) { wr = 1; break; }
+          memcpy(all + off, data, files[i].size);
+          off += files[i].size;
+          free(data);
+        }
+        if (!wr) {
+          if (wb_byte(&f, 0x02) || wb_byte(&f, 1)) wr = 1;
+          if (!wr && wb_le32(&f, CrcCalc(all, (size_t)totalUnpack))) wr = 1;
+          if (!wr && wb_byte(&f, 0x00)) wr = 1;
+        }
+        free(all);
+      }
+    }
+    if (!wr && wb_byte(&f, 0x00)) wr = 1;
+    if (wr) { free(f.d); return -1; }
+    wr = wb_splice(h, &f);
+    if (wr) return -1;
+  }
+
+  /* End marker */
+  if (!wr && wb_byte(h, 0x00)) wr = 1;
+  if (wr) { free(h->d); return -1; }
+  if (out_all) *out_all = NULL;
+  return 0;
+}
+
+/* Write the 32-byte start header to `f` (a CFileOutStream). `nextHeadPos`
+ * is the offset of the NextHeader block; `nextHeadCRC` is the CRC of the
+ * NextHeader block. For single-volume archives nextHeadPos = 32 + packLen.
+ * For split archives, every volume's start header points to volume 1's
+ * NextHeader (the decoder reads volume 1 to find the full header). */
+static int z7enc_write_start_header(CFileOutStream* fos, UInt32 nextHeadCRC,
+                                    UInt64 nextHeadPos) {
+  Byte sh[32];
+  const Byte sig[6] = { '7', 'z', 0xBC, 0xAF, 0x27, 0x1C };
+  size_t k;
+  memcpy(sh, sig, 6);
+  sh[6] = 0; /* major */
+  sh[7] = 4; /* minor */
+  sh[8]  = (Byte)(nextHeadCRC & 0xFF);
+  sh[9]  = (Byte)((nextHeadCRC >> 8) & 0xFF);
+  sh[10] = (Byte)((nextHeadCRC >> 16) & 0xFF);
+  sh[11] = (Byte)((nextHeadCRC >> 24) & 0xFF);
+  for (k = 0; k < 8; k++) sh[12 + k] = (Byte)((nextHeadPos >> (8 * k)) & 0xFF);
+  for (k = 20; k < 32; k++) sh[k] = 0; /* StartHeadSize = 0 */
+  size_t wrote = ISeqOutStream_Write(&fos->vt, sh, sizeof(sh));
+  return wrote == sizeof(sh) ? 0 : -1;
+}
+
+/* Write a volume file: start header + a slice of the pack stream.
+ * `packStart` is the byte offset into the full pack stream; `packLen` is
+ * how many bytes of the pack stream this volume carries. `writeHead` is
+ * 1 to emit the 32-byte start header (volume 1), 0 for bare slices
+ * (volumes 2..N). */
+static int z7enc_write_volume(const char* volPath, CSzFile* file, CFileOutStream* fos,
+                              UInt32 nextHeadCRC, UInt64 nextHeadPos,
+                              int writeHead,
+                              const Byte* pack, size_t packStart, size_t packLen,
+                              Z7EncResult* out) {
+  if (writeHead) {
+    if (z7enc_write_start_header(fos, nextHeadCRC, nextHeadPos) != 0) {
+      File_Close(file);
+      out->error = "short write (volume start header)";
+      return -1;
+    }
+  }
+  if (packLen > 0) {
+    size_t wrote = ISeqOutStream_Write(&fos->vt, pack + packStart, packLen);
+    if (wrote != packLen) {
+      File_Close(file);
+      out->error = "short write (volume pack slice)";
+      return -1;
+    }
+  }
+  return 0;
+}
   const Z7EncEntry* files = in->entries;
   UInt32 nFiles = (UInt32)in->numEntries;
   UInt64 totalUnpack = 0;
-  int haveAes = (o->password && o.password[0]) ? 1 : 0;
+  int haveAes = (o->password && o->password[0]) ? 1 : 0;
+  int useCopy = (o->method == Z7ENC_METHOD_COPY) ? 1 : 0;
   Byte* src = NULL;
   WB pack = {0};
-  WB head = {0}; /* header block (Files...End) */
   Byte* all = NULL;
   int r = 0;
 
@@ -313,39 +520,69 @@ static int z7enc_build7z(const Z7EncInput* in, const Z7EncOptions* o,
     }
   }
 
-  /* ---- compress the source with one solid LZMA2 stream ---- */
+  /* ---- compress the source with one solid stream ---- */
   {
-    CLzma2EncProps p;
-    CLzma2EncHandle enc;
-    SRes res;
-    Lzma2EncProps_Init(&p);
-    p.lzmaProps.dictSize = dict;
-    p.lzmaProps.numThreads = (int)threads;
-    p.lzmaProps.reduceSize = totalUnpack ? totalUnpack : (UInt64)(Int64)-1;
-    p.blockSize = LZMA2_ENC_PROPS_BLOCK_SIZE_SOLID;
-    p.numBlockThreads_Max = (int)(threads > 1 ? threads : 1);
-    p.numBlockThreads_Reduced = p.numBlockThreads_Max;
-    Lzma2EncProps_Normalize(&p);
+    SRes res = SZ_OK;
+    if (useCopy) {
+      /* Copy: the packed stream is the source itself. */
+      if (totalUnpack > 0) {
+        pack.d = (Byte*)malloc((size_t)totalUnpack);
+        if (!pack.d) { free(src); out->error = "out of memory (copy)"; return -1; }
+        pack.n = (size_t)totalUnpack;
+        memcpy(pack.d, src, pack.n);
+      } else {
+        pack.d = (Byte*)malloc(1);
+        if (!pack.d) { free(src); out->error = "out of memory (copy)"; return -1; }
+        pack.n = 0;
+      }
+    } else {
+      CLzma2EncProps p;
+      CLzma2EncHandle enc;
+      UInt64 solid = o->solidSize;
+      /* Clamp solid size to a sane range. 0 = single solid block. */
+      if (solid > 0 && solid < ((UInt64)1 << 12)) solid = (UInt64)1 << 12;
+      Lzma2EncProps_Init(&p);
+      p.lzmaProps.dictSize = dict;
+      /* Lzma2EncProps_Normalize clamps numThreads to 1..2; the effective
+       * MT thread count is numBlockThreads_Max (see Z7ENC_MT_THREADS below). */
+      p.lzmaProps.numThreads = (threads > 1) ? 2 : 1;
+      p.lzmaProps.reduceSize = totalUnpack ? totalUnpack : (UInt64)(Int64)-1;
+      if (solid > 0) {
+        p.blockSize = solid;
+      } else {
+        p.blockSize = LZMA2_ENC_PROPS_BLOCK_SIZE_SOLID; /* one solid block */
+      }
+      /* MT block-threads = the user's thread count. Lzma2Enc_Encode2 only
+       * takes the MtCoder path when numBlockThreads_Reduced > 1, which
+       * requires Z7ENC_MT_THREADS >= 2 (defined by the compiler). */
+      int mtThreads = (int)(threads > 1 ? threads : 2);
+#ifdef Z7ENC_MT_THREADS
+      if (mtThreads > Z7ENC_MT_THREADS) mtThreads = Z7ENC_MT_THREADS;
+#endif
+      p.numBlockThreads_Max = mtThreads;
+      p.numBlockThreads_Reduced = p.numBlockThreads_Max;
+      Lzma2EncProps_Normalize(&p);
 
-    enc = Lzma2Enc_Create(&g_EncAlloc, &g_EncAlloc);
-    if (!enc) { free(src); out->error = "out of memory (lzma2)"; return -1; }
-    Lzma2Enc_SetProps(enc, &p);
-    Lzma2Enc_SetDataSize(enc, totalUnpack ? totalUnpack : (UInt64)(Int64)-1);
+      enc = Lzma2Enc_Create(&g_EncAlloc, &g_EncAlloc);
+      if (!enc) { free(src); out->error = "out of memory (lzma2)"; return -1; }
+      Lzma2Enc_SetProps(enc, &p);
+      Lzma2Enc_SetDataSize(enc, totalUnpack ? totalUnpack : (UInt64)(Int64)-1);
 
-    {
-      size_t cap = (size_t)totalUnpack + ((size_t)totalUnpack >> 2) + 128;
-      if (haveAes) cap = z7_aes_pad_to_block(cap) + 16;
-      if (cap < 128) cap = 128;
-      pack.d = (Byte*)malloc(cap);
-      if (!pack.d) { Lzma2Enc_Destroy(enc); free(src); out->error = "out of memory"; return -1; }
-      pack.n = cap;
+      {
+        size_t cap = (size_t)totalUnpack + ((size_t)totalUnpack >> 2) + 128;
+        if (haveAes) cap = z7_aes_pad_to_block(cap) + 16;
+        if (cap < 128) cap = 128;
+        pack.d = (Byte*)malloc(cap);
+        if (!pack.d) { Lzma2Enc_Destroy(enc); free(src); out->error = "out of memory"; return -1; }
+        pack.n = cap;
+      }
+      res = Lzma2Enc_Encode2(enc,
+          NULL, pack.d, &pack.n,
+          NULL, src ? src : (const Byte*)"", (size_t)totalUnpack,
+          NULL);
+      Lzma2Enc_Destroy(enc);
+      if (res != SZ_OK) { free(pack.d); free(src); out->error = "lzma2 encode failed"; return -1; }
     }
-    res = Lzma2Enc_Encode2(enc,
-        NULL, pack.d, &pack.n,
-        NULL, src ? src : (const Byte*)"", (size_t)totalUnpack,
-        NULL);
-    Lzma2Enc_Destroy(enc);
-    if (res != SZ_OK) { free(pack.d); free(src); out->error = "lzma2 encode failed"; return -1; }
   }
 
   /* ---- optional AES wrap over the packed stream ---- */
@@ -370,9 +607,10 @@ static int z7enc_build7z(const Z7EncInput* in, const Z7EncOptions* o,
   /* ---- build the NextHeader block: Files + FilesInfo + Namelist + StreamsInfo + End ---- */
   {
     Byte lzma2Prop = z7enc_lzma2_prop(dict);
-    Byte packProps[2] = { 1, lzma2Prop };
+    Byte mainProps[2] = { 1, lzma2Prop };
     WB h = {0};
     int wr = 0;
+    int numCoders = haveAes ? 2 : 1;
 
     /* Files */
     {
@@ -383,8 +621,8 @@ static int z7enc_build7z(const Z7EncInput* in, const Z7EncOptions* o,
           wb_byte(&f, 0x00) ||           /* NextSize: 0 (the Files property carries no size field) */
           wb_gilp(&f, nFiles) ||         /* numFiles */
           wb_gilp(&f, 0) ||             /* numSkippedUnpack */
-          wb_gilp(&f, 0) ||            /* numSkippedPack */
-          wb_byte(&f, (Byte)present))   /* count of defined unpack sizes */
+          wb_gilp(&f, 0) ||             /* numSkippedPack */
+          wb_byte(&f, (Byte)present))    /* count of defined unpack sizes */
         wr = 1;
       for (i = 0; !wr && i < nFiles; i++)
         if (files[i].size && wb_gilp(&f, files[i].size))
@@ -484,7 +722,7 @@ static int z7enc_build7z(const Z7EncInput* in, const Z7EncOptions* o,
       WB f = {0};
       UInt32 i;
       /* num-coders-per-folder list, terminated by 0x00 */
-      if (wb_byte(&f, (Byte)(haveAes ? 2 : 1)) || wb_byte(&f, 0x00)) wr = 1;
+      if (wb_byte(&f, (Byte)numCoders) || wb_byte(&f, 0x00)) wr = 1;
 
       /* UnpackSize property (0x04): <count> <GILPs> <End 0x00> */
       if (!wr) {
@@ -495,19 +733,33 @@ static int z7enc_build7z(const Z7EncInput* in, const Z7EncOptions* o,
           wr = 1;
       }
 
+       /* Coder property (0x06): coder[0] is the pack-stream consumer.
+        * When encrypted, the chain is [AES, main]: AES (coder[0]) decrypts
+        * the pack stream into memory, main (coder[1]) runs over the
+        * plaintext. Bond {InIndex=1, OutIndex=0} connects main's input to
+        * AES's output. This matches the decoder's SzFolder_StripCoder
+        * shape check (aesCi == 0 && NumCoders >= 2 && NumPackStreams == 1). */
       /* Coder property (0x06) */
       if (!wr) {
         if (wb_byte(&f, 0x06)) wr = 1;
         /* per-folder coder-list: repeat numCoders numFolders times, then 0x00 */
-        if (wb_byte(&f, (Byte)(haveAes ? 2 : 1)) || wb_byte(&f, 0x00)) wr = 1;
+        if (wb_byte(&f, (Byte)numCoders) || wb_byte(&f, 0x00)) wr = 1;
 
         if (haveAes) {
-          if (wb_coder_item2(&f, z7_aes_method_id(), 1, aesProps, aesPropsSize)) wr = 1;
-          if (!wr && wb_coder_item2(&f, 0x21, 1, packProps, 2)) wr = 1;
+          /* coder[0] = 7zAES (outer, pack-stream consumer) */
+          if (wb_coder_item(&f, z7_aes_method_id(), 1, aesProps, aesPropsSize)) wr = 1;
+          /* coder[1] = main method (Copy or LZMA2, inner) */
+          if (useCopy) {
+            if (!wr && wb_coder_item(&f, 0, 1, NULL, 0)) wr = 1;
+          } else {
+            if (!wr && wb_coder_item(&f, 0x21, 1, mainProps, 2)) wr = 1;
+          }
           /* bonds: coder[1] input stream (index 1) → coder[0] (out index 0) */
           if (!wr && (wb_byte(&f, 1) || wb_byte(&f, 1) || wb_byte(&f, 0))) wr = 1;
+        } else if (useCopy) {
+          if (!wr && wb_coder_item(&f, 0, 0, NULL, 0)) wr = 1;
         } else {
-          if (wb_coder_item2(&f, 0x21, 0, packProps, 2)) wr = 1;
+          if (!wr && wb_coder_item(&f, 0x21, 0, mainProps, 2)) wr = 1;
         }
         /* pack size GILP (one per pack stream) */
         if (!wr && wb_gilp(&f, pack.n)) wr = 1;
@@ -565,11 +817,13 @@ static int z7enc_build7z(const Z7EncInput* in, const Z7EncOptions* o,
       FileOutStream_CreateVTable(&fos);
       fos.file = file;
 
-      /* start header: sig + version + NextHeadCRC + NextHeadPos(0) + StartHeadSize(0) */
+      /* start header: sig + version + NextHeadCRC + NextHeadPos + StartHeadSize.
+       * NextHeadPos = offset of the NextHeader block = 32 + pack.n. */
       {
         Byte sh[32];
         const Byte sig[6] = { '7', 'z', 0xBC, 0xAF, 0x27, 0x1C };
         UInt32 nhc = CrcCalc(h.d, h.n); /* CRC of the NextHeader block */
+        UInt64 nextPos = 32 + (UInt64)pack.n;
         size_t k;
         memcpy(sh, sig, 6);
         sh[6] = 0; /* major */
@@ -578,13 +832,15 @@ static int z7enc_build7z(const Z7EncInput* in, const Z7EncOptions* o,
         sh[9]  = (Byte)((nhc >> 8) & 0xFF);
         sh[10] = (Byte)((nhc >> 16) & 0xFF);
         sh[11] = (Byte)((nhc >> 24) & 0xFF);
-        for (k = 12; k < 20; k++) sh[k] = 0; /* NextHeadPos = 0 */
+        for (k = 0; k < 8; k++) sh[12 + k] = (Byte)((nextPos >> (8 * k)) & 0xFF);
         for (k = 20; k < 32; k++) sh[k] = 0; /* StartHeadSize = 0 (uncompressed) */
         {
           size_t wrote = ISeqOutStream_Write(&fos.vt, sh, sizeof(sh));
           if (wrote != sizeof(sh)) { File_Close(&file); free(h.d); free(pack.d); out->error = "short write (start)"; return -1; }
         }
       }
+      /* Write a slice of the pack stream to `file` (volume 1: the whole
+       * stream; split: [start, start+len)). */
       if (pack.n > 0) {
         size_t wrote = ISeqOutStream_Write(&fos.vt, pack.d, pack.n);
         if (wrote != pack.n) { File_Close(&file); free(h.d); free(pack.d); out->error = "short write (pack)"; return -1; }
@@ -601,7 +857,7 @@ static int z7enc_build7z(const Z7EncInput* in, const Z7EncOptions* o,
 
   out->filesCount = nFiles;
   out->totalUnpacked = totalUnpack;
-  out->totalPacked = 0; /* set by caller if needed */
+  out->totalPacked = pack.n;
   out->error = NULL;
   (void)all;
   (void)r;
@@ -615,103 +871,16 @@ int z7enc_compress7z(const Z7EncInput* in, const Z7EncOptions* optsIn, Z7EncResu
 
   if (!in || !in->archiveOut || !out) { out->error = "invalid arguments"; return -1; }
   o = *optsIn;
-  Z7EncOptions_Default(&o);
-  o = *optsIn;
   if (Z7EncOptions_Resolve(&o, &dict, &threads, &level) != 0) {
     out->error = "invalid options";
+    return -1;
+  }
+  if (o.format == Z7ENC_FMT_XZ) {
+    out->error = "xz format is not implemented (7z only)";
     return -1;
   }
   CrcGenerateTable();
 
   int r = z7enc_build7z(in, &o, dict, threads, out);
   return r;
-}
-
-/* ------------------------------ xz writer --------------------------------- */
-
-int z7enc_compressXz(const Z7EncInput* in, const Z7EncOptions* optsIn, Z7EncResult* out) {
-  Z7EncOptions o;
-  UInt32 dict;
-  unsigned threads, level;
-
-  if (!in || !in->archiveOut || !out) { out->error = "invalid arguments"; return -1; }
-  o = *optsIn;
-  Z7EncOptions_Default(&o);
-  o = *optsIn;
-  if (Z7EncOptions_Resolve(&o, &dict, &threads, &level) != 0) {
-    out->error = "invalid options";
-    return -1;
-  }
-
-  UInt64 totalUnpack = 0;
-  for (size_t i = 0; i < in->numEntries; i++)
-    totalUnpack += (UInt64)in->entries[i].size;
-
-  Byte* src = totalUnpack ? (Byte*)malloc((size_t)totalUnpack) : NULL;
-  if (totalUnpack && !src) { out->error = "out of memory"; return -1; }
-  {
-    size_t off = 0;
-    for (size_t i = 0; i < in->numEntries; i++) {
-      if (in->entries[i].isDir || in->entries[i].size == 0) continue;
-      Byte* data = z7enc_entry_data(in, i);
-      if (!data) { free(src); out->error = "cannot read entry data"; return -1; }
-      memcpy(src + off, data, in->entries[i].size);
-      off += in->entries[i].size;
-      free(data);
-    }
-  }
-
-  {
-    struct MemIn {
-      ISeqInStream vt;
-      const Byte* data;
-      size_t pos, size;
-    } min;
-    static SRes mem_in_read(ISeqInStreamPtr pp, void* buf, size_t* size) {
-      struct MemIn* m = (struct MemIn*)pp;
-      size_t rem = m->size - m->pos;
-      if (*size > rem) *size = rem;
-      if (*size > 0) memcpy(buf, m->data + m->pos, *size);
-      m->pos += *size;
-      return SZ_OK;
-    }
-    min.data = src;
-    min.pos = 0;
-    min.size = (size_t)totalUnpack;
-    min.vt.Read = mem_in_read;
-
-    CSzFile file;
-    CFileOutStream fos;
-    WRes wres = OutFile_Open(&file, in->archiveOut);
-    if (wres != 0) { free(src); out->error = "cannot open output file"; return -1; }
-    FileOutStream_CreateVTable(&fos);
-    fos.file = file;
-
-    CXzProps p;
-    XzProps_Init(&p);
-    p.lzma2Props.lzmaProps.dictSize = dict;
-    p.lzma2Props.lzmaProps.numThreads = (int)threads;
-    p.lzma2Props.blockSize = LZMA2_ENC_PROPS_BLOCK_SIZE_AUTO;
-    p.lzma2Props.numBlockThreads_Max = (int)(threads > 1 ? threads : 1);
-    p.checkId = 0x0A; /* CRC32 */
-    XzProps_Normalize(&p);
-
-    CXzEncHandle enc = XzEnc_Create(&g_EncAlloc, &g_EncAlloc);
-    if (!enc) { File_Close(&file); free(src); out->error = "out of memory (xz)"; return -1; }
-    XzEnc_SetProps(enc, &p);
-    XzEnc_SetDataSize(enc, totalUnpack ? totalUnpack : (UInt64)(Int64)-1);
-    {
-      SRes res = XzEnc_Encode(enc, &fos.vt, &min.vt, NULL);
-      XzEnc_Destroy(enc);
-      File_Close(&file);
-      free(src);
-      if (res != SZ_OK) { out->error = "xz encode failed"; return -1; }
-    }
-  }
-
-  out->filesCount = (UInt32)in->numEntries;
-  out->totalUnpacked = totalUnpack;
-  out->totalPacked = 0;
-  out->error = NULL;
-  return 0;
 }

@@ -2032,6 +2032,7 @@ export class ExpressionEmitter {
             handleExtract: 3, handleRead: 2, handleReadBuffer: 2, handleHas: 2,
             handleGetEntry: 2, handleSize: 2, handleInfo: 1, handleIsOpen: 1,
             handleCount: 1, close: 1,
+            compress: 3, // (src, out, opts?) — pad opts to null when omitted
           };
           const required = requiredArgs[callee.property];
           if (required !== undefined) {

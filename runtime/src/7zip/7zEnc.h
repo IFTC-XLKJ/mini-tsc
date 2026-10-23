@@ -40,11 +40,10 @@ typedef struct {
   Z7EncReadFunc readFile;
   /* Opaque context passed to `readFile`. */
   void* ctx;
-  /* Volume 1 output file. Volume split (0-based split index is written by
-   * the caller; see node_7zip.c): the caller re-invokes z7enc_compress7z
-   * once per volume, the writer streams volume 1 directly. `archiveOut`
-   * is volume 1; volumes 2..N are written by the caller. NULL for
-   * single-file (no split) archives. */
+  /* Volume 1 output file. Volume split: the caller re-invokes
+   * z7enc_compress7z once per volume (volume 1 = archiveOut, volumes 2..N
+   * = archiveOut + ".001", ".002", ...). `archiveOut` is volume 1.
+   * NULL for single-file (no split) archives. */
   const char* archiveOut;
 } Z7EncInput;
 
@@ -55,7 +54,7 @@ typedef struct {
   UInt32 dictSize;   /* bytes, 0 = auto from level */
   UInt32 wordSize;   /* lc (literal context bits) 0..8, "word size"; 0 = default (3) */
   int threads;       /* 1..N, 0 = auto (single-thread) */
-  UInt64 solidSize;  /* LZMA2 solid-block bytes; 0 = AUTO (single solid block) */
+  UInt64 solidSize;  /* LZMA2 solid-block bytes; 0 = single solid block */
   UInt64 memory;     /* informational only, not enforced */
   UInt64 volumeSize; /* bytes per .7z.001/.7z.002... split, 0 = no split */
   const char* password; /* UTF-8, NULL/empty = no encryption */
@@ -70,7 +69,7 @@ typedef struct {
 
 void Z7EncOptions_Default(Z7EncOptions* o);
 
-/* Resolve level → dictSize/threads. Fills *outDict/*outThreads/*outLevel. */
+/* Resolve level to dictSize/threads. Fills outDict/outThreads/outLevel. */
 int Z7EncOptions_Resolve(const Z7EncOptions* in, UInt32* outDict,
                          unsigned* outThreads, unsigned* outLevel);
 

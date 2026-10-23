@@ -550,6 +550,8 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "handleIsOpen", cName: "node_7zip_handleIsOpen", signature: "Value node_7zip_handleIsOpen(Value handle)" },
       { tsName: "handleCount", cName: "node_7zip_handleCount", signature: "Value node_7zip_handleCount(Value handle)" },
       { tsName: "close", cName: "node_7zip_close", signature: "Value node_7zip_close(Value handle)" },
+      /* compress */
+      { tsName: "compress", cName: "node_7zip_compress", signature: "Value node_7zip_compress(Value srcPath, Value outPath, Value optsObj)" },
     ],
   }],
   ["mouse", {

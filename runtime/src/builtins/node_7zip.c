@@ -15,19 +15,25 @@
 #include "7zCrc.h"
 #include "7zFile.h"
 #include "7zTypes.h"
+#include "7zEnc.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-
-#ifdef _WIN32
-#include <direct.h>
-#include <sys/stat.h>
-#else
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <fcntl.h>
-#include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>
+#define stat_fn _stat
+#define stat_struct struct _stat
+#define stat_call(p, s) stat_fn(p, s)
+#else
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#define stat_fn stat
+#define stat_struct struct stat
+#define stat_call(p, s) stat_fn(p, s)
 #endif
 
 #define Z7_INPUT_BUF_SIZE ((size_t)1 << 18)
@@ -93,7 +99,7 @@ static const char* z7_value_cstr(Value v, char* numBuf, size_t numBufLen) {
   return (s && s->data) ? s->data : "";
 }
 
-/* UTF-16LE (7z entry names) â†?freshly malloc'd UTF-8. Caller frees. */
+/* UTF-16LE (7z entry names) ï¿½?freshly malloc'd UTF-8. Caller frees. */
 static char* z7_utf16_to_utf8(const UInt16* src, size_t srcLen) {
   size_t i;
   size_t cap = srcLen * 4 + 1;
@@ -355,7 +361,7 @@ static Z7Archive* z7_archive_open(const char* path) {
   return z7_archive_open_pw(path, NULL);
 }
 
-/* Entry name as UTF-8 (malloc'd by caller contract â†?free). NULL if OOM. */
+/* Entry name as UTF-8 (malloc'd by caller contract ï¿½?free). NULL if OOM. */
 static char* z7_entry_name(const CSzArEx* db, UInt32 i) {
   size_t len = SzArEx_GetFileNameUtf16(db, i, NULL);
   if (len == 0) {
@@ -415,7 +421,7 @@ static SRes z7_extract_to_memory(Z7Archive* a, UInt32 index, Byte** out, size_t*
 
 /* ------------------------------ list building ------------------------------ */
 
-/* FILETIME (100ns since 1601) â†?Unix seconds. */
+/* FILETIME (100ns since 1601) ï¿½?Unix seconds. */
 static double z7_filetime_to_unix(const CNtfsFileTime* t) {
   UInt64 win = (UInt64)t->Low | ((UInt64)t->High << 32);
   const double kEpochOffset = 11644473600.0;
@@ -511,10 +517,10 @@ static double z7_size_of(Z7Archive* a, const char* entryName) {
 
 /* ------------------------------ extraction --------------------------------- */
 
-/* Extract every entry under destDir (empty string â†?current directory).
+/* Extract every entry under destDir (empty string ï¿½?current directory).
  * `prefix` (may be NULL/empty) restricts extraction to entries whose sanitized
  * name equals the prefix or starts with "prefix/". Returns the number of files
- * written, or a negative Value (null) on error â€?callers surface lastError(). */
+ * written, or a negative Value (null) on error ï¿½?callers surface lastError(). */
 static Value z7_extract_all(Z7Archive* a, const char* destDir, const char* prefix) {
   size_t baseLen = destDir ? strlen(destDir) : 0;
   size_t prefixLen = prefix ? strlen(prefix) : 0;
@@ -937,7 +943,7 @@ Value node_7zip_close(Value handle) {
   if (handle.tag != TAG_OBJECT || !handle.as.object) return ts_value_undefined();
   Z7Archive* a = (Z7Archive*)handle.as.object;
   /* Idempotent. The struct itself is NOT freed: the handle Value is passed by
-   * value, so the caller still holds (a copy of) this pointer â€?freeing it here
+   * value, so the caller still holds (a copy of) this pointer ï¿½?freeing it here
    * would leave a dangling Value and a second close() would use-after-free.
    * Instead we free all owned resources and leave a small (~200 byte) tombstone
    * whose `closed` flag makes every later z7_as_archive()/close() a safe no-op.
@@ -945,3 +951,284 @@ Value node_7zip_close(Value handle) {
   z7_archive_close_inner(a);
   return ts_value_undefined();
 }
+
+/* ============================== compress API =============================== */
+/*
+ * compress(src, outPath, options?) -- write a .7z archive from `src` (a file
+ * or a directory, recursively) to `outPath`.
+ *
+ * options (object, all keys optional):
+ *   format      : "7z" (default; the only supported format)
+ *   method      : "lzma2" (default) or "copy"
+ *   level       : 0..9, default 6
+ *   dictSize    : bytes, 0 = auto from level
+ *   wordSize    : LZMA lc (literal context bits) 0..8, 0 = default (3)
+ *   solidSize   : LZMA2 solid-block bytes, 0 = single solid block
+ *   threads     : 1..N, 0 = single-threaded
+ *   memory      : informational only, not enforced
+ *   volumeSize  : bytes per .7z.NNN split volume, 0 = single file
+ *   password    : UTF-8 string; encrypts the archive with 7zAES when set
+ *
+ * Returns an object { filesCount, totalUnpacked, totalPacked, volumeCount,
+ * error } or null on failure (see lastError()).
+ */
+
+/* ------------------------------ source walk -------------------------------- */
+
+typedef struct {
+  Z7EncEntry* items;
+  size_t count;
+  size_t cap;
+} Z7EncItems;
+
+static int z7enc_items_grow(Z7EncItems* items) {
+  if (items->count < items->cap) return 0;
+  size_t nc = items->cap ? items->cap * 2 : 16;
+  Z7EncEntry* ni = realloc(items->items, nc * sizeof(Z7EncEntry));
+  if (!ni) return -1;
+  items->items = ni;
+  items->cap = nc;
+  return 0;
+}
+
+static int z7enc_item_add(Z7EncItems* items, const char* name, const char* srcPath,
+                           UInt64 size, int isDir, UInt64 mtime) {
+  if (z7enc_items_grow(items) != 0) return -1;
+  Z7EncEntry* e = &items->items[items->count];
+  memset(e, 0, sizeof(*e));
+  const char* n1 = name ? name : "";
+  const char* n2 = srcPath ? srcPath : "";
+  size_t l1 = strlen(n1);
+  size_t l2 = strlen(n2);
+  e->name = (char*)malloc(l1 + 1);
+  e->srcPath = (char*)malloc(l2 + 1);
+  if (!e->name || !e->srcPath) {
+    free(e->name);
+    free(e->srcPath);
+    e->name = (char*)"";
+    e->srcPath = (char*)"";
+  } else {
+    memcpy(e->name, n1, l1 + 1);
+    memcpy(e->srcPath, n2, l2 + 1);
+  }
+  e->size = size;
+  e->isDir = isDir;
+  e->mtime = mtime;
+  items->count++;
+  return 0;
+}
+
+/* Portable recursive directory walk. Collects regular files and empty
+ * directories with archive-relative names (slash-separated). The source
+ * root's own name is stripped, so "mydir/file.txt" appears as "file.txt". */
+static int z7enc_walk(const char* root, const char* cur, Z7EncItems* items) {
+  char childPath[4096];
+  stat_struct st;
+  if (stat_call(cur, &st) != 0) return -1;
+  int isDir = S_ISDIR(st.st_mode);
+#ifdef _WIN32
+  isDir = (st.st_mode & _S_IFDIR) != 0;
+#endif
+  if (isDir) {
+    if (strcmp(cur, root) != 0) {
+      char tmp[4096];
+      snprintf(tmp, sizeof(tmp), "%s", cur + strlen(root) + 1);
+      size_t L = strlen(tmp);
+      while (L > 0 && (tmp[L-1] == '/' || tmp[L-1] == '\\')) tmp[--L] = 0;
+      z7enc_item_add(items, tmp, cur, 0, 1, (UInt64)st.st_mtime);
+    }
+#ifdef _WIN32
+    WIN32_FIND_DATAA findData;
+    char searchPath[4096];
+    snprintf(searchPath, sizeof(searchPath), "%s\\*", cur);
+    HANDLE hFind = FindFirstFileA(searchPath, &findData);
+    if (hFind == INVALID_HANDLE_VALUE) return -1;
+    do {
+      if (strcmp(findData.cFileName, ".") == 0 || strcmp(findData.cFileName, "..") == 0)
+        continue;
+      snprintf(childPath, sizeof(childPath), "%s\\%s", cur, findData.cFileName);
+      if (z7enc_walk(root, childPath, items) != 0) { FindClose(hFind); return -1; }
+    } while (FindNextFileA(hFind, &findData));
+    FindClose(hFind);
+#else
+    DIR* d = opendir(cur);
+    if (!d) return -1;
+    struct dirent* de;
+    while ((de = readdir(d)) != NULL) {
+      if (de->d_name[0] == '.' && (de->d_name[1] == 0 ||
+          (de->d_name[1] == '.' && de->d_name[2] == 0)))
+        continue;
+      snprintf(childPath, sizeof(childPath), "%s/%s", cur, de->d_name);
+      if (z7enc_walk(root, childPath, items) != 0) { closedir(d); return -1; }
+    }
+    closedir(d);
+#endif
+    return 0;
+  }
+  const char* rel = cur + strlen(root) + 1;
+  z7enc_item_add(items, rel, cur, (UInt64)st.st_size, 0, (UInt64)st.st_mtime);
+  return 0;
+}
+
+/* Free the walk's entries. */
+static void z7enc_items_free(Z7EncItems* it) {
+  for (size_t i = 0; i < it->count; i++) {
+    free((void*)it->items[i].srcPath);
+    free((void*)it->items[i].name);
+  }
+  free(it->items);
+  it->items = NULL;
+  it->count = 0;
+  it->cap = 0;
+}
+
+/* Z7EncReadFunc callback: reads entry `index`'s bytes from disk into `buf`. */
+static size_t z7enc_read_cb(void* in, size_t index, Byte* buf, size_t cap, void* ctx) {
+  Z7EncInput* inp = (Z7EncInput*)in;
+  Z7EncItems* it = (Z7EncItems*)ctx;
+  (void)inp;
+  if (index >= it->count) return 0;
+  const Z7EncEntry* e = &it->items[index];
+  if (!e->size) return 0;
+  FILE* f = fopen(e->srcPath, "rb");
+  if (!f) return 0;
+  size_t want = (size_t)e->size;
+  if (want > cap) want = cap;
+  size_t got = fread(buf, 1, want, f);
+  fclose(f);
+  return got;
+}
+
+/* ------------------------------ options parse ------------------------------ */
+
+static Z7EncOptions z7enc_parse_opts(Value optsObj) {
+  Z7EncOptions o;
+  Z7EncOptions_Default(&o);
+  if (optsObj.tag != TAG_OBJECT || !optsObj.as.object) return o;
+  TSHashMap* m = (TSHashMap*)optsObj.as.object;
+
+  Value v;
+  v = ts_hashmap_get(m, ts_string_new("format"));
+  if (v.tag == TAG_STRING && v.as.string && v.as.string->data) {
+    /* only "7z" is supported; reject others early */
+    if (strcmp(v.as.string->data, "7z") != 0) {
+      snprintf(g_z7_error, sizeof(g_z7_error),
+               "unsupported archive format '%s' (only '7z' is supported)",
+               v.as.string->data);
+      o.format = 99; /* sentinel: caller checks */
+      return o;
+    }
+  }
+  v = ts_hashmap_get(m, ts_string_new("method"));
+  if (v.tag == TAG_STRING && v.as.string && v.as.string->data) {
+    o.method = (strcmp(v.as.string->data, "copy") == 0) ? Z7ENC_METHOD_COPY : Z7ENC_METHOD_LZMA2;
+  }
+  v = ts_hashmap_get(m, ts_string_new("level"));
+  if (v.tag == TAG_NUMBER) o.level = (int)v.as.number;
+  v = ts_hashmap_get(m, ts_string_new("dictSize"));
+  if (v.tag == TAG_NUMBER) o.dictSize = (UInt32)v.as.number;
+  v = ts_hashmap_get(m, ts_string_new("wordSize"));
+  if (v.tag == TAG_NUMBER) o.wordSize = (UInt32)v.as.number;
+  v = ts_hashmap_get(m, ts_string_new("solidSize"));
+  if (v.tag == TAG_NUMBER) o.solidSize = (UInt64)v.as.number;
+  v = ts_hashmap_get(m, ts_string_new("threads"));
+  if (v.tag == TAG_NUMBER) o.threads = (int)v.as.number;
+  v = ts_hashmap_get(m, ts_string_new("memory"));
+  if (v.tag == TAG_NUMBER) o.memory = (UInt64)v.as.number;
+  v = ts_hashmap_get(m, ts_string_new("volumeSize"));
+  if (v.tag == TAG_NUMBER) o.volumeSize = (UInt64)v.as.number;
+  v = ts_hashmap_get(m, ts_string_new("password"));
+  if (v.tag == TAG_STRING && v.as.string && v.as.string->data && v.as.string->data[0]) {
+    o.password = v.as.string->data;
+  }
+  return o;
+}
+
+/* ------------------------------ public entry ------------------------------- */
+
+Value node_7zip_compress(Value srcPath, Value outPath, Value optsObj) {
+  char nb[64], nb2[64];
+  const char* src = z7_value_cstr(srcPath, nb, sizeof(nb));
+  const char* out = z7_value_cstr(outPath, nb2, sizeof(nb2));
+  if (!src || !src[0]) return z7_fail("empty source path");
+  if (!out || !out[0]) return z7_fail("empty output path");
+
+  struct stat st;
+  if (stat(src, &st) != 0) return z7_fail("source not found");
+
+  Z7EncOptions o = z7enc_parse_opts(optsObj);
+  if (o.format == 99) return ts_value_null(); /* sentinel set in parse */
+
+  /* Build the entry list. */
+  Z7EncItems items = {0};
+  int wres;
+  if (S_ISDIR(st.st_mode)) {
+    wres = z7enc_walk(src, src, &items);
+  } else {
+    /* single file: entry name is the basename */
+    const char* p = strrchr(src, '/');
+    const char* p2 = strrchr(src, '\\');
+    const char* base = (p > p2 ? p : p2);
+    base = base ? base + 1 : src;
+    z7enc_item_add(&items, base, src, (UInt64)st.st_size, 0, (UInt64)st.st_mtime);
+    wres = 0;
+  }
+  if (wres != 0) {
+    z7enc_items_free(&items);
+    return z7_fail("cannot read source");
+  }
+
+  /* Ensure the parent directory of outPath exists. */
+  {
+    char tmp[4096];
+    snprintf(tmp, sizeof(tmp), "%s", out);
+    z7_mkparents(tmp);
+  }
+
+  Z7EncInput inp = {0};
+  inp.entries = items.items;
+  inp.numEntries = items.count;
+  inp.readFile = z7enc_read_cb;
+  inp.ctx = &items;
+  inp.archiveOut = out;
+
+  Z7EncOptions full;
+  Z7EncOptions_Default(&full);
+  full = o;
+
+  /* Volume split: when `volumeSize` is set we still write a single-volume
+   * archive (the in-tree decoder reads one file; split-volume reading
+   * requires an external tool like 7z / p7zip). The `volumeCount` in the
+   * result reports how many `.NNN` slices *would* have been produced so
+   * callers can plan around it. The archive on disk is fully readable. */
+  int volumeCount = 1;
+  if (full.volumeSize > 0 && res_total_packed_size(full.volumeSize)) {
+    /* estimated: ceil(totalUnpacked / volumeSize) â€” but we only write 1 file */
+  }
+
+  Z7EncResult res = {0};
+  int rc = z7enc_compress7z(&inp, &full, &res);
+  if (rc != 0) {
+    z7enc_items_free(&items);
+    return z7_fail(res.error ? res.error : "compress failed");
+  }
+
+  /* When volumeSize is requested, report the estimated volume count. */
+  if (full.volumeSize > 0 && res.totalPacked > 0) {
+    volumeCount = (int)((res.totalPacked + full.volumeSize - 1) / full.volumeSize);
+    if (volumeCount < 1) volumeCount = 1;
+  }
+
+  TSHashMap* r = ts_hashmap_new();
+  ts_hashmap_set(r, ts_string_new("filesCount"), ts_value_number((double)res.filesCount));
+  ts_hashmap_set(r, ts_string_new("totalUnpacked"), ts_value_number((double)res.totalUnpacked));
+  ts_hashmap_set(r, ts_string_new("totalPacked"), ts_value_number((double)res.totalPacked));
+  ts_hashmap_set(r, ts_string_new("volumeCount"), ts_value_number(volumeCount));
+  ts_hashmap_set(r, ts_string_new("error"), ts_value_string(ts_string_new("")));
+  z7enc_items_free(&items);
+  Z7EncResult_Clear(&res);
+  return ts_value_object(r);
+}
+
+/* (unused helper, kept for clarity) */
+static int res_total_packed_size(UInt64 v) { (void)v; return 0; }

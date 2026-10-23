@@ -1434,6 +1434,10 @@ extern TsErrorContext _ts_current_error;
           "BraIA64.c", "LzmaDec.c", "Lzma2Dec.c", "Ppmd7.c", "Ppmd7Dec.c",
           /* 7zAES decryption (AES-256-CBC + SHA-256 KDF) */
           "7zAesDec.c", "Aes.c", "AesOpt.c", "Sha256.c", "Sha256Opt.c",
+          /* 7zAES encryption + 7z container writer (LZMA2 + copy) */
+          "7zAesEnc.c", "7zEnc.c", "LzmaEnc.c", "Lzma2Enc.c",
+          "Threads.c", "MtCoder.c", "Sort.c", "SwapBytes.c",
+          "Xxh64.c", "Blake2s.c", "HuffEnc.c",
         ]) {
           const p = path.join(z7Dir, f);
           if (fs.existsSync(p)) runtimeSrcFiles.push(p);
@@ -1577,7 +1581,7 @@ extern TsErrorContext _ts_current_error;
       `-I${runtimeInclude}`,
       `-I${builtinInclude}`,
       ...(needSqlite ? [`-I${sqliteInclude}`] : []),
-      ...(need7zip ? [`-I${z7Include}`, "-DZ7_PPMD_SUPPORT"] : []),
+      ...(need7zip ? [`-I${z7Include}`, "-DZ7_PPMD_SUPPORT", "-DZ7_NO_LARGE_PAGES", "-DZ7_NO_LONG_PATH", "-DZ7ENC_MT_THREADS=256", "-DTHREADS"] : []),
       ...(needQuickjs
         ? [
             `-I${quickjsInclude}`,
