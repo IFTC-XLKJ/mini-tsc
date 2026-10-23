@@ -22,9 +22,6 @@
 
 #include <string.h>
 #include <stdlib.h>
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 #define AES_ENC_BLOCK 16
 #define AES_ENC_KEY_SIZE 32
