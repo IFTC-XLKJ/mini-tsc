@@ -1436,7 +1436,8 @@ extern TsErrorContext _ts_current_error;
           "7zAesDec.c", "Aes.c", "AesOpt.c", "Sha256.c", "Sha256Opt.c",
           /* 7zAES encryption + 7z container writer (LZMA2 + copy) */
           "7zAesEnc.c", "7zEnc.c", "LzmaEnc.c", "Lzma2Enc.c",
-          "Threads.c", "MtCoder.c", "Sort.c", "SwapBytes.c",
+          "LzFind.c", "LzFindMt.c", "Threads.c", "MtCoder.c", "MtDec.c",
+          "Sort.c", "SwapBytes.c",
           "Xxh64.c", "Blake2s.c", "HuffEnc.c",
         ]) {
           const p = path.join(z7Dir, f);

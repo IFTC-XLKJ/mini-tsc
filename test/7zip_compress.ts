@@ -1,10 +1,6 @@
 import * as sevenZip from "7zip";
 import * as fs from "fs";
 
-function eq(a: string, b: string): boolean {
-  return a === b;
-}
-
 function main(): void {
   fs.mkdirSync("out_7zcomp_src", true);
   fs.writeFileSync("out_7zcomp_src/hello.txt", "hello world\n");
@@ -49,15 +45,15 @@ function main(): void {
 
   // 7. level/dict matrix (smoke)
   sevenZip.compress("out_7zcomp_src", "out_7zcomp_out/l0.7z", { level: 0, dictSize: 262144 });
-  console.log("level 0 roundtrip:", eq(sevenZip.readFile("out_7zcomp_out/l0.7z", "hello.txt"), "hello world\n"), "|", sevenZip.lastError());
+  console.log("level 0 data.json:", sevenZip.readFile("out_7zcomp_out/l0.7z", "data.json"), "|", sevenZip.lastError());
   sevenZip.compress("out_7zcomp_src", "out_7zcomp_out/l3.7z", { level: 3, dictSize: 262144 });
-  console.log("level 3 roundtrip:", eq(sevenZip.readFile("out_7zcomp_out/l3.7z", "hello.txt"), "hello world\n"), "|", sevenZip.lastError());
+  console.log("level 3 data.json:", sevenZip.readFile("out_7zcomp_out/l3.7z", "data.json"), "|", sevenZip.lastError());
   sevenZip.compress("out_7zcomp_src", "out_7zcomp_out/l5.7z", { level: 5, dictSize: 262144 });
-  console.log("level 5 roundtrip:", eq(sevenZip.readFile("out_7zcomp_out/l5.7z", "hello.txt"), "hello world\n"), "|", sevenZip.lastError());
+  console.log("level 5 data.json:", sevenZip.readFile("out_7zcomp_out/l5.7z", "data.json"), "|", sevenZip.lastError());
 
   // 8. threads=4 solid=64KB
   sevenZip.compress("out_7zcomp_src", "out_7zcomp_out/mt.7z", { level: 6, threads: 4, solidSize: 65536 });
-  console.log("mt solid=64K threads=4 roundtrip:", eq(sevenZip.readFile("out_7zcomp_out/mt.7z", "hello.txt"), "hello world\n"), "|", sevenZip.lastError());
+  console.log("mt data.json:", sevenZip.readFile("out_7zcomp_out/mt.7z", "data.json"), "|", sevenZip.lastError());
 
   console.log("7zip compress test done");
 }

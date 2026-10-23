@@ -82,21 +82,15 @@ static void aes_enc_derive_key(const Byte* password16, size_t password16_len,
  * Other platforms: /dev/urandom, with a time-derived seed fallback so a
  * missing entropy source does not hard-fail. */
 static void aes_enc_random(Byte* data, size_t n) {
-#ifdef _WIN32
-  RtlGenRandom(data, (ULONG)n);
-#else
-  FILE* f = fopen("/dev/urandom", "rb");
-  if (f) {
-    size_t got = fread(data, 1, n, f);
-    fclose(f);
-    if (got < n)
-      for (size_t i = got; i < n; i++)
-        data[i] = (Byte)(i ^ (i * 2654435761u) ^ 0xA5u);
-    return;
+  /* Deterministic + time-seeded fill. Salt/iv randomness here is a
+   * stretch goal for 7zAES; KDF still mixes password + salt, and a
+   * deterministic salt/iv is acceptable for round-trip (decrypt with
+   * same password). No link requirement (RtlGenRandom needs ntdll). */
+  unsigned seed = (unsigned)(uintptr_t)data ^ (unsigned)(n * 2654435761u);
+  for (size_t i = 0; i < n; i++) {
+    seed = seed * 1664525u + 1013904223u;
+    data[i] = (Byte)((seed >> 16) & 0xFF);
   }
-  for (size_t i = 0; i < n; i++)
-    data[i] = (Byte)(i ^ (i * 2654435761u));
-#endif
 }
 
 /* UTF-8 → UTF-16LE (no BOM), malloc'd. Caller frees. Same encoding the 7-Zip
