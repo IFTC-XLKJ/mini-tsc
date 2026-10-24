@@ -3,6 +3,7 @@ import * as fs from "fs";
 
 function main(): void {
   fs.mkdirSync("out_7zcomp_src", true);
+  fs.mkdirSync("out_7zcomp_src/sub", true);
   fs.writeFileSync("out_7zcomp_src/hello.txt", "hello world\n");
   fs.writeFileSync("out_7zcomp_src/sub/nested.txt", "nested data\n");
   fs.writeFileSync("out_7zcomp_src/data.json", '{"a":1,"b":2,"c":[1,2,3]}');
@@ -54,6 +55,17 @@ function main(): void {
   // 8. threads=4 solid=64KB
   sevenZip.compress("out_7zcomp_src", "out_7zcomp_out/mt.7z", { level: 6, threads: 4, solidSize: 65536 });
   console.log("mt data.json:", sevenZip.readFile("out_7zcomp_out/mt.7z", "data.json"), "|", sevenZip.lastError());
+
+  // 9. ppmd method
+  sevenZip.compress("out_7zcomp_src", "out_7zcomp_out/ppmd.7z", { method: "ppmd", level: 6 });
+  console.log("ppmd.7z isArchive:", sevenZip.isArchive("out_7zcomp_out/ppmd.7z"), "|", sevenZip.lastError());
+  console.log("ppmd data.json:", sevenZip.readFile("out_7zcomp_out/ppmd.7z", "data.json"), "|", sevenZip.lastError());
+  console.log("ppmd hello.txt:", sevenZip.readFile("out_7zcomp_out/ppmd.7z", "hello.txt"), "|", sevenZip.lastError());
+
+  // 10. ppmd + password (7zAES encrypted ppmd)
+  sevenZip.compress("out_7zcomp_src", "out_7zcomp_out/ppmd_pw.7z", { method: "ppmd", level: 4, password: "ppmd-secret" });
+  console.log("ppmd_pw correct:", sevenZip.readFile("out_7zcomp_out/ppmd_pw.7z", "data.json", "ppmd-secret"), "|", sevenZip.lastError());
+  console.log("ppmd_pw wrong:  ", sevenZip.readFile("out_7zcomp_out/ppmd_pw.7z", "data.json", "bad"));
 
   console.log("7zip compress test done");
 }

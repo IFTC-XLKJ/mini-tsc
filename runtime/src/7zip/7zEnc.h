@@ -17,7 +17,8 @@ enum {
 /* Compression methods. */
 enum {
   Z7ENC_METHOD_LZMA2 = 0,
-  Z7ENC_METHOD_COPY = 1,
+  Z7ENC_METHOD_COPY  = 1,
+  Z7ENC_METHOD_PPMd  = 2, /* PPMdI (PPM8) */
 };
 
 typedef struct {
@@ -51,8 +52,9 @@ typedef struct {
 typedef struct {
   int format;        /* Z7ENC_FMT_7Z (only); Z7ENC_FMT_XZ unsupported */
   int level;         /* 0..9, default 6 */
-  int method;        /* Z7ENC_METHOD_LZMA2 (default) / Z7ENC_METHOD_COPY */
-  UInt32 dictSize;   /* bytes, 0 = auto from level */
+  int method;        /* Z7ENC_METHOD_LZMA2 (default) / Z7ENC_METHOD_COPY /
+                      * Z7ENC_METHOD_PPMd */
+  UInt32 dictSize;   /* bytes, 0 = auto from level (LZMA2 only) */
   UInt32 wordSize;   /* LZMA lc (literal context bits) 0..8; 0 = default (3) */
   int threads;       /* 1..N, 0 = auto (single-thread) */
   UInt64 solidSize;  /* LZMA2 solid-block bytes; 0 = single solid block */
@@ -61,6 +63,8 @@ typedef struct {
                       * still allocates what it needs) */
   UInt64 volumeSize; /* bytes per split volume (out.001/.002...), 0 = no split */
   const char* password; /* UTF-8, NULL/empty = no encryption */
+  UInt32 ppmdMemSize; /* PPMd8 working-memory budget in bytes (method=PPMd
+                      * only); 0 = auto. Higher = better ratio, more RAM. */
 } Z7EncOptions;
 
 typedef struct {

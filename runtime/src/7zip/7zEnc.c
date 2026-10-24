@@ -37,6 +37,7 @@
 #include "7zCrc.h"
 #include "7zFile.h"
 #include "Lzma2Enc.h"
+#include "Ppmd7.h"
 #include "7zAesEnc.h"
 
 #include <string.h>
@@ -211,6 +212,91 @@ static Byte z7enc_lzma2_prop(UInt32 dict) {
   return r;
 }
 
+/* --------------------------- PPMd (PPMdH) encode -------------------------- */
+/* 7-Zip PPMd coder id (PPMdH with 7z range coder): 0x030401.
+ * Props (5 bytes): [order, memSize LE32]. */
+
+#define Z7ENC_PPMD_METHOD_ID   0x030401u
+#define Z7ENC_PPMD_PROPS_SIZE  5u
+
+/* Simple growable memory IByteOut for Ppmd7's range encoder. */
+typedef struct {
+  IByteOut vt;
+  Byte* d;
+  size_t n, cap;
+} Z7MemOut;
+
+static int z7_memout_grow(Z7MemOut* m, size_t need) {
+  (void)need;
+  if (m->n + 1 <= m->cap) return 0;
+  size_t c2 = m->cap ? m->cap : 256;
+  while (c2 < m->n + 1) c2 *= 2;
+  Byte* nd = (Byte*)realloc(m->d, c2);
+  if (!nd) return -1;
+  m->d = nd;
+  m->cap = c2;
+  return 0;
+}
+
+static void z7_memout_write(IByteOutPtr p, Byte b) {
+  Z7MemOut* m = (Z7MemOut*)p;
+  if (z7_memout_grow(m, 0) != 0) return;
+  m->d[m->n++] = b;
+}
+
+/* Map compression level 0..9 to PPMd7 max order (2..32). */
+static unsigned z7enc_ppmd_order(int level) {
+  static const unsigned orders[10] = { 2, 4, 6, 8, 10, 12, 16, 20, 24, 32 };
+  if (level < 0) level = 0;
+  if (level > 9) level = 9;
+  return orders[level];
+}
+
+/* Build the 5-byte PPMd coder properties. `ppmdMem` is the PPMd memory
+ * budget in bytes (0 = auto). */
+static void z7enc_ppmd_props(Byte out[5], unsigned order, UInt32 ppmdMem) {
+  out[0] = (Byte)order;
+  if (ppmdMem < (UInt32)PPMD7_MIN_MEM_SIZE) ppmdMem = 1u << 18; /* 256 KB */
+  if (ppmdMem > (UInt32)(512u << 20)) ppmdMem = 512u << 20;
+  out[1] = (Byte)(ppmdMem & 0xFF);
+  out[2] = (Byte)((ppmdMem >> 8) & 0xFF);
+  out[3] = (Byte)((ppmdMem >> 16) & 0xFF);
+  out[4] = (Byte)((ppmdMem >> 24) & 0xFF);
+}
+
+/* Compress `src` (totalUnpack bytes) with Ppmd7 into `pack` buffer.
+ * Returns 0 on success, -1 on error. `pack->n` gets the compressed size. */
+static int z7enc_ppmd_encode(const Byte* src, size_t totalUnpack,
+                              int level, UInt32 ppmdMem,
+                              WB* pack) {
+  CPpmd7 p;
+  Z7MemOut mo = {0};
+  unsigned order = z7enc_ppmd_order(level);
+  UInt32 mem = ppmdMem ? ppmdMem : (UInt32)(totalUnpack * 64 + 1024);
+
+  Ppmd7_Construct(&p);
+  if (!Ppmd7_Alloc(&p, mem, &g_EncAlloc)) {
+    Ppmd7_Free(&p, &g_EncAlloc);
+    return -1;
+  }
+  Ppmd7_Init(&p, order);
+
+  mo.vt.Write = z7_memout_write;
+  p.rc.enc.Stream = &mo.vt;
+  Ppmd7z_Init_RangeEnc(&p);
+
+  if (totalUnpack > 0) {
+    Ppmd7z_EncodeSymbols(&p, src, src + totalUnpack);
+  }
+  Ppmd7z_Flush_RangeEnc(&p);
+  Ppmd7_Free(&p, &g_EncAlloc);
+
+  pack->d = mo.d;
+  pack->n = mo.n;
+  pack->cap = mo.cap;
+  return 0;
+}
+
 void Z7EncResult_Clear(Z7EncResult* r) {
   if (!r) return;
   memset(r, 0, sizeof(*r));
@@ -297,15 +383,20 @@ static int wb_coder_item(WB* b, UInt32 method, int twoInOne,
  * NextHeader actually lives. */
 static int z7enc_build_header(const Z7EncInput* in, const Z7EncOptions* o,
                               UInt32 dict, UInt32 nFiles, UInt64 totalUnpack,
-                              int haveAes, int useCopy,
+                              int haveAes, int useCopy, int usePPMd,
+                              const Byte* ppmdProps,
                               const Byte* aesProps, size_t aesPropsSize,
                               size_t packTotal, WB* out_h, Byte** out_all) {
   const Z7EncEntry* files = in->entries;
   Byte lzma2Prop = z7enc_lzma2_prop(dict);
   Byte mainProps[2] = { 1, lzma2Prop };
+  Byte ppmdMainProps[5];
   WB* h = out_h;
   int wr = 0;
   int numCoders = haveAes ? 2 : 1;
+  if (usePPMd) z7enc_ppmd_props(ppmdMainProps, z7enc_ppmd_order(o->level),
+                                 o->ppmdMemSize ? o->ppmdMemSize
+                                                : (UInt32)(totalUnpack * 64 + 1024));
 
   /* Files */
   {
@@ -429,12 +520,16 @@ static int z7enc_build_header(const Z7EncInput* in, const Z7EncOptions* o,
         if (wb_coder_item(&f, z7_aes_method_id(), 1, aesProps, aesPropsSize)) wr = 1;
         if (useCopy) {
           if (!wr && wb_coder_item(&f, 0, 1, NULL, 0)) wr = 1;
+        } else if (usePPMd) {
+          if (!wr && wb_coder_item(&f, Z7ENC_PPMD_METHOD_ID, 1, ppmdMainProps, Z7ENC_PPMD_PROPS_SIZE)) wr = 1;
         } else {
           if (!wr && wb_coder_item(&f, 0x21, 1, mainProps, 2)) wr = 1;
         }
         if (!wr && (wb_byte(&f, 1) || wb_byte(&f, 1) || wb_byte(&f, 0))) wr = 1;
       } else if (useCopy) {
         if (!wr && wb_coder_item(&f, 0, 0, NULL, 0)) wr = 1;
+      } else if (usePPMd) {
+        if (!wr && wb_coder_item(&f, Z7ENC_PPMD_METHOD_ID, 0, ppmdMainProps, Z7ENC_PPMD_PROPS_SIZE)) wr = 1;
       } else {
         if (!wr && wb_coder_item(&f, 0x21, 0, mainProps, 2)) wr = 1;
       }
@@ -537,6 +632,7 @@ static int z7enc_compress_single(const Z7EncInput* in, const Z7EncOptions* o,
   UInt64 totalUnpack = 0;
   int haveAes = (o->password && o->password[0]) ? 1 : 0;
   int useCopy = (o->method == Z7ENC_METHOD_COPY) ? 1 : 0;
+  int usePPMd = (o->method == Z7ENC_METHOD_PPMd) ? 1 : 0;
   Byte* src = NULL;
   WB pack = {0};
   WB h = {0};
@@ -572,6 +668,14 @@ static int z7enc_compress_single(const Z7EncInput* in, const Z7EncOptions* o,
         pack.d = (Byte*)malloc(1);
         if (!pack.d) { free(src); out->error = "out of memory (copy)"; return -1; }
         pack.n = 0;
+      }
+    } else if (usePPMd) {
+      UInt32 ppmdMem = o->ppmdMemSize;
+      if (z7enc_ppmd_encode(src ? src : (const Byte*)"",
+                             (size_t)totalUnpack, o->level, ppmdMem, &pack) != 0) {
+        free(src);
+        out->error = "ppmd encode failed";
+        return -1;
       }
     } else {
       CLzma2EncProps p;
@@ -624,7 +728,8 @@ static int z7enc_compress_single(const Z7EncInput* in, const Z7EncOptions* o,
   /* ---- build the NextHeader block ---- */
   Byte* all = NULL;
   if (z7enc_build_header(in, o, dict, nFiles, totalUnpack,
-                         haveAes, useCopy, aesProps, aesPropsSize,
+                         haveAes, useCopy, usePPMd, NULL,
+                         aesProps, aesPropsSize,
                          pack.n, &h, &all) != 0) {
     free(pack.d);
     out->error = "out of memory (header)";
@@ -687,6 +792,7 @@ static int z7enc_compress_split(const Z7EncInput* in, const Z7EncOptions* o,
   UInt64 totalUnpack = 0;
   int haveAes = (o->password && o->password[0]) ? 1 : 0;
   int useCopy = (o->method == Z7ENC_METHOD_COPY) ? 1 : 0;
+  int usePPMd = (o->method == Z7ENC_METHOD_PPMd) ? 1 : 0;
   Byte* src = NULL;
   WB pack = {0};
   WB h = {0};
@@ -723,6 +829,14 @@ static int z7enc_compress_split(const Z7EncInput* in, const Z7EncOptions* o,
         pack.d = (Byte*)malloc(1);
         if (!pack.d) { free(src); out->error = "out of memory (copy)"; return -1; }
         pack.n = 0;
+      }
+    } else if (usePPMd) {
+      UInt32 ppmdMem = o->ppmdMemSize;
+      if (z7enc_ppmd_encode(src ? src : (const Byte*)"",
+                             (size_t)totalUnpack, o->level, ppmdMem, &pack) != 0) {
+        free(src);
+        out->error = "ppmd encode failed";
+        return -1;
       }
     } else {
       CLzma2EncProps p;
@@ -769,7 +883,8 @@ static int z7enc_compress_split(const Z7EncInput* in, const Z7EncOptions* o,
 
   Byte* all = NULL;
   if (z7enc_build_header(in, o, dict, nFiles, totalUnpack,
-                         haveAes, useCopy, aesProps, aesPropsSize,
+                         haveAes, useCopy, usePPMd, NULL,
+                         aesProps, aesPropsSize,
                          pack.n, &h, &all) != 0) {
     free(pack.d);
     out->error = "out of memory (header)";
