@@ -1,4 +1,4 @@
-/** mini-tsc ambient types for the `7zip` module (7z archive reader). */
+/** mini-tsc ambient types for the `7zip` module (7z archive read/write). */
 declare module "7zip" {
   /** A single archive entry as returned by list(). */
   interface ArchiveEntry {
@@ -43,9 +43,11 @@ declare module "7zip" {
     solidSize?: number;
     /** CPU thread count (1..N). 0 = single-threaded. */
     threads?: number;
-    /** Memory budget (informational; not enforced). */
+    /** Memory budget in bytes. When smaller than the level's default
+     * dictionary, the effective dict is capped to fit. */
     memory?: number;
-    /** Volume split size in bytes. 0 = single .7z file. */
+    /** Volume split size in bytes. When set, outPath is volume 1 and
+     * additional volumes are written as outPath.001/.002... 0 = single .7z file. */
     volumeSize?: number;
     /** 7zAES password. When set, the archive is encrypted. */
     password?: string;
@@ -59,7 +61,8 @@ declare module "7zip" {
     totalUnpacked: number;
     /** Total packed size in bytes. */
     totalPacked: number;
-    /** Number of volume files written (1 when volumeSize is 0). */
+    /** Number of volume files written (1 when volumeSize is 0; when
+     * volumeSize > 0, the count of outPath + outPath.001/.002... written). */
     volumeCount: number;
     /** Empty string on success; error message on failure. */
     error: string;
@@ -171,7 +174,9 @@ declare module "7zip" {
 
   /** Compress `srcPath` (a file or a directory, recursively) into `outPath`
    * (.7z archive). Returns a result object; `null` on failure (see
-   * lastError()). Pass a password in `options` to encrypt with 7zAES. */
+   * lastError()). With volumeSize, outPath is the first volume and the rest
+   * are written as outPath.001/.002... Pass a password in `options` to
+   * encrypt with 7zAES. */
   function compress(srcPath: string, outPath: string, options?: CompressOptions): CompressResult | null;
 
   export {

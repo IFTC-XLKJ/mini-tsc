@@ -40,11 +40,12 @@ typedef struct {
   Z7EncReadFunc readFile;
   /* Opaque context passed to `readFile`. */
   void* ctx;
-  /* Volume 1 output file. Volume split: the caller re-invokes
-   * z7enc_compress7z once per volume (volume 1 = archiveOut, volumes 2..N
-   * = archiveOut + ".001", ".002", ...). `archiveOut` is volume 1.
-   * NULL for single-file (no split) archives. */
+  /* Volume 1 output file. Volume split: `out` is volume 1; volumes 2..N
+   * are written as `out.001`, `out.002`, ... `outVolCount` (when non-NULL)
+   * receives the total number of volume files written. NULL for
+   * single-file (no split) archives. */
   const char* archiveOut;
+  int* outVolCount;
 } Z7EncInput;
 
 typedef struct {
@@ -52,11 +53,13 @@ typedef struct {
   int level;         /* 0..9, default 6 */
   int method;        /* Z7ENC_METHOD_LZMA2 (default) / Z7ENC_METHOD_COPY */
   UInt32 dictSize;   /* bytes, 0 = auto from level */
-  UInt32 wordSize;   /* lc (literal context bits) 0..8, "word size"; 0 = default (3) */
+  UInt32 wordSize;   /* LZMA lc (literal context bits) 0..8; 0 = default (3) */
   int threads;       /* 1..N, 0 = auto (single-thread) */
   UInt64 solidSize;  /* LZMA2 solid-block bytes; 0 = single solid block */
-  UInt64 memory;     /* informational only, not enforced */
-  UInt64 volumeSize; /* bytes per .7z.001/.7z.002... split, 0 = no split */
+  UInt64 memory;     /* memory budget in bytes; when set below the level's
+                      * default dict, the dict is capped to fit (encoder
+                      * still allocates what it needs) */
+  UInt64 volumeSize; /* bytes per split volume (out.001/.002...), 0 = no split */
   const char* password; /* UTF-8, NULL/empty = no encryption */
 } Z7EncOptions;
 

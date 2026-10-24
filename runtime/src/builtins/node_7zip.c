@@ -965,8 +965,9 @@ Value node_7zip_close(Value handle) {
  *   wordSize    : LZMA lc (literal context bits) 0..8, 0 = default (3)
  *   solidSize   : LZMA2 solid-block bytes, 0 = single solid block
  *   threads     : 1..N, 0 = single-threaded
- *   memory      : informational only, not enforced
- *   volumeSize  : bytes per .7z.NNN split volume, 0 = single file
+ *   memory      : memory budget in bytes; caps the effective dict size when
+ *                 it is smaller than the level default
+ *   volumeSize  : bytes per split volume (out.001/.002...), 0 = single file
  *   password    : UTF-8 string; encrypts the archive with 7zAES when set
  *
  * Returns an object { filesCount, totalUnpacked, totalPacked, volumeCount,
@@ -1025,9 +1026,10 @@ static int z7enc_walk(const char* root, const char* cur, Z7EncItems* items) {
   char childPath[4096];
   stat_struct st;
   if (stat_call(cur, &st) != 0) return -1;
-  int isDir = S_ISDIR(st.st_mode);
 #ifdef _WIN32
-  isDir = (st.st_mode & _S_IFDIR) != 0;
+  int isDir = (st.st_mode & _S_IFDIR) != 0;
+#else
+  int isDir = S_ISDIR(st.st_mode);
 #endif
   if (isDir) {
     if (strcmp(cur, root) != 0) {
@@ -1153,8 +1155,8 @@ Value node_7zip_compress(Value srcPath, Value outPath, Value optsObj) {
   if (!src || !src[0]) return z7_fail("empty source path");
   if (!out || !out[0]) return z7_fail("empty output path");
 
-  struct stat st;
-  if (stat(src, &st) != 0) return z7_fail("source not found");
+  stat_struct st;
+  if (stat_call(src, &st) != 0) return z7_fail("source not found");
 
   Z7EncOptions o = z7enc_parse_opts(optsObj);
   if (o.format == 99) return ts_value_null(); /* sentinel set in parse */
@@ -1162,7 +1164,12 @@ Value node_7zip_compress(Value srcPath, Value outPath, Value optsObj) {
   /* Build the entry list. */
   Z7EncItems items = {0};
   int wres;
-  if (S_ISDIR(st.st_mode)) {
+#ifdef _WIN32
+  int srcIsDir = (st.st_mode & _S_IFDIR) != 0;
+#else
+  int srcIsDir = S_ISDIR(st.st_mode);
+#endif
+  if (srcIsDir) {
     wres = z7enc_walk(src, src, &items);
   } else {
     /* single file: entry name is the basename */
@@ -1185,26 +1192,18 @@ Value node_7zip_compress(Value srcPath, Value outPath, Value optsObj) {
     z7_mkparents(tmp);
   }
 
+  Z7EncOptions full;
+  Z7EncOptions_Default(&full);
+  full = o;
+
+  int volCount = 1;
   Z7EncInput inp = {0};
   inp.entries = items.items;
   inp.numEntries = items.count;
   inp.readFile = z7enc_read_cb;
   inp.ctx = &items;
   inp.archiveOut = out;
-
-  Z7EncOptions full;
-  Z7EncOptions_Default(&full);
-  full = o;
-
-  /* Volume split: when `volumeSize` is set we still write a single-volume
-   * archive (the in-tree decoder reads one file; split-volume reading
-   * requires an external tool like 7z / p7zip). The `volumeCount` in the
-   * result reports how many `.NNN` slices *would* have been produced so
-   * callers can plan around it. The archive on disk is fully readable. */
-  int volumeCount = 1;
-  if (full.volumeSize > 0 && res_total_packed_size(full.volumeSize)) {
-    /* estimated: ceil(totalUnpacked / volumeSize) — but we only write 1 file */
-  }
+  inp.outVolCount = (full.volumeSize > 0) ? &volCount : NULL;
 
   Z7EncResult res = {0};
   int rc = z7enc_compress7z(&inp, &full, &res);
@@ -1213,22 +1212,13 @@ Value node_7zip_compress(Value srcPath, Value outPath, Value optsObj) {
     return z7_fail(res.error ? res.error : "compress failed");
   }
 
-  /* When volumeSize is requested, report the estimated volume count. */
-  if (full.volumeSize > 0 && res.totalPacked > 0) {
-    volumeCount = (int)((res.totalPacked + full.volumeSize - 1) / full.volumeSize);
-    if (volumeCount < 1) volumeCount = 1;
-  }
-
   TSHashMap* r = ts_hashmap_new();
   ts_hashmap_set(r, ts_string_new("filesCount"), ts_value_number((double)res.filesCount));
   ts_hashmap_set(r, ts_string_new("totalUnpacked"), ts_value_number((double)res.totalUnpacked));
   ts_hashmap_set(r, ts_string_new("totalPacked"), ts_value_number((double)res.totalPacked));
-  ts_hashmap_set(r, ts_string_new("volumeCount"), ts_value_number(volumeCount));
+  ts_hashmap_set(r, ts_string_new("volumeCount"), ts_value_number(volCount));
   ts_hashmap_set(r, ts_string_new("error"), ts_value_string(ts_string_new("")));
   z7enc_items_free(&items);
   Z7EncResult_Clear(&res);
   return ts_value_object(r);
 }
-
-/* (unused helper, kept for clarity) */
-static int res_total_packed_size(UInt64 v) { (void)v; return 0; }

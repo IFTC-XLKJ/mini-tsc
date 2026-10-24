@@ -1243,6 +1243,8 @@ SRes LzmaDec_DecodeToBuf(CLzmaDec *p, Byte *dest, SizeT *destLen, const Byte *sr
 
 void LzmaDec_FreeProbs(CLzmaDec *p, ISzAllocPtr alloc)
 {
+  if (!p)
+    return;
   ISzAlloc_Free(alloc, p->probs);
   p->probs = NULL;
 }

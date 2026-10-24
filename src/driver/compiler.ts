@@ -1436,7 +1436,7 @@ extern TsErrorContext _ts_current_error;
           "7zAesDec.c", "Aes.c", "AesOpt.c", "Sha256.c", "Sha256Opt.c",
           /* 7zAES encryption + 7z container writer (LZMA2 + copy) */
           "7zAesEnc.c", "7zEnc.c", "LzmaEnc.c", "Lzma2Enc.c",
-          "LzFind.c", "LzFindMt.c", "Threads.c", "MtCoder.c", "MtDec.c",
+          "LzFind.c", "LzFindOpt.c", "LzFindMt.c", "Threads.c", "MtCoder.c", "MtDec.c",
           "Sort.c", "SwapBytes.c",
           "Xxh64.c", "Blake2s.c", "HuffEnc.c",
         ]) {
@@ -1690,7 +1690,11 @@ extern TsErrorContext _ts_current_error;
     }
 
     try {
-      execSync(cmd, { stdio: "pipe", cwd: process.cwd() });
+      
+      const args = (cmd.match(/"[^"]*"|\S+/g) ?? [cmd]).map(t =>
+        t.startsWith('"') && t.endsWith('"') ? t.slice(1, -1) : t
+      );
+      execFileSync(args[0], args.slice(1), { stdio: "pipe", cwd: process.cwd() });
     } catch (e: any) {
       throw new Error(`clang failed: ${e.stderr?.toString() || e.message}`);
     }

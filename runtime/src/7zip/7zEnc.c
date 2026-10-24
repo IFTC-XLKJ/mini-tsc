@@ -128,6 +128,17 @@ void Z7EncOptions_Default(Z7EncOptions* o) {
   o->method = Z7ENC_METHOD_LZMA2;
 }
 
+/* Clamp `memory` (bytes) to a usable dict size. With 0 the level default
+ * applies. Larger values merely cap the dictionary the encoder will take;
+ * the encoder itself still allocates as needed. Returns the effective dict. */
+static UInt32 z7enc_resolve_memory(const Z7EncOptions* o, UInt32 dictFromLevel) {
+  UInt64 m = o ? o->memory : 0;
+  if (m <= 0) return dictFromLevel;
+  if (m < ((UInt64)1 << 12)) m = (UInt64)1 << 12;          /* LZMA minimum dict */
+  if (m > ((UInt64)1 << 32)) m = (UInt64)1 << 32;          /* fit in UInt32 */
+  return (m < (UInt64)dictFromLevel) ? (UInt32)m : dictFromLevel;
+}
+
 int Z7EncOptions_Resolve(const Z7EncOptions* in, UInt32* outDict,
                          unsigned* outThreads, unsigned* outLevel) {
   int level = in ? in->level : 0;
@@ -149,6 +160,9 @@ int Z7EncOptions_Resolve(const Z7EncOptions* in, UInt32* outDict,
     default: dict = 1u << 22; break;
   }
   if (in && in->dictSize) dict = in->dictSize;
+  /* `memory` caps the dict: a caller asking for less memory than the level
+   * default gets the smaller dict. */
+  dict = z7enc_resolve_memory(in, dict);
   if (dict < (1u << 12)) dict = 1u << 12;
   if (dict > (3u << 29)) dict = 3u << 29;
   threads = (in && in->threads) ? in->threads : 1;
@@ -158,11 +172,34 @@ int Z7EncOptions_Resolve(const Z7EncOptions* in, UInt32* outDict,
   return 0;
 }
 
+/* Apply `dict` (bytes), `wordSize` (LZMA lc, 0..8), `solidSize` (bytes) and
+ * `threads` to a fresh CLzma2EncProps. `reduceSize` (expected total source
+ * bytes; 0 = unknown) lets the encoder shrink its dict to fit the data. */
+static void z7enc_fill_lzma2_props(CLzma2EncProps* p, UInt32 dict,
+                                   unsigned wordSize, UInt64 solidSize,
+                                   unsigned threads, UInt64 reduceSize) {
+  Lzma2EncProps_Init(p);
+  p->lzmaProps.dictSize = dict;
+  /* wordSize maps to the LZMA "literal context bits" (lc) — the 7-Zip GUI
+   * labels this "Word size". 0..8; 0 = leave at default (3). */
+  if (wordSize > 0) p->lzmaProps.lc = (int)wordSize;
+  p->lzmaProps.numThreads = (threads > 1) ? 2 : 1;
+  p->lzmaProps.reduceSize = reduceSize ? reduceSize : (UInt64)(Int64)-1;
+  if (solidSize > 0) p->blockSize = solidSize;
+  else p->blockSize = LZMA2_ENC_PROPS_BLOCK_SIZE_SOLID;
+  int mtThreads = (int)(threads > 1 ? threads : 2);
+#ifdef Z7ENC_MT_THREADS
+  if (mtThreads > Z7ENC_MT_THREADS) mtThreads = Z7ENC_MT_THREADS;
+#endif
+  p->numBlockThreads_Max = mtThreads;
+  p->numBlockThreads_Reduced = p->numBlockThreads_Max;
+  Lzma2EncProps_Normalize(p);
+}
+
 static Byte z7enc_lzma2_prop(UInt32 dict) {
   CLzma2EncProps p;
   Byte r = 0;
-  Lzma2EncProps_Init(&p);
-  p.lzmaProps.dictSize = dict;
+  z7enc_fill_lzma2_props(&p, dict, 0, 0, 1, 0);
   {
     CLzma2EncHandle h = Lzma2Enc_Create(&g_EncAlloc, &g_EncAlloc);
     if (h) {
@@ -541,19 +578,7 @@ static int z7enc_compress_single(const Z7EncInput* in, const Z7EncOptions* o,
       CLzma2EncHandle enc;
       UInt64 solid = o->solidSize;
       if (solid > 0 && solid < ((UInt64)1 << 12)) solid = (UInt64)1 << 12;
-      Lzma2EncProps_Init(&p);
-      p.lzmaProps.dictSize = dict;
-      p.lzmaProps.numThreads = (threads > 1) ? 2 : 1;
-      p.lzmaProps.reduceSize = totalUnpack ? totalUnpack : (UInt64)(Int64)-1;
-      if (solid > 0) p.blockSize = solid;
-      else p.blockSize = LZMA2_ENC_PROPS_BLOCK_SIZE_SOLID;
-      int mtThreads = (int)(threads > 1 ? threads : 2);
-#ifdef Z7ENC_MT_THREADS
-      if (mtThreads > Z7ENC_MT_THREADS) mtThreads = Z7ENC_MT_THREADS;
-#endif
-      p.numBlockThreads_Max = mtThreads;
-      p.numBlockThreads_Reduced = p.numBlockThreads_Max;
-      Lzma2EncProps_Normalize(&p);
+      z7enc_fill_lzma2_props(&p, dict, o->wordSize, solid, threads, totalUnpack);
 
       enc = Lzma2Enc_Create(&g_EncAlloc, &g_EncAlloc);
       if (!enc) { free(src); out->error = "out of memory (lzma2)"; return -1; }
@@ -642,18 +667,21 @@ static int z7enc_compress_single(const Z7EncInput* in, const Z7EncOptions* o,
   return 0;
 }
 
-/* Compress into split .7z volume files. Volume 1 carries the start header
- * + NextHeader + the first `volumeSize` bytes of the pack stream; volumes
- * 2..N are bare packed slices. The NextHeader's NextHeadPos points to
- * volume 1's NextHeader so a single-volume reader can still open volume 1
- * (reading only the first slice + the full NextHeader).
+/* Compress into split .7z volume files following the 7-Zip split convention:
+ * volume 1 is `in->archiveOut` itself (start header + first slice + the full
+ * NextHeader); volumes 2..N are `in->archiveOut.001`, `.002`, ... — bare
+ * packed slices of `volSize` bytes each (last one shorter).
  *
- * Note: a split archive is only fully readable by an external tool (7z /
- * p7zip) that reassembles the volumes. The in-tree decoder reads a single
- * file; for round-trip verification the test uses volumeSize=0. */
+ * The NextHeader's NextHeadPos points to volume 1's NextHeader offset so a
+ * single-volume reader can open volume 1. A split archive is only fully
+ * readable by an external tool (7z / p7zip) that reassembles the volumes;
+ * the in-tree decoder reads a single file.
+ *
+ * `in->outVolCount` (when non-NULL) receives the number of volume files
+ * written. */
 static int z7enc_compress_split(const Z7EncInput* in, const Z7EncOptions* o,
                                 UInt32 dict, unsigned threads,
-                                Z7EncResult* out) {
+                                Z7EncResult* out, int* outVolCount) {
   const Z7EncEntry* files = in->entries;
   UInt32 nFiles = (UInt32)in->numEntries;
   UInt64 totalUnpack = 0;
@@ -701,19 +729,7 @@ static int z7enc_compress_split(const Z7EncInput* in, const Z7EncOptions* o,
       CLzma2EncHandle enc;
       UInt64 solid = o->solidSize;
       if (solid > 0 && solid < ((UInt64)1 << 12)) solid = (UInt64)1 << 12;
-      Lzma2EncProps_Init(&p);
-      p.lzmaProps.dictSize = dict;
-      p.lzmaProps.numThreads = (threads > 1) ? 2 : 1;
-      p.lzmaProps.reduceSize = totalUnpack ? totalUnpack : (UInt64)(Int64)-1;
-      if (solid > 0) p.blockSize = solid;
-      else p.blockSize = LZMA2_ENC_PROPS_BLOCK_SIZE_SOLID;
-      int mtThreads = (int)(threads > 1 ? threads : 2);
-#ifdef Z7ENC_MT_THREADS
-      if (mtThreads > Z7ENC_MT_THREADS) mtThreads = Z7ENC_MT_THREADS;
-#endif
-      p.numBlockThreads_Max = mtThreads;
-      p.numBlockThreads_Reduced = p.numBlockThreads_Max;
-      Lzma2EncProps_Normalize(&p);
+      z7enc_fill_lzma2_props(&p, dict, o->wordSize, solid, threads, totalUnpack);
       enc = Lzma2Enc_Create(&g_EncAlloc, &g_EncAlloc);
       if (!enc) { free(src); out->error = "out of memory (lzma2)"; return -1; }
       Lzma2Enc_SetProps(enc, &p);
@@ -769,8 +785,15 @@ static int z7enc_compress_split(const Z7EncInput* in, const Z7EncOptions* o,
   if (nVols < 1) nVols = 1;
   int v;
   for (v = 0; v < nVols; v++) {
-    char volPath[4096];
-    snprintf(volPath, sizeof(volPath), "%s.%03d", in->archiveOut, v + 1);
+    /* Volume 1 is `in->archiveOut` itself; volumes 2..N are
+     * `in->archiveOut.001`, `.002`, ... */
+    const char* volPath = (v == 0) ? in->archiveOut
+                                    : NULL;
+    char contPath[4096];
+    if (v != 0) {
+      snprintf(contPath, sizeof(contPath), "%s.%03d", in->archiveOut, v);
+      volPath = contPath;
+    }
     CSzFile file;
     CFileOutStream fos;
     WRes wres = OutFile_Open(&file, volPath);
@@ -831,6 +854,8 @@ static int z7enc_compress_split(const Z7EncInput* in, const Z7EncOptions* o,
   }
   if (pack.d) free(pack.d);
 
+  if (outVolCount) *outVolCount = nVols;
+
   out->filesCount = nFiles;
   out->totalUnpacked = totalUnpack;
   out->totalPacked = pack.n;
@@ -856,6 +881,6 @@ int z7enc_compress7z(const Z7EncInput* in, const Z7EncOptions* optsIn, Z7EncResu
   CrcGenerateTable();
 
   if (o.volumeSize > 0)
-    return z7enc_compress_split(in, &o, dict, threads, out);
+    return z7enc_compress_split(in, &o, dict, threads, out, in->outVolCount);
   return z7enc_compress_single(in, &o, dict, threads, out);
 }
