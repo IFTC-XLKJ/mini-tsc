@@ -1431,10 +1431,10 @@ extern TsErrorContext _ts_current_error;
           "7zAlloc.c", "7zArcIn.c", "7zBuf.c", "7zBuf2.c", "7zCrc.c",
           "7zCrcOpt.c", "7zDec.c", "7zFile.c", "7zStream.c",
           "CpuArch.c", "Delta.c", "Bcj2.c", "Bra.c", "Bra86.c",
-          "BraIA64.c", "LzmaDec.c", "Lzma2Dec.c", "Ppmd7.c", "Ppmd7Dec.c",
+          "BraIA64.c", "LzmaDec.c", "Lzma2Dec.c", "Ppmd7.c", "Ppmd7Dec.c", "Ppmd7Enc.c",
           /* 7zAES decryption (AES-256-CBC + SHA-256 KDF) */
           "7zAesDec.c", "Aes.c", "AesOpt.c", "Sha256.c", "Sha256Opt.c",
-          /* 7zAES encryption + 7z container writer (LZMA2 + copy) */
+          /* 7zAES encryption + 7z container writer (LZMA2 + copy + PPMd) */
           "7zAesEnc.c", "7zEnc.c", "LzmaEnc.c", "Lzma2Enc.c",
           "LzFind.c", "LzFindOpt.c", "LzFindMt.c", "Threads.c", "MtCoder.c", "MtDec.c",
           "Sort.c", "SwapBytes.c",

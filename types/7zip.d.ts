@@ -31,8 +31,9 @@ declare module "7zip" {
   interface CompressOptions {
     /** Archive format. Only "7z" is currently supported. @default "7z" */
     format?: "7z";
-    /** Compression method: "lzma2" (default) or "copy" (store-only, fast). @default "lzma2" */
-    method?: "lzma2" | "copy";
+    /** Compression method: "lzma2" (default), "copy" (store-only, fast),
+     * or "ppmd" (PPMdI, good for text/structured data). @default "lzma2" */
+    method?: "lzma2" | "copy" | "ppmd";
     /** Compression level 0..9 (0 = fastest, 9 = best ratio). @default 6 */
     level?: number;
     /** LZMA dictionary size in bytes (power of two). 0 = auto from level. */
@@ -46,6 +47,9 @@ declare module "7zip" {
     /** Memory budget in bytes. When smaller than the level's default
      * dictionary, the effective dict is capped to fit. */
     memory?: number;
+    /** PPMd working-memory budget in bytes (method="ppmd" only). 0 = auto.
+     * Higher values improve compression ratio but use more RAM. */
+    ppmdMemSize?: number;
     /** Volume split size in bytes. When set, outPath is volume 1 and
      * additional volumes are written as outPath.001/.002... 0 = single .7z file. */
     volumeSize?: number;

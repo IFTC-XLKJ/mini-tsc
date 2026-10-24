@@ -1123,20 +1123,30 @@ static Z7EncOptions z7enc_parse_opts(Value optsObj) {
   }
   v = ts_hashmap_get(m, ts_string_new("method"));
   if (v.tag == TAG_STRING && v.as.string && v.as.string->data) {
-    o.method = (strcmp(v.as.string->data, "copy") == 0) ? Z7ENC_METHOD_COPY : Z7ENC_METHOD_LZMA2;
+    const char* md = v.as.string->data;
+    if (strcmp(md, "copy") == 0) o.method = Z7ENC_METHOD_COPY;
+    else if (strcmp(md, "ppmd") == 0) o.method = Z7ENC_METHOD_PPMd;
+    else o.method = Z7ENC_METHOD_LZMA2;
   }
   v = ts_hashmap_get(m, ts_string_new("level"));
   if (v.tag == TAG_NUMBER) o.level = (int)v.as.number;
   v = ts_hashmap_get(m, ts_string_new("dictSize"));
   if (v.tag == TAG_NUMBER) o.dictSize = (UInt32)v.as.number;
   v = ts_hashmap_get(m, ts_string_new("wordSize"));
-  if (v.tag == TAG_NUMBER) o.wordSize = (UInt32)v.as.number;
+  if (v.tag == TAG_NUMBER) {
+    int ws = (int)v.as.number;
+    if (ws < 0) ws = 0;
+    if (ws > 8) ws = 8;
+    o.wordSize = (UInt32)ws;
+  }
   v = ts_hashmap_get(m, ts_string_new("solidSize"));
   if (v.tag == TAG_NUMBER) o.solidSize = (UInt64)v.as.number;
   v = ts_hashmap_get(m, ts_string_new("threads"));
   if (v.tag == TAG_NUMBER) o.threads = (int)v.as.number;
   v = ts_hashmap_get(m, ts_string_new("memory"));
   if (v.tag == TAG_NUMBER) o.memory = (UInt64)v.as.number;
+  v = ts_hashmap_get(m, ts_string_new("ppmdMemSize"));
+  if (v.tag == TAG_NUMBER) o.ppmdMemSize = (UInt32)v.as.number;
   v = ts_hashmap_get(m, ts_string_new("volumeSize"));
   if (v.tag == TAG_NUMBER) o.volumeSize = (UInt64)v.as.number;
   v = ts_hashmap_get(m, ts_string_new("password"));
