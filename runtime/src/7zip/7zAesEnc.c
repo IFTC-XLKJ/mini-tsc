@@ -131,7 +131,7 @@ int z7_aes_encode(const char* password,
   Byte* password16;
   size_t password16_len = 0;
   Byte key[AES_ENC_KEY_SIZE];
-  unsigned char ivAes[AES_NUM_IVMRK_WORDS];
+  UInt32 ivAes[AES_NUM_IVMRK_WORDS];
   const Byte* iv = out_props + 2 + AES_ENC_SALT_SIZE;
   size_t numBlocks = data_size / AES_ENC_BLOCK;
 
@@ -155,12 +155,21 @@ int z7_aes_encode(const char* password,
 
   aes_enc_ensure_init();
 
-  memcpy(ivAes, iv, 16);
-  memset(ivAes + 16, 0, AES_NUM_IVMRK_WORDS - 16);
-  AesCbc_Init((UInt32*)ivAes, ivAes);
-  Aes_SetKey_Enc((UInt32*)(ivAes + 4), key, AES_ENC_KEY_SIZE);
+  /* ivAes: [0..3] = IV/state, [4..] = AES-256 round keys (same layout the
+   * decoder uses). Aes_SetKey_Enc writes ~52 words past ivAes+4, so the
+   * buffer must be UInt32[AES_NUM_IVMRK_WORDS] (68 words = 272 bytes). */
+  {
+    /* The 7z format stores the IV without a fixed length; we emit 15 bytes
+     * (AES_ENC_IV_SIZE) and the decoder zero-pads to 16.  Do the same here so
+     * encryption and decryption agree on the 16-byte CBC IV. */
+    Byte iv16[16];
+    memset(iv16, 0, sizeof(iv16));
+    memcpy(iv16, iv, AES_ENC_IV_SIZE);
+    AesCbc_Init(ivAes, iv16);
+  }
+  Aes_SetKey_Enc(ivAes + 4, key, AES_ENC_KEY_SIZE);
   if (numBlocks > 0)
-    g_AesCbc_Encode((UInt32*)ivAes, data, numBlocks);
+    g_AesCbc_Encode(ivAes, data, numBlocks);
 
   memset(key, 0, sizeof(key));
   memset(ivAes, 0, sizeof(ivAes));

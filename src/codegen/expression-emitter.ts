@@ -42,6 +42,8 @@ function filePathToMangledPrefix(filePath: string): string {
 export class ExpressionEmitter {
   /** Map of variable names to their C types */
   private varTypes: Map<string, string> = new Map();
+  /** Map of variable names to their initializer expression (for Buffer detection etc.) */
+  private varInitExprs: Map<string, string> = new Map();
   /** Set of names that are declared as local variables / parameters (shadows imports) */
   private localSymbols: Set<string> = new Set();
   /** Map of original names to mangled names for imported symbols */
@@ -63,6 +65,15 @@ export class ExpressionEmitter {
     if (san !== name) {
       this.varTypes.set(san, type);
       this.localSymbols.add(san);
+    }
+  }
+
+  /** Register a variable's initializer expression */
+  declareVarInit(name: string, initExpr: string): void {
+    this.varInitExprs.set(name, initExpr);
+    const san = sanitizeCIdentifier(name);
+    if (san !== name) {
+      this.varInitExprs.set(san, initExpr);
     }
   }
 
@@ -224,6 +235,22 @@ export class ExpressionEmitter {
           val = `ts_value_string(${val})`;
         }
       }
+
+      // Buffer element assignment: buf[i] = value → ts_buffer_writeUInt8
+      const objName = node.target.object?.kind === "identifier" ? node.target.object.name : null;
+      const objType = objName ? this.varTypes.get(objName) : undefined;
+      if (objType === "Value" && objName) {
+        // Check if the variable was initialized from a Buffer constructor
+        const initExpr = this.varInitExprs.get(objName);
+        if (initExpr && /ts_buffer_(alloc|new|from)/.test(initExpr)) {
+          // Extract the numeric value from ts_value_number(...) or use the raw expression
+          let numVal = val;
+          const numMatch = val.match(/^ts_value_number\((.+)\)$/);
+          if (numMatch) numVal = numMatch[1];
+          return `ts_buffer_writeUInt8(${obj}, (int32_t)(${key}), (uint8_t)(${numVal}))`;
+        }
+      }
+
       // Key as TSString* for hashmap (string keys on Value objects)
       let keyStr = key;
       if (key.startsWith("ts_value_string(")) keyStr = key.replace(/^ts_value_string\((.+)\)$/, "$1");
@@ -1243,6 +1270,10 @@ export class ExpressionEmitter {
         // node_process_pid() returns int
         if (emitted.match(/^node_\w+_pid\s*\(/)) {
           return `ts_value_number((double)${emitted})`;
+        }
+        // existsSync returns int (boolean)
+        if (emitted.match(/^node_\w+_existsSync\s*\(/)) {
+          return `ts_value_boolean(${emitted})`;
         }
         // totalmem/freemem/uptime return double
         if (emitted.match(/^node_\w+_(totalmem|freemem|uptime)\s*\(/)) {
@@ -5230,6 +5261,10 @@ export class ExpressionEmitter {
     // node_process_pid() returns int — wrap as Value number
     if (emitted.match(/^node_\w+_pid\s*\(/)) {
       return `ts_value_number((double)${emitted})`;
+    }
+    // node_fs_existsSync() returns int (boolean) — wrap as Value boolean
+    if (emitted.match(/^node_\w+_existsSync\s*\(/)) {
+      return `ts_value_boolean(${emitted})`;
     }
     // node_os_totalmem/freemem/uptime return double — wrap as Value number
     if (emitted.match(/^node_\w+_(totalmem|freemem|uptime)\s*\(/)) {

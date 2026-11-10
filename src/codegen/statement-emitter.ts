@@ -166,6 +166,11 @@ export class StatementEmitter {
 
     let initExpr = node.init ? this.exprEmitter.emit(node.init) : "";
 
+    // Register the initializer expression for Buffer detection
+    if (node.name && initExpr) {
+      this.exprEmitter.declareVarInit(node.name, initExpr);
+    }
+
     // Optimization: if a string variable is initialized with
     // ts_string_new_len((char[]){ts_string_char_at(X,Y),0},1), downgrade it to plain char
     // to avoid a wasteful TSString* allocation just to extract a char back.

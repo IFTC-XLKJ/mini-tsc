@@ -217,6 +217,13 @@ static SRes SzDecodePpmd(const Byte *props, unsigned propsSize, UInt64 inSize, I
     }
     if (s.extra)
       res = (s.res != SZ_OK ? s.res : SZ_ERROR_DATA);
+    else if (res == SZ_OK)
+    {
+      /* When the folder is AES-encrypted the decrypted buffer is padded to
+       * the AES block size, so the PPMd stream may end before the declared
+       * input span is exhausted.  The trailing bytes are zero padding, not
+       * part of the stream. */
+    }
     else if (s.processed + (size_t)(s.cur - s.begin) != inSize)
       res = SZ_ERROR_DATA;
     Ppmd7_Free(ppmd, allocMain);
@@ -323,7 +330,11 @@ static SRes SzDecodeLzma2(const Byte *props, unsigned propsSize, UInt64 inSize, 
 
       if (status == LZMA_STATUS_FINISHED_WITH_MARK)
       {
-        if (outSize != state.decoder.dicPos || inSize != 0)
+        /* When the folder is AES-encrypted the decrypted buffer is padded to
+         * the AES block size, so the LZMA2 stream may end before the declared
+         * input span is exhausted.  The trailing bytes are zero padding, not
+         * part of the stream, so only the output size is checked here. */
+        if (outSize != state.decoder.dicPos)
           res = SZ_ERROR_DATA;
         break;
       }
@@ -820,7 +831,12 @@ static SRes SzFolder_Decode2(const CSzFolder *folder,
     CSzFolder reduced;
     UInt64 reducedPackPositions[2];
     reducedPackPositions[0] = 0;
-    reducedPackPositions[1] = unpackSizes[aesCi];
+    /* The AES coder's declared unpack size is the unpadded plaintext length
+     * (e.g. 12), but the decrypted buffer is padded to the AES block size
+     * (e.g. 16).  The inner decoder must see the full decrypted span so the
+     * LZMA2 stream (which includes its own 3-byte header) can be decoded;
+     * LZMA2 ignores the trailing pad bytes. */
+    reducedPackPositions[1] = decryptedSize;
     SzFolder_StripCoder(folder, aesCi, &reduced);
     Z7MemLook_CreateVTable(&decryptedStream, decryptedBuf, decryptedSize);
     res = SzFolder_Decode2_Inner(&reduced, propsData, unpackSizes + aesCi,

@@ -374,6 +374,12 @@ static char* z7_entry_name(const CSzArEx* db, UInt32 i) {
   SzArEx_GetFileNameUtf16(db, i, buf);
   char* out = z7_utf16_to_utf8(buf, len);
   SzFree(NULL, buf);
+  /* 7z stores names with backslashes on Windows; normalise to forward
+   * slashes so lookups with either separator succeed. */
+  if (out) {
+    for (char* p = out; *p; p++)
+      if (*p == '\\') *p = '/';
+  }
   return out;
 }
 
@@ -625,6 +631,7 @@ static Value z7_read_one(Z7Archive* a, const char* entryName) {
 
   TSString* s = ts_string_new_len((const char*)data, (int32_t)size);
   free(data);
+  g_z7_error[0] = '\0';  /* clear stale error on success */
   return ts_value_string(s);
 }
 
@@ -643,6 +650,7 @@ static Value z7_read_buf(Z7Archive* a, const char* entryName) {
   free(data);
   Value buf = ts_buffer_from_string(s);
   ts_string_free(s);
+  g_z7_error[0] = '\0';  /* clear stale error on success */
   return buf;
 }
 
@@ -1161,7 +1169,7 @@ static Z7EncOptions z7enc_parse_opts(Value optsObj) {
 Value node_7zip_compress(Value srcPath, Value outPath, Value optsObj) {
   char nb[64], nb2[64];
   const char* src = z7_value_cstr(srcPath, nb, sizeof(nb));
-  const char* out = z7_value_cstr(outPath, nb2, sizeof(nb2));
+  const char* out = z7_value_cstr(outPath, nb2, sizeof(nb));
   if (!src || !src[0]) return z7_fail("empty source path");
   if (!out || !out[0]) return z7_fail("empty output path");
 

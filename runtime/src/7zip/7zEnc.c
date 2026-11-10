@@ -349,7 +349,8 @@ static int wb_coder_item(WB* b, UInt32 method, int twoInOne,
   int idSize = 0;
   unsigned i;
   if (method & 0xFF000000u) idSize = 4;
-  else if (method & 0x0000FFFFu) idSize = 2;
+  else if (method & 0x00FF0000u) idSize = 3;
+  else if (method & 0x0000FF00u) idSize = 2;
   else if (method & 0x000000FFu) idSize = 1;
 
   {
@@ -374,115 +375,217 @@ static int wb_coder_item(WB* b, UInt32 method, int twoInOne,
 
 /* ------------------------------ 7z writer ---------------------------------- */
 
-/* Build the NextHeader block (Files + FilesInfo + Namelist + StreamsInfo +
- * End). `packTotal` is the TOTAL packed-stream size across all volumes
- * (single-volume: pack.n; split: the full pack stream length). The Coder
- * property's pack-size GILP declares packTotal so a single-volume archive
- * is self-contained. For split archives, each volume's start header's
- * NextHeadPos points to volume 1's NextHeader, which is where the
- * NextHeader actually lives. */
+/* Build the NextHeader block per the 7z format that SzReadHeader2 expects:
+ *
+ *   k7zIdHeader (0x01)
+ *     k7zIdMainStreamsInfo (0x04)
+ *       k7zIdPackInfo (0x06)
+ *         dataOffset (GILP = 0)
+ *         numPackStreams (GILP = 1)
+ *         k7zIdSize (0x09) + packSize (GILP)
+ *         k7zIdEnd
+ *       k7zIdUnpackInfo (0x07)
+ *         k7zIdFolder (0x0B)
+ *         numFolders (GILP = 1)
+ *         external (0)
+ *         numCoders (GILP)
+ *         coder definitions
+ *         [bonds when numCoders > 1]
+ *         k7zIdCodersUnpackSize (0x0C) + unpackSize per coder out-stream
+ *         k7zIdEnd
+ *       k7zIdSubStreamsInfo (0x08)   [only when numUnpackStreams > 0]
+ *         k7zIdNumUnpackStream (0x0D) + numStreams per folder
+ *         k7zIdSize (0x09) + sizes for first (numStreams-1) substreams
+ *         k7zIdCRC (0x0A) + allDefined(1) + CRCs
+ *         k7zIdEnd
+ *       k7zIdEnd
+ *     k7zIdFilesInfo (0x05)
+ *       numFiles (GILP)
+ *       [k7zIdEmptyStream (0x0E) + bitvector]   [if any empty streams]
+ *       [k7zIdEmptyFile (0x0F) + bitvector]     [if any empty streams]
+ *       k7zIdName (0x11) + size + external(0) + UTF-16LE names
+ *       k7zIdEnd
+ *     k7zIdEnd
+ *
+ * `packTotal` is the TOTAL packed-stream size across all volumes
+ * (single-volume: pack.n; split: the full pack stream length). */
 static int z7enc_build_header(const Z7EncInput* in, const Z7EncOptions* o,
                               UInt32 dict, UInt32 nFiles, UInt64 totalUnpack,
                               int haveAes, int useCopy, int usePPMd,
                               const Byte* ppmdProps,
                               const Byte* aesProps, size_t aesPropsSize,
-                              size_t packTotal, WB* out_h, Byte** out_all) {
+                              size_t packTotal, size_t aesUnpackSize,
+                              WB* out_h, Byte** out_all) {
   const Z7EncEntry* files = in->entries;
   Byte lzma2Prop = z7enc_lzma2_prop(dict);
-  Byte mainProps[2] = { 1, lzma2Prop };
+  Byte mainProps[1] = { lzma2Prop };
   Byte ppmdMainProps[5];
   WB* h = out_h;
   int wr = 0;
   int numCoders = haveAes ? 2 : 1;
+  UInt32 i;
+  UInt32 numEmptyStreams = 0, numUnpackStreams = 0;
+  UInt64 totalNameLen = 0;
   if (usePPMd) z7enc_ppmd_props(ppmdMainProps, z7enc_ppmd_order(o->level),
                                  o->ppmdMemSize ? o->ppmdMemSize
                                                 : (UInt32)(totalUnpack * 64 + 1024));
 
-  /* Files */
-  {
-    WB f = {0};
-    UInt32 i, present = 0;
-    for (i = 0; i < nFiles; i++) if (files[i].size) present++;
-    if (wb_byte(&f, 0x00) ||           /* Files property id */
-        wb_byte(&f, 0x00) ||           /* NextSize: 0 */
-        wb_gilp(&f, nFiles) ||         /* numFiles */
-        wb_gilp(&f, 0) ||             /* numSkippedUnpack */
-        wb_gilp(&f, 0) ||             /* numSkippedPack */
-        wb_byte(&f, (Byte)present))    /* count of defined unpack sizes */
-      wr = 1;
-    for (i = 0; !wr && i < nFiles; i++)
-      if (files[i].size && wb_gilp(&f, files[i].size))
-        wr = 1;
-    if (wr) { free(f.d); }
-    else wr = wb_splice(h, &f);
+  /* Classify entries: empty streams are dirs and zero-size files; every
+   * other entry is one substream of the single folder. */
+  for (i = 0; i < nFiles; i++) {
+    if (files[i].isDir || files[i].size == 0) {
+      numEmptyStreams++;
+    } else {
+      numUnpackStreams++;
+    }
+    totalNameLen += (UInt64)(strlen(files[i].name) + 1) * 2;
   }
-  if (wr) return -1;
 
-  /* FilesInfo */
-  {
+  /* ---- k7zIdHeader ---- */
+  if (wb_byte(h, 0x01)) wr = 1;
+
+  /* ---- k7zIdMainStreamsInfo ---- */
+  if (!wr && wb_byte(h, 0x04)) wr = 1;
+
+  /* k7zIdPackInfo */
+  if (!wr) {
     WB f = {0};
-    UInt32 i;
-    Byte crcFlags[4096], folderFlags[4096], emptyStreamFlags[4096],
-         emptyFileFlags[4096], dirFlags[4096];
-    UInt64 totalNameLen = 0;
-    if (nFiles > 4096) { free(f.d); return -1; }
-    for (i = 0; i < nFiles; i++) {
-      crcFlags[i] = (Byte)(!files[i].isDir && files[i].size ? 1 : 0);
-      folderFlags[i] = crcFlags[i];
-      emptyStreamFlags[i] = (Byte)(!files[i].isDir && files[i].size == 0 ? 1 : 0);
-      emptyFileFlags[i] = (Byte)(files[i].isDir || files[i].size == 0 ? 1 : 0);
-      dirFlags[i] = (Byte)(files[i].isDir ? 1 : 0);
-      totalNameLen += (UInt64)(strlen(files[i].name) + 1) * 2;
-    }
-    if (wb_byte(&f, 0x02 | 0x04 | 0x08 | 0x10 | 0x20 | 0x40)) wr = 1;
-    if (!wr) {
-      if (wb_bitvector(&f, nFiles, crcFlags)) wr = 1;
-      for (i = 0; !wr && i < nFiles; i++) {
-        if (!crcFlags[i]) continue;
-        Byte* data = z7enc_entry_data(in, i);
-        if (!data) { wr = 1; break; }
-        if (wb_le32(&f, CrcCalc(data, files[i].size))) wr = 1;
-        free(data);
-      }
-    }
-    if (!wr) {
-      if (wb_bitvector(&f, nFiles, folderFlags)) wr = 1;
-      if (!wr && wb_gilp(&f, 1)) wr = 1;
-      if (!wr) {
-        if (wb_gilp(&f, 0) || wb_gilp(&f, nFiles)) wr = 1;
-      }
-      if (!wr) {
-        for (UInt32 z = 0; !wr && z < 1; z++)
-          if (wb_gilp(&f, totalUnpack)) wr = 1;
-      }
-    }
-    if (!wr && wb_bitvector(&f, nFiles, emptyStreamFlags)) wr = 1;
-    if (!wr) {
-      if (wb_gilp(&f, totalNameLen)) wr = 1;
-      for (i = 0; !wr && i < nFiles; i++) {
-        const char* nm = files[i].name;
-        size_t l = strlen(nm);
-        for (size_t k = 0; !wr && k <= l; k++) {
-          Byte ch = (k < l) ? (Byte)nm[k] : 0;
-          if (wb_byte(&f, ch) || wb_byte(&f, 0)) wr = 1;
-        }
-      }
-    }
-    if (!wr && wb_bitvector(&f, nFiles, emptyFileFlags)) wr = 1;
-    if (!wr && wb_bitvector(&f, nFiles, dirFlags)) wr = 1;
-    if (!wr && wb_byte(&f, 0x00)) wr = 1;
+    if (wb_byte(&f, 0x06) ||          /* k7zIdPackInfo */
+        wb_gilp(&f, 0) ||             /* dataOffset */
+        wb_gilp(&f, 1) ||             /* numPackStreams */
+        wb_byte(&f, 0x09) ||          /* k7zIdSize */
+        wb_gilp(&f, (UInt64)packTotal) ||
+        wb_byte(&f, 0x00))            /* k7zIdEnd */
+      wr = 1;
     if (wr) { free(f.d); return -1; }
     wr = wb_splice(h, &f);
     if (wr) return -1;
   }
 
-  /* Namelist */
+  /* k7zIdUnpackInfo */
   if (!wr) {
     WB f = {0};
-    UInt32 i;
-    UInt64 totalNameLen = 0;
-    for (i = 0; i < nFiles; i++) totalNameLen += (UInt64)(strlen(files[i].name) + 1) * 2;
-    if (wb_gilp(&f, totalNameLen)) wr = 1;
+    if (wb_byte(&f, 0x07) ||          /* k7zIdUnpackInfo */
+        wb_byte(&f, 0x0B) ||          /* k7zIdFolder */
+        wb_gilp(&f, 1) ||             /* numFolders */
+        wb_byte(&f, 0) ||             /* external */
+        wb_byte(&f, (Byte)numCoders)) /* numCoders */
+      wr = 1;
+    /* coder definitions: [AES, main] when encrypted, else [main]. */
+    if (!wr && haveAes) {
+      if (wb_coder_item(&f, z7_aes_method_id(), 1, aesProps, aesPropsSize)) wr = 1;
+      if (!wr && useCopy) {
+        if (wb_coder_item(&f, 0, 1, NULL, 0)) wr = 1;
+      } else if (!wr && usePPMd) {
+        if (wb_coder_item(&f, Z7ENC_PPMD_METHOD_ID, 1, ppmdMainProps, Z7ENC_PPMD_PROPS_SIZE)) wr = 1;
+      } else if (!wr) {
+        if (wb_coder_item(&f, 0x21, 1, mainProps, 1)) wr = 1;
+      }
+      /* Bond: AES (coder 0) output feeds the main coder (coder 1).
+       * 7z bond = {InIndex, OutIndex} where InIndex is the in-stream index
+       * (1 = main's input) and OutIndex is the coder whose output is routed
+       * (0 = AES). Matches py7zr's Bond(incoder=1, outcoder=0) and 7-Zip's
+       * CheckSupportedFolder expectation {InIndex=1, OutIndex=0}. */
+      if (!wr && (wb_byte(&f, 1) || wb_byte(&f, 0))) wr = 1;
+    } else if (!wr && useCopy) {
+      if (wb_coder_item(&f, 0, 0, NULL, 0)) wr = 1;
+    } else if (!wr && usePPMd) {
+      if (wb_coder_item(&f, Z7ENC_PPMD_METHOD_ID, 0, ppmdMainProps, Z7ENC_PPMD_PROPS_SIZE)) wr = 1;
+    } else if (!wr) {
+      if (wb_coder_item(&f, 0x21, 0, mainProps, 1)) wr = 1;
+    }
+    /* k7zIdCodersUnpackSize: one size per coder output stream.
+     * AES coder output = packed data size before AES padding.
+     * Main coder output = totalUnpack (uncompressed). */
+    if (!wr && wb_byte(&f, 0x0C)) wr = 1;
+    if (!wr && haveAes && wb_gilp(&f, aesUnpackSize)) wr = 1;  /* AES out */
+    if (!wr && wb_gilp(&f, totalUnpack)) wr = 1;              /* main out */
+    if (!wr && wb_byte(&f, 0x00)) wr = 1;          /* k7zIdEnd */
+    if (wr) { free(f.d); return -1; }
+    wr = wb_splice(h, &f);
+    if (wr) return -1;
+  }
+
+  /* k7zIdSubStreamsInfo (only when there are non-empty files) */
+  if (!wr && numUnpackStreams > 0) {
+    WB f = {0};
+    if (wb_byte(&f, 0x08)) wr = 1;                 /* k7zIdSubStreamsInfo */
+    /* k7zIdNumUnpackStream: one folder, numStreams = numUnpackStreams */
+    if (!wr && wb_byte(&f, 0x0D)) wr = 1;
+    if (!wr && wb_gilp(&f, (UInt64)numUnpackStreams)) wr = 1;
+    /* k7zIdSize: sizes for the first (numUnpackStreams - 1) substreams.
+     * The decoder derives the last one from the folder unpack size. */
+    if (!wr && wb_byte(&f, 0x09)) wr = 1;
+    {
+      UInt32 written = 0;
+      for (i = 0; !wr && i < nFiles && written + 1 < numUnpackStreams; i++) {
+        if (files[i].isDir || files[i].size == 0) continue;
+        if (wb_gilp(&f, files[i].size)) wr = 1;
+        written++;
+      }
+    }
+    /* k7zIdCRC: allDefined=1 + one CRC per substream */
+    if (!wr && wb_byte(&f, 0x0A)) wr = 1;
+    if (!wr && wb_byte(&f, 1)) wr = 1;
+    for (i = 0; !wr && i < nFiles; i++) {
+      if (files[i].isDir || files[i].size == 0) continue;
+      Byte* data = z7enc_entry_data(in, i);
+      if (!data) { wr = 1; break; }
+      if (wb_le32(&f, CrcCalc(data, files[i].size))) wr = 1;
+      free(data);
+    }
+    if (!wr && wb_byte(&f, 0x00)) wr = 1;          /* k7zIdEnd */
+    if (wr) { free(f.d); return -1; }
+    wr = wb_splice(h, &f);
+    if (wr) return -1;
+  }
+
+  /* k7zIdEnd of MainStreamsInfo */
+  if (!wr && wb_byte(h, 0x00)) wr = 1;
+  if (wr) return -1;
+
+  /* ---- k7zIdFilesInfo ---- */
+  if (!wr) {
+    WB f = {0};
+    Byte* emptyStreamFlags = NULL;
+    Byte* emptyFileFlags = NULL;
+    if (wb_byte(&f, 0x05) ||          /* k7zIdFilesInfo */
+        wb_gilp(&f, (UInt64)nFiles))
+      wr = 1;
+    if (!wr && numEmptyStreams > 0) {
+      emptyStreamFlags = (Byte*)calloc((nFiles + 7) / 8, 1);
+      emptyFileFlags = (Byte*)calloc((numEmptyStreams + 7) / 8, 1);
+      if (!emptyStreamFlags || !emptyFileFlags) {
+        free(emptyStreamFlags); free(emptyFileFlags);
+        free(f.d);
+        return -1;
+      }
+      {
+        UInt32 efi = 0;
+        for (i = 0; i < nFiles; i++) {
+          if (files[i].isDir || files[i].size == 0) {
+            emptyStreamFlags[i >> 3] |= (Byte)(0x80 >> (i & 7));
+            if (!files[i].isDir)
+              emptyFileFlags[efi >> 3] |= (Byte)(0x80 >> (efi & 7));
+            efi++;
+          }
+        }
+      }
+      if (wb_byte(&f, 0x0E) ||        /* k7zIdEmptyStream */
+          wb_gilp(&f, (UInt64)((nFiles + 7) / 8)))
+        wr = 1;
+      if (!wr && wb_bytes(&f, emptyStreamFlags, (nFiles + 7) / 8)) wr = 1;
+      if (!wr && wb_byte(&f, 0x0F) || /* k7zIdEmptyFile */
+          wb_gilp(&f, (UInt64)((numEmptyStreams + 7) / 8)))
+        wr = 1;
+      if (!wr && wb_bytes(&f, emptyFileFlags, (numEmptyStreams + 7) / 8)) wr = 1;
+      free(emptyStreamFlags);
+      free(emptyFileFlags);
+    }
+    /* k7zIdName: size includes the external byte, matching the fixture. */
+    if (!wr && wb_byte(&f, 0x11)) wr = 1;
+    if (!wr && wb_gilp(&f, (UInt64)(1 + totalNameLen))) wr = 1;
+    if (!wr && wb_byte(&f, 0)) wr = 1;   /* external = 0 */
     for (i = 0; !wr && i < nFiles; i++) {
       const char* nm = files[i].name;
       size_t l = strlen(nm);
@@ -491,109 +594,66 @@ static int z7enc_build_header(const Z7EncInput* in, const Z7EncOptions* o,
         if (wb_byte(&f, ch) || wb_byte(&f, 0)) wr = 1;
       }
     }
+    if (!wr && wb_byte(&f, 0x00)) wr = 1;  /* k7zIdEnd */
     if (wr) { free(f.d); return -1; }
     wr = wb_splice(h, &f);
     if (wr) return -1;
   }
 
-  /* StreamsInfo */
-  if (!wr) {
-    WB f = {0};
-    UInt32 i;
-    if (wb_byte(&f, (Byte)numCoders) || wb_byte(&f, 0x00)) wr = 1;
-    if (!wr) {
-      if (wb_byte(&f, 0x04) ||
-          wb_byte(&f, 1) ||
-          wb_gilp(&f, totalUnpack) ||
-          wb_byte(&f, 0x00))
-        wr = 1;
-    }
-    /* Coder property (0x06): coder[0] is the pack-stream consumer.
-     * When encrypted, the chain is [AES, main]: AES (coder[0]) decrypts
-     * the pack stream into memory, main (coder[1]) runs over the
-     * plaintext. Bond {InIndex=1, OutIndex=0} connects main's input to
-     * AES's output. */
-    if (!wr) {
-      if (wb_byte(&f, 0x06)) wr = 1;
-      if (wb_byte(&f, (Byte)numCoders) || wb_byte(&f, 0x00)) wr = 1;
-      if (haveAes) {
-        if (wb_coder_item(&f, z7_aes_method_id(), 1, aesProps, aesPropsSize)) wr = 1;
-        if (useCopy) {
-          if (!wr && wb_coder_item(&f, 0, 1, NULL, 0)) wr = 1;
-        } else if (usePPMd) {
-          if (!wr && wb_coder_item(&f, Z7ENC_PPMD_METHOD_ID, 1, ppmdMainProps, Z7ENC_PPMD_PROPS_SIZE)) wr = 1;
-        } else {
-          if (!wr && wb_coder_item(&f, 0x21, 1, mainProps, 2)) wr = 1;
-        }
-        if (!wr && (wb_byte(&f, 1) || wb_byte(&f, 1) || wb_byte(&f, 0))) wr = 1;
-      } else if (useCopy) {
-        if (!wr && wb_coder_item(&f, 0, 0, NULL, 0)) wr = 1;
-      } else if (usePPMd) {
-        if (!wr && wb_coder_item(&f, Z7ENC_PPMD_METHOD_ID, 0, ppmdMainProps, Z7ENC_PPMD_PROPS_SIZE)) wr = 1;
-      } else {
-        if (!wr && wb_coder_item(&f, 0x21, 0, mainProps, 2)) wr = 1;
-      }
-      /* pack size GILP: the TOTAL packed stream size (all volumes). */
-      if (!wr && wb_gilp(&f, packTotal)) wr = 1;
-      if (!wr && wb_byte(&f, 0x00)) wr = 1;
-    }
-    /* CRC (unencrypted only): folder CRC over the whole plaintext */
-    if (!wr && !haveAes) {
-      Byte* all = totalUnpack ? (Byte*)malloc((size_t)totalUnpack) : (Byte*)malloc(1);
-      if (!all) {
-        wr = 1;
-      } else {
-        size_t off = 0;
-        for (i = 0; !wr && i < nFiles; i++) {
-          if (files[i].isDir || files[i].size == 0) continue;
-          Byte* data = z7enc_entry_data(in, i);
-          if (!data) { wr = 1; break; }
-          memcpy(all + off, data, files[i].size);
-          off += files[i].size;
-          free(data);
-        }
-        if (!wr) {
-          if (wb_byte(&f, 0x02) || wb_byte(&f, 1)) wr = 1;
-          if (!wr && wb_le32(&f, CrcCalc(all, (size_t)totalUnpack))) wr = 1;
-          if (!wr && wb_byte(&f, 0x00)) wr = 1;
-        }
-        free(all);
-      }
-    }
-    if (!wr && wb_byte(&f, 0x00)) wr = 1;
-    if (wr) { free(f.d); return -1; }
-    wr = wb_splice(h, &f);
-    if (wr) return -1;
-  }
-
-  /* End marker */
+  /* k7zIdEnd of Header */
   if (!wr && wb_byte(h, 0x00)) wr = 1;
   if (wr) { free(h->d); return -1; }
   if (out_all) *out_all = NULL;
   return 0;
 }
 
-/* Write the 32-byte start header to `f` (a CFileOutStream). `nextHeadPos`
- * is the offset of the NextHeader block; `nextHeadCRC` is the CRC of the
- * NextHeader block. For single-volume archives nextHeadPos = 32 + packLen.
- * For split archives, every volume's start header points to volume 1's
- * NextHeader (the decoder reads volume 1 to find the full header). */
+/* Write the 32-byte start header to `f` (a CFileOutStream).
+ *
+ * 7z StartHeader layout (32 bytes):
+ *   0..5    signature '7z\xBC\xAF\x27\x1C'
+ *   6       major version (0)
+ *   7       minor version (4)
+ *   8..11   StartHeaderCRC  = CRC32(bytes 12..31)
+ *   12..19  NextHeaderOffset (UInt64, relative to end of this 32-byte header)
+ *   20..27  NextHeaderSize   (UInt64)
+ *   28..31  NextHeaderCRC    (UInt32)
+ *
+ * `nextHeadPos` is the offset of the NextHeader block relative to the end of
+ * the start header; `nextHeadSize` is its byte length; `nextHeadCRC` is the
+ * CRC32 of the NextHeader block. For single-volume archives nextHeadPos =
+ * 32 + packLen. For split archives, every volume's start header points to
+ * volume 1's NextHeader (the decoder reads volume 1 to find the full header).
+ *
+ * The StartHeaderCRC at bytes 8..11 is computed over bytes 12..31 *after*
+ * those fields are filled, so the decoder's own check
+ * (CrcCalc(header + 12, 20) == GetUi32(header + 8)) passes. */
 static int z7enc_write_start_header(CFileOutStream* fos, UInt32 nextHeadCRC,
-                                    UInt64 nextHeadPos) {
+                                    UInt64 nextHeadPos, UInt64 nextHeadSize) {
   Byte sh[32];
   const Byte sig[6] = { '7', 'z', 0xBC, 0xAF, 0x27, 0x1C };
   size_t k;
+  UInt32 startHeadCRC;
   memcpy(sh, sig, 6);
   sh[6] = 0; /* major */
   sh[7] = 4; /* minor */
-  sh[8]  = (Byte)(nextHeadCRC & 0xFF);
-  sh[9]  = (Byte)((nextHeadCRC >> 8) & 0xFF);
-  sh[10] = (Byte)((nextHeadCRC >> 16) & 0xFF);
-  sh[11] = (Byte)((nextHeadCRC >> 24) & 0xFF);
-  for (k = 0; k < 8; k++) sh[12 + k] = (Byte)((nextHeadPos >> (8 * k)) & 0xFF);
-  for (k = 20; k < 32; k++) sh[k] = 0; /* StartHeadSize = 0 */
-  size_t wrote = ISeqOutStream_Write(&fos->vt, sh, sizeof(sh));
-  return wrote == sizeof(sh) ? 0 : -1;
+  /* bytes 8..11 = StartHeaderCRC, filled last */
+  for (k = 0; k < 8; k++)
+    sh[12 + k] = (Byte)((nextHeadPos >> (8 * k)) & 0xFF);   /* NextHeaderOffset */
+  for (k = 0; k < 8; k++)
+    sh[20 + k] = (Byte)((nextHeadSize >> (8 * k)) & 0xFF);  /* NextHeaderSize  */
+  sh[28] = (Byte)(nextHeadCRC & 0xFF);                     /* NextHeaderCRC   */
+  sh[29] = (Byte)((nextHeadCRC >> 8) & 0xFF);
+  sh[30] = (Byte)((nextHeadCRC >> 16) & 0xFF);
+  sh[31] = (Byte)((nextHeadCRC >> 24) & 0xFF);
+  startHeadCRC = CrcCalc(sh + 12, 20);
+  sh[8]  = (Byte)(startHeadCRC & 0xFF);
+  sh[9]  = (Byte)((startHeadCRC >> 8) & 0xFF);
+  sh[10] = (Byte)((startHeadCRC >> 16) & 0xFF);
+  sh[11] = (Byte)((startHeadCRC >> 24) & 0xFF);
+  {
+    size_t wrote = ISeqOutStream_Write(&fos->vt, sh, sizeof(sh));
+    return wrote == sizeof(sh) ? 0 : -1;
+  }
 }
 
 /* Write a volume file: start header + a slice of the pack stream.
@@ -603,11 +663,13 @@ static int z7enc_write_start_header(CFileOutStream* fos, UInt32 nextHeadCRC,
  * (volumes 2..N). */
 static int z7enc_write_volume(const char* volPath, CSzFile* file, CFileOutStream* fos,
                               UInt32 nextHeadCRC, UInt64 nextHeadPos,
+                              UInt64 nextHeadSize,
                               int writeHead,
                               const Byte* pack, size_t packStart, size_t packLen,
                               Z7EncResult* out) {
+  (void)volPath;
   if (writeHead) {
-    if (z7enc_write_start_header(fos, nextHeadCRC, nextHeadPos) != 0) {
+    if (z7enc_write_start_header(fos, nextHeadCRC, nextHeadPos, nextHeadSize) != 0) {
       File_Close(file);
       out->error = "short write (volume start header)";
       return -1;
@@ -709,8 +771,10 @@ static int z7enc_compress_single(const Z7EncInput* in, const Z7EncOptions* o,
   /* ---- optional AES wrap over the packed stream ---- */
   Byte aesProps[64];
   size_t aesPropsSize = 0;
+  size_t aesUnpackSize = 0;  /* packed data size before AES padding */
   if (haveAes) {
     size_t pad = z7_aes_pad_to_block(pack.n);
+    aesUnpackSize = pack.n;  /* save pre-pad size for CoderUnpackSizes */
     if (pad != pack.n) {
       Byte* nd = (Byte*)realloc(pack.d, pad ? pad : 16);
       if (!nd) { free(pack.d); free(src); out->error = "out of memory (aes pad)"; return -1; }
@@ -730,7 +794,7 @@ static int z7enc_compress_single(const Z7EncInput* in, const Z7EncOptions* o,
   if (z7enc_build_header(in, o, dict, nFiles, totalUnpack,
                          haveAes, useCopy, usePPMd, NULL,
                          aesProps, aesPropsSize,
-                         pack.n, &h, &all) != 0) {
+                         pack.n, aesUnpackSize, &h, &all) != 0) {
     free(pack.d);
     out->error = "out of memory (header)";
     return -1;
@@ -746,8 +810,10 @@ static int z7enc_compress_single(const Z7EncInput* in, const Z7EncOptions* o,
     fos.file = file;
 
     UInt32 nhc = CrcCalc(h.d, h.n);
-    UInt64 nextPos = 32 + (UInt64)pack.n;
-    if (z7enc_write_start_header(&fos, nhc, nextPos) != 0) {
+    /* NextHeaderOffset is relative to the end of the 32-byte start header,
+     * i.e. it equals the pack-stream length (pack.n), not 32 + pack.n. */
+    UInt64 nextPos = (UInt64)pack.n;
+    if (z7enc_write_start_header(&fos, nhc, nextPos, (UInt64)h.n) != 0) {
       File_Close(&file); free(h.d); free(pack.d);
       out->error = "short write (start header)";
       return -1;
@@ -865,8 +931,10 @@ static int z7enc_compress_split(const Z7EncInput* in, const Z7EncOptions* o,
 
   Byte aesProps[64];
   size_t aesPropsSize = 0;
+  size_t aesUnpackSize = 0;  /* packed data size before AES padding */
   if (haveAes) {
     size_t pad = z7_aes_pad_to_block(pack.n);
+    aesUnpackSize = pack.n;  /* save pre-pad size for CoderUnpackSizes */
     if (pad != pack.n) {
       Byte* nd = (Byte*)realloc(pack.d, pad ? pad : 16);
       if (!nd) { free(pack.d); free(src); out->error = "out of memory (aes pad)"; return -1; }
@@ -885,16 +953,16 @@ static int z7enc_compress_split(const Z7EncInput* in, const Z7EncOptions* o,
   if (z7enc_build_header(in, o, dict, nFiles, totalUnpack,
                          haveAes, useCopy, usePPMd, NULL,
                          aesProps, aesPropsSize,
-                         pack.n, &h, &all) != 0) {
+                         pack.n, aesUnpackSize, &h, &all) != 0) {
     free(pack.d);
     out->error = "out of memory (header)";
     return -1;
   }
 
   UInt32 nhc = CrcCalc(h.d, h.n);
-  /* Volume 1's NextHeader offset = 32 + volSize (start header + first slice).
-   * All volumes' start headers point to this offset. */
-  UInt64 vol1NextPos = 32 + volSize;
+  /* Volume 1's NextHeader offset is relative to the end of the 32-byte start
+   * header, i.e. it equals the first slice's length (volSize). */
+  UInt64 vol1NextPos = volSize;
 
   int nVols = (int)((pack.n + volSize - 1) / volSize);
   if (nVols < 1) nVols = 1;
@@ -923,7 +991,7 @@ static int z7enc_compress_split(const Z7EncInput* in, const Z7EncOptions* o,
 
     if (v == 0) {
       /* Volume 1: start header + first slice + NextHeader */
-      if (z7enc_write_start_header(&fos, nhc, vol1NextPos) != 0) {
+      if (z7enc_write_start_header(&fos, nhc, vol1NextPos, (UInt64)h.n) != 0) {
         File_Close(&file); free(h.d); free(pack.d);
         out->error = "short write (vol1 start)";
         return -1;
