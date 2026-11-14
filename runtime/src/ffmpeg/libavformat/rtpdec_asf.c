@@ -56,6 +56,8 @@ static int rtp_asf_fix_header(uint8_t *buf, int len)
         uint64_t chunksize = AV_RL64(p + sizeof(ff_asf_guid));
         int skip = 6 * 8 + 3 * 4 + sizeof(ff_asf_guid) * 2;
         if (memcmp(p, ff_asf_file_header, sizeof(ff_asf_guid))) {
+            if (chunksize < sizeof(ff_asf_guid) + 8)
+                return -1;
             if (chunksize > end - p)
                 return -1;
             p += chunksize;
@@ -120,8 +122,10 @@ int ff_wms_parse_sdp_a_line(AVFormatContext *s, const char *p)
             avformat_close_input(&rt->asf_ctx);
         }
 
-        if (!(iformat = av_find_input_format("asf")))
+        if (!(iformat = av_find_input_format("asf"))) {
+            av_free(buf);
             return AVERROR_DEMUXER_NOT_FOUND;
+        }
 
         rt->asf_ctx = avformat_alloc_context();
         if (!rt->asf_ctx) {

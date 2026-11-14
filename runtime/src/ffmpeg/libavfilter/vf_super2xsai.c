@@ -271,6 +271,7 @@ static int config_input(AVFilterLink *inlink)
     case AV_PIX_FMT_RGB565BE:
     case AV_PIX_FMT_BGR565BE:
         s->is_be = 1;
+        av_fallthrough;
     case AV_PIX_FMT_RGB565LE:
     case AV_PIX_FMT_BGR565LE:
         s->hi_pixel_mask   = 0xF7DEF7DE;
@@ -283,6 +284,7 @@ static int config_input(AVFilterLink *inlink)
     case AV_PIX_FMT_BGR555BE:
     case AV_PIX_FMT_RGB555BE:
         s->is_be = 1;
+        av_fallthrough;
     case AV_PIX_FMT_BGR555LE:
     case AV_PIX_FMT_RGB555LE:
         s->hi_pixel_mask   = 0x7BDE7BDE;
@@ -349,12 +351,12 @@ static const AVFilterPad super2xsai_outputs[] = {
     },
 };
 
-const AVFilter ff_vf_super2xsai = {
-    .name          = "super2xsai",
-    .description   = NULL_IF_CONFIG_SMALL("Scale the input by 2x using the Super2xSaI pixel art algorithm."),
+const FFFilter ff_vf_super2xsai = {
+    .p.name        = "super2xsai",
+    .p.description = NULL_IF_CONFIG_SMALL("Scale the input by 2x using the Super2xSaI pixel art algorithm."),
+    .p.flags       = AVFILTER_FLAG_SLICE_THREADS,
     .priv_size     = sizeof(Super2xSaIContext),
     FILTER_INPUTS(super2xsai_inputs),
     FILTER_OUTPUTS(super2xsai_outputs),
     FILTER_PIXFMTS_ARRAY(pix_fmts),
-    .flags         = AVFILTER_FLAG_SLICE_THREADS,
 };

@@ -24,6 +24,7 @@
  * DXA Video decoder
  */
 
+#include "libavutil/attributes.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "bytestream.h"
@@ -82,6 +83,7 @@ static int decode_13(AVCodecContext *avctx, DxaDecContext *c, uint8_t* dst,
                     return AVERROR_INVALIDDATA;
                 }
                 tmp2 += x + y*stride;
+                av_fallthrough;
             case 0: // skip
             case 5: // skip in method 12
                 for(y = 0; y < 4; y++){
@@ -144,6 +146,7 @@ static int decode_13(AVCodecContext *avctx, DxaDecContext *c, uint8_t* dst,
                             return AVERROR_INVALIDDATA;
                         }
                         tmp2 += x + y*stride;
+                        av_fallthrough;
                     case 0x00: // skip
                         tmp[d + 0         ] = tmp2[0];
                         tmp[d + 1         ] = tmp2[1];
@@ -213,7 +216,6 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
     unsigned long dsize;
     int i, j, compr, ret;
     int stride;
-    int pc = 0;
     GetByteContext gb;
 
     bytestream2_init(&gb, avpkt->data, avpkt->size);
@@ -224,17 +226,11 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
         for(i = 0; i < 256; i++){
             c->pal[i] = 0xFFU << 24 | bytestream2_get_be24(&gb);
         }
-        pc = 1;
     }
 
     if ((ret = ff_get_buffer(avctx, frame, AV_GET_BUFFER_FLAG_REF)) < 0)
         return ret;
     memcpy(frame->data[1], c->pal, AVPALETTE_SIZE);
-#if FF_API_PALETTE_HAS_CHANGED
-FF_DISABLE_DEPRECATION_WARNINGS
-    frame->palette_has_changed = pc;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
 
     outptr = frame->data[0];
     srcptr = c->decomp_buf;

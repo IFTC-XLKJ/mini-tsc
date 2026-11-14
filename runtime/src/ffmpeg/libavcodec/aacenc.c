@@ -123,40 +123,40 @@ static const AACPCEInfo aac_pce_configs[] = {
     {
         .layout = AV_CHANNEL_LAYOUT_SURROUND,
         .num_ele = { 2, 0, 0, 0 },
-        .pairing = { { 1, 0 }, },
+        .pairing = { { 0, 1 }, },
         .index = { { 0, 0 }, },
-        .config_map = { 2, TYPE_CPE, TYPE_SCE, },
-        .reorder_map = { 0, 1, 2 },
+        .config_map = { 2, TYPE_SCE, TYPE_CPE },
+        .reorder_map = { 2, 0, 1 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_3POINT1,
         .num_ele = { 2, 0, 0, 1 },
-        .pairing = { { 1, 0 }, },
+        .pairing = { { 0, 1 }, },
         .index = { { 0, 0 }, { 0 }, { 0 }, { 0 }, },
-        .config_map = { 3, TYPE_CPE, TYPE_SCE, TYPE_LFE },
-        .reorder_map = { 0, 1, 2, 3 },
+        .config_map = { 3, TYPE_SCE, TYPE_CPE, TYPE_LFE },
+        .reorder_map = { 2, 0, 1, 3 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_4POINT0,
         .num_ele = { 2, 0, 1, 0 },
-        .pairing = { { 1, 0 }, { 0 }, { 0 }, },
+        .pairing = { { 0, 1 }, { 0 }, { 0 }, },
         .index = { { 0, 0 }, { 0 }, { 1 } },
-        .config_map = { 3, TYPE_CPE, TYPE_SCE, TYPE_SCE },
-        .reorder_map = {  0, 1, 2, 3 },
+        .config_map = { 3, TYPE_SCE, TYPE_CPE, TYPE_SCE },
+        .reorder_map = { 2, 0, 1, 3 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_4POINT1,
-        .num_ele = { 2, 1, 1, 0 },
-        .pairing = { { 1, 0 }, { 0 }, { 0 }, },
-        .index = { { 0, 0 }, { 1 }, { 2 }, { 0 } },
-        .config_map = { 4, TYPE_CPE, TYPE_SCE, TYPE_SCE, TYPE_SCE },
-        .reorder_map = { 0, 1, 2, 3, 4 },
+        .num_ele = { 2, 0, 1, 1 },
+        .pairing = { { 0, 1 }, { 0 }, { 0 }, },
+        .index = { { 0, 0 }, { 0 }, { 1 }, { 0 } },
+        .config_map = { 4, TYPE_SCE, TYPE_CPE, TYPE_SCE, TYPE_LFE },
+        .reorder_map = { 2, 0, 1, 4, 3 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_2_2,
-        .num_ele = { 1, 1, 0, 0 },
-        .pairing = { { 1 }, { 1 }, },
-        .index = { { 0 }, { 1 }, },
+        .num_ele = { 1, 0, 1, 0 },
+        .pairing = { { 1 }, { 0 }, { 1 }, },
+        .index = { { 0 }, { 0 }, { 1 } },
         .config_map = { 2, TYPE_CPE, TYPE_CPE },
         .reorder_map = { 0, 1, 2, 3 },
     },
@@ -170,158 +170,131 @@ static const AACPCEInfo aac_pce_configs[] = {
     },
     {
         .layout = AV_CHANNEL_LAYOUT_5POINT0,
-        .num_ele = { 2, 1, 0, 0 },
-        .pairing = { { 1, 0 }, { 1 }, },
-        .index = { { 0, 0 }, { 1 } },
-        .config_map = { 3, TYPE_CPE, TYPE_SCE, TYPE_CPE },
-        .reorder_map = { 0, 1, 2, 3, 4 },
+        .num_ele = { 2, 0, 1, 0 },
+        .pairing = { { 0, 1 }, { 0 }, { 1 } },
+        .index = { { 0, 0 }, { 0 }, { 1 } },
+        .config_map = { 3, TYPE_SCE, TYPE_CPE, TYPE_CPE },
+        .reorder_map = { 2, 0, 1, 3, 4 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_5POINT1,
-        .num_ele = { 2, 1, 1, 0 },
-        .pairing = { { 1, 0 }, { 0 }, { 1 }, },
-        .index = { { 0, 0 }, { 1 }, { 1 } },
-        .config_map = { 4, TYPE_CPE, TYPE_SCE, TYPE_SCE, TYPE_CPE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5 },
+        .num_ele = { 2, 0, 1, 1 },
+        .pairing = { { 0, 1 }, { 0 }, { 1 }, },
+        .index = { { 0, 0 }, { 0 }, { 1 }, { 0 } },
+        .config_map = { 4, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_LFE },
+        .reorder_map = { 2, 0, 1, 4, 5, 3 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_5POINT0_BACK,
         .num_ele = { 2, 0, 1, 0 },
-        .pairing = { { 1, 0 }, { 0 }, { 1 } },
+        .pairing = { { 0, 1 }, { 0 }, { 1 } },
         .index = { { 0, 0 }, { 0 }, { 1 } },
-        .config_map = { 3, TYPE_CPE, TYPE_SCE, TYPE_CPE },
-        .reorder_map = { 0, 1, 2, 3, 4 },
+        .config_map = { 3, TYPE_SCE, TYPE_CPE, TYPE_CPE },
+        .reorder_map = { 2, 0, 1, 3, 4 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_5POINT1_BACK,
-        .num_ele = { 2, 1, 1, 0 },
-        .pairing = { { 1, 0 }, { 0 }, { 1 }, },
-        .index = { { 0, 0 }, { 1 }, { 1 } },
-        .config_map = { 4, TYPE_CPE, TYPE_SCE, TYPE_SCE, TYPE_CPE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5 },
+        .num_ele = { 2, 0, 1, 1 },
+        .pairing = { { 0, 1 }, { 0 }, { 1 }, },
+        .index = { { 0, 0 }, { 0 }, { 1 }, { 0 } },
+        .config_map = { 4, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_LFE },
+        .reorder_map = { 2, 0, 1, 4, 5, 3 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_6POINT0,
-        .num_ele = { 2, 1, 1, 0 },
-        .pairing = { { 1, 0 }, { 1 }, { 0 }, },
-        .index = { { 0, 0 }, { 1 }, { 1 } },
-        .config_map = { 4, TYPE_CPE, TYPE_SCE, TYPE_CPE, TYPE_SCE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5 },
+        .num_ele = { 2, 0, 2, 0 },
+        .pairing = { { 0, 1 }, { 0 }, { 1, 0 } },
+        .index = { { 0, 0 }, { 0 }, { 1, 1 } },
+        .config_map = { 4, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_SCE },
+        .reorder_map = { 2, 0, 1, 4, 5, 3 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_6POINT0_FRONT,
-        .num_ele = { 2, 1, 0, 0 },
-        .pairing = { { 1, 1 }, { 1 } },
-        .index = { { 1, 0 }, { 2 }, },
+        .num_ele = { 2, 0, 1, 0 },
+        .pairing = { { 1, 1 }, { 0 }, { 1 } },
+        .index = { { 0, 1 }, { 0 }, { 2 }, },
         .config_map = { 3, TYPE_CPE, TYPE_CPE, TYPE_CPE, },
-        .reorder_map = { 0, 1, 2, 3, 4, 5 },
+        .reorder_map = { 2, 3, 0, 1, 4, 5 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_HEXAGONAL,
         .num_ele = { 2, 0, 2, 0 },
-        .pairing = { { 1, 0 },{ 0 },{ 1, 0 }, },
-        .index = { { 0, 0 },{ 0 },{ 1, 1 } },
-        .config_map = { 4, TYPE_CPE, TYPE_SCE, TYPE_CPE, TYPE_SCE, },
-        .reorder_map = { 0, 1, 2, 3, 4, 5 },
+        .pairing = { { 0, 1 }, { 0 }, { 1, 0 } },
+        .index = { { 0, 0 }, { 0 }, { 1, 1 } },
+        .config_map = { 4, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_SCE },
+        .reorder_map = { 2, 0, 1, 3, 4, 5 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_6POINT1,
-        .num_ele = { 2, 1, 2, 0 },
-        .pairing = { { 1, 0 },{ 0 },{ 1, 0 }, },
-        .index = { { 0, 0 },{ 1 },{ 1, 2 } },
-        .config_map = { 5, TYPE_CPE, TYPE_SCE, TYPE_SCE, TYPE_CPE, TYPE_SCE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5, 6 },
+        .num_ele = { 2, 0, 2, 1 },
+        .pairing = { { 0, 1 }, { 0 }, { 1, 0 }, },
+        .index = { { 0, 0 }, { 0 }, { 1, 1 }, { 0 } },
+        .config_map = { 5, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_SCE, TYPE_LFE },
+        .reorder_map = { 2, 0, 1, 5, 6, 4, 3 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_6POINT1_BACK,
-        .num_ele = { 2, 1, 2, 0 },
-        .pairing = { { 1, 0 }, { 0 }, { 1, 0 }, },
-        .index = { { 0, 0 }, { 1 }, { 1, 2 } },
-        .config_map = { 5, TYPE_CPE, TYPE_SCE, TYPE_SCE, TYPE_CPE, TYPE_SCE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5, 6 },
+        .num_ele = { 2, 0, 2, 1 },
+        .pairing = { { 0, 1 },{ 0 },{ 1, 0 }, },
+        .index = { { 0, 0 },{ 0 },{ 1, 1 },{ 0 } },
+        .config_map = { 5, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_SCE, TYPE_LFE },
+        .reorder_map = { 2, 0, 1, 4, 5, 6, 3 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_6POINT1_FRONT,
-        .num_ele = { 2, 1, 2, 0 },
-        .pairing = { { 1, 0 }, { 0 }, { 1, 0 }, },
-        .index = { { 0, 0 }, { 1 }, { 1, 2 } },
-        .config_map = { 5, TYPE_CPE, TYPE_SCE, TYPE_SCE, TYPE_CPE, TYPE_SCE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5, 6 },
+        .num_ele = { 2, 0, 1, 1 },
+        .pairing = { { 1, 1 }, { 0 }, { 1 }, },
+        .index = { { 0, 1 }, { 0 }, { 2 }, { 0 }, },
+        .config_map = { 4, TYPE_CPE, TYPE_CPE, TYPE_CPE, TYPE_LFE, },
+        .reorder_map = { 3, 4, 0, 1, 5, 6, 2 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_7POINT0,
-        .num_ele = { 2, 1, 1, 0 },
-        .pairing = { { 1, 0 }, { 1 }, { 1 }, },
-        .index = { { 0, 0 }, { 1 }, { 2 }, },
-        .config_map = { 4, TYPE_CPE, TYPE_SCE, TYPE_CPE, TYPE_CPE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5, 6 },
+        .num_ele = { 2, 0, 2, 0 },
+        .pairing = { { 0, 1 }, { 0 }, { 1, 1 }, },
+        .index = { { 0, 0 }, { 0 }, { 2, 1 }, },
+        .config_map = { 4, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_CPE },
+        .reorder_map = { 2, 0, 1, 3, 4, 5, 6 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_7POINT0_FRONT,
-        .num_ele = { 2, 1, 1, 0 },
-        .pairing = { { 1, 0 }, { 1 }, { 1 }, },
-        .index = { { 0, 0 }, { 1 }, { 2 }, },
-        .config_map = { 4, TYPE_CPE, TYPE_SCE, TYPE_CPE, TYPE_CPE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5, 6 },
+        .num_ele = { 3, 0, 1, 0 },
+        .pairing = { { 0, 1, 1 }, { 0 }, { 1 }, },
+        .index = { { 0, 0, 1 }, { 0 }, { 2 }, },
+        .config_map = { 4, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_CPE },
+        .reorder_map = { 2, 3, 4, 0, 1, 5, 6 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_7POINT1,
-        .num_ele = { 2, 1, 2, 0 },
-        .pairing = { { 1, 0 }, { 0 }, { 1, 1 }, },
-        .index = { { 0, 0 }, { 1 }, { 1, 2 }, { 0 } },
-        .config_map = { 5, TYPE_CPE, TYPE_SCE,  TYPE_SCE, TYPE_CPE, TYPE_CPE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5, 6, 7 },
+        .num_ele = { 2, 0, 2, 1 },
+        .pairing = { { 0, 1 }, { 0 }, { 1, 1 }, },
+        .index = { { 0, 0 }, { 0 }, { 2, 1 }, { 0 } },
+        .config_map = { 5, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_CPE, TYPE_LFE },
+        .reorder_map = { 2, 0, 1, 4, 5, 6, 7, 3 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_7POINT1_WIDE,
-        .num_ele = { 2, 1, 2, 0 },
-        .pairing = { { 1, 0 }, { 0 },{  1, 1 }, },
-        .index = { { 0, 0 }, { 1 }, { 1, 2 }, { 0 } },
-        .config_map = { 5, TYPE_CPE, TYPE_SCE, TYPE_SCE, TYPE_CPE, TYPE_CPE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5, 6, 7 },
+        .num_ele = { 3, 0, 1, 1 },
+        .pairing = { { 0, 1, 1 }, { 0 }, { 1 }, },
+        .index = { { 0, 0, 1 }, { 0 }, { 2 }, { 0 }, },
+        .config_map = { 5, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_CPE, TYPE_LFE },
+        .reorder_map = { 2, 4, 5, 0, 1, 6, 7, 3 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_7POINT1_WIDE_BACK,
-        .num_ele = { 2, 1, 2, 0 },
-        .pairing = { { 1, 0 }, { 0 }, { 1, 1 }, },
-        .index = { { 0, 0 }, { 1 }, { 1, 2 }, { 0 } },
-        .config_map = { 5, TYPE_CPE, TYPE_SCE, TYPE_SCE, TYPE_CPE, TYPE_CPE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5, 6, 7 },
+        .num_ele = { 3, 0, 1, 1 },
+        .pairing = { { 0, 1, 1 }, { 0 }, { 1 } },
+        .index = { { 0, 0, 1 }, { 0 }, { 2 }, { 0 } },
+        .config_map = { 5, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_CPE, TYPE_LFE },
+        .reorder_map = { 2, 6, 7, 0, 1, 4, 5, 3 },
     },
     {
         .layout = AV_CHANNEL_LAYOUT_OCTAGONAL,
-        .num_ele = { 2, 1, 2, 0 },
-        .pairing = { { 1, 0 }, { 1 }, { 1, 0 }, },
-        .index = { { 0, 0 }, { 1 }, { 2, 1 } },
-        .config_map = { 5, TYPE_CPE, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_SCE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5, 6, 7 },
-    },
-    {   /* Meant for order 2/mixed ambisonics */
-        .layout = { .order = AV_CHANNEL_ORDER_NATIVE, .nb_channels = 9,
-                    .u.mask = AV_CH_LAYOUT_OCTAGONAL | AV_CH_TOP_CENTER },
-        .num_ele = { 2, 2, 2, 0 },
-        .pairing = { { 1, 0 }, { 1, 0 }, { 1, 0 }, },
-        .index = { { 0, 0 }, { 1, 1 }, { 2, 2 } },
-        .config_map = { 6, TYPE_CPE, TYPE_SCE, TYPE_CPE, TYPE_SCE, TYPE_CPE, TYPE_SCE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5, 6, 7, 8 },
-    },
-    {   /* Meant for order 2/mixed ambisonics */
-        .layout = { .order = AV_CHANNEL_ORDER_NATIVE, .nb_channels = 10,
-                    .u.mask = AV_CH_LAYOUT_6POINT0_FRONT | AV_CH_BACK_CENTER |
-                              AV_CH_BACK_LEFT | AV_CH_BACK_RIGHT | AV_CH_TOP_CENTER },
-        .num_ele = { 2, 2, 2, 0 },
-        .pairing = { { 1, 1 }, { 1, 0 }, { 1, 0 }, },
-        .index = { { 0, 1 }, { 2, 0 }, { 3, 1 } },
-        .config_map = { 6, TYPE_CPE, TYPE_CPE, TYPE_CPE, TYPE_SCE, TYPE_CPE, TYPE_SCE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 },
-    },
-    {
-        .layout = AV_CHANNEL_LAYOUT_HEXADECAGONAL,
-        .num_ele = { 4, 2, 4, 0 },
-        .pairing = { { 1, 0, 1, 0 }, { 1, 1 }, { 1, 0, 1, 0 }, },
-        .index = { { 0, 0, 1, 1 }, { 2, 3 }, { 4, 2, 5, 3 } },
-        .config_map = { 10, TYPE_CPE, TYPE_SCE, TYPE_CPE, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_CPE, TYPE_SCE, TYPE_CPE, TYPE_SCE },
-        .reorder_map = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 },
+        .num_ele = { 2, 0, 3, 0 },
+        .pairing = { { 0, 1 }, { 0 }, { 1, 1, 0 }, },
+        .index = { { 0, 0 }, { 0 }, { 1, 2, 1 }, },
+        .config_map = { 5, TYPE_SCE, TYPE_CPE, TYPE_CPE, TYPE_CPE, TYPE_SCE },
+        .reorder_map = { 2, 0, 1, 6, 7, 3, 4, 5 },
     },
 };
 
@@ -366,11 +339,10 @@ static void put_pce(PutBitContext *pb, AVCodecContext *avctx)
  * Make AAC audio config object.
  * @see 1.6.2.1 "Syntax - AudioSpecificConfig"
  */
-static int put_audio_specific_config(AVCodecContext *avctx)
+static int put_audio_specific_config(AVCodecContext *avctx, int chcfg)
 {
     PutBitContext pb;
     AACEncContext *s = avctx->priv_data;
-    int channels = (!s->needs_pce)*(s->channels - (s->channels == 8 ? 1 : 0));
     const int max_size = 32;
 
     avctx->extradata = av_mallocz(max_size);
@@ -380,7 +352,7 @@ static int put_audio_specific_config(AVCodecContext *avctx)
     init_put_bits(&pb, avctx->extradata, max_size);
     put_bits(&pb, 5, s->profile+1); //profile
     put_bits(&pb, 4, s->samplerate_index); //sample rate index
-    put_bits(&pb, 4, channels);
+    put_bits(&pb, 4, chcfg);
     //GASpecificConfig
     put_bits(&pb, 1, 0); //frame length - 1024 samples
     put_bits(&pb, 1, 0); //does not depend on core coder
@@ -502,7 +474,7 @@ static void put_ics_info(AACEncContext *s, IndividualChannelStream *info)
     put_bits(&s->pb, 1, info->use_kb_window[0]);
     if (info->window_sequence[0] != EIGHT_SHORT_SEQUENCE) {
         put_bits(&s->pb, 6, info->max_sfb);
-        put_bits(&s->pb, 1, !!info->predictor_present);
+        put_bits(&s->pb, 1, 0); /* No predictor present */
     } else {
         put_bits(&s->pb, 4, info->max_sfb);
         for (w = 1; w < 8; w++)
@@ -762,13 +734,8 @@ static int encode_individual_channel(AVCodecContext *avctx, AACEncContext *s,
                                      int common_window)
 {
     put_bits(&s->pb, 8, sce->sf_idx[0]);
-    if (!common_window) {
+    if (!common_window)
         put_ics_info(s, &sce->ics);
-        if (s->coder->encode_main_pred)
-            s->coder->encode_main_pred(s, sce);
-        if (s->coder->encode_ltp_info)
-            s->coder->encode_ltp_info(s, sce, 0);
-    }
     encode_band_info(s, sce);
     encode_scale_factors(avctx, s, sce);
     encode_pulses(s, &sce->pulse);
@@ -850,8 +817,6 @@ static int aac_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
     }
 
     copy_input_samples(s, frame);
-    if (s->psypp)
-        ff_psy_preprocess(s->psypp, s->planar_samples, s->channels);
 
     if (!avctx->frame_num)
         return 0;
@@ -935,12 +900,6 @@ static int aac_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
 
             apply_window_and_mdct(s, sce, overlap);
 
-            if (s->options.ltp && s->coder->update_ltp) {
-                s->coder->update_ltp(s, sce);
-                apply_window[sce->ics.window_sequence[0]](s->fdsp, sce, &sce->ltp_state[0]);
-                s->mdct1024_fn(s->mdct1024, sce->lcoeffs, sce->ret_buf, sizeof(float));
-            }
-
             for (k = 0; k < 1024; k++) {
                 if (!(fabs(cpe->ch[ch].coeffs[k]) < 1E16)) { // Ensure headroom for energy calculation
                     av_log(avctx, AV_LOG_ERROR, "Input contains (near) NaN/+-Inf\n");
@@ -976,10 +935,6 @@ static int aac_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
             for (ch = 0; ch < chans; ch++) {
                 sce = &cpe->ch[ch];
                 coeffs[ch] = sce->coeffs;
-                sce->ics.predictor_present = 0;
-                sce->ics.ltp.present = 0;
-                memset(sce->ics.ltp.used, 0, sizeof(sce->ics.ltp.used));
-                memset(sce->ics.prediction_used, 0, sizeof(sce->ics.prediction_used));
                 memset(&sce->tns, 0, sizeof(TemporalNoiseShaping));
                 for (w = 0; w < 128; w++)
                     if (sce->band_type[w] > RESERVED_BT)
@@ -1032,24 +987,6 @@ static int aac_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
                 if (cpe->is_mode) is_mode = 1;
                 apply_intensity_stereo(cpe);
             }
-            if (s->options.pred) { /* Prediction */
-                for (ch = 0; ch < chans; ch++) {
-                    sce = &cpe->ch[ch];
-                    s->cur_channel = start_ch + ch;
-                    if (s->options.pred && s->coder->search_for_pred)
-                        s->coder->search_for_pred(s, sce);
-                    if (cpe->ch[ch].ics.predictor_present) pred_mode = 1;
-                }
-                if (s->coder->adjust_common_pred)
-                    s->coder->adjust_common_pred(s, cpe);
-                for (ch = 0; ch < chans; ch++) {
-                    sce = &cpe->ch[ch];
-                    s->cur_channel = start_ch + ch;
-                    if (s->options.pred && s->coder->apply_main_pred)
-                        s->coder->apply_main_pred(s, sce);
-                }
-                s->cur_channel = start_ch;
-            }
             if (s->options.mid_side) { /* Mid/Side stereo */
                 if (s->options.mid_side == -1 && s->coder->search_for_ms)
                     s->coder->search_for_ms(s, cpe);
@@ -1058,26 +995,10 @@ static int aac_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
                 apply_mid_side_stereo(cpe);
             }
             adjust_frame_information(cpe, chans);
-            if (s->options.ltp) { /* LTP */
-                for (ch = 0; ch < chans; ch++) {
-                    sce = &cpe->ch[ch];
-                    s->cur_channel = start_ch + ch;
-                    if (s->coder->search_for_ltp)
-                        s->coder->search_for_ltp(s, sce, cpe->common_window);
-                    if (sce->ics.ltp.present) pred_mode = 1;
-                }
-                s->cur_channel = start_ch;
-                if (s->coder->adjust_common_ltp)
-                    s->coder->adjust_common_ltp(s, cpe);
-            }
             if (chans == 2) {
                 put_bits(&s->pb, 1, cpe->common_window);
                 if (cpe->common_window) {
                     put_ics_info(s, &cpe->ch[0].ics);
-                    if (s->coder->encode_main_pred)
-                        s->coder->encode_main_pred(s, &cpe->ch[0]);
-                    if (s->coder->encode_ltp_info)
-                        s->coder->encode_ltp_info(s, &cpe->ch[0], 1);
                     encode_ms_info(&s->pb, cpe);
                     if (cpe->ms_mode) ms_mode = 1;
                 }
@@ -1162,9 +1083,6 @@ static int aac_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
         }
     } while (1);
 
-    if (s->options.ltp && s->coder->ltp_insert_new_frame)
-        s->coder->ltp_insert_new_frame(s);
-
     put_bits(&s->pb, 3, TYPE_END);
     flush_put_bits(&s->pb);
 
@@ -1193,8 +1111,6 @@ static av_cold int aac_encode_end(AVCodecContext *avctx)
     av_tx_uninit(&s->mdct128);
     ff_psy_end(&s->psy);
     ff_lpc_end(&s->lpc);
-    if (s->psypp)
-        ff_psy_preprocess_end(s->psypp);
     av_freep(&s->buffer.samples);
     av_freep(&s->cpe);
     av_freep(&s->fdsp);
@@ -1238,6 +1154,7 @@ static av_cold int aac_encode_init(AVCodecContext *avctx)
 {
     AACEncContext *s = avctx->priv_data;
     int i, ret = 0;
+    int chcfg;
     const uint8_t *sizes[2];
     uint8_t grouping[AAC_MAX_CHANNELS];
     int lengths[2];
@@ -1252,8 +1169,8 @@ static av_cold int aac_encode_init(AVCodecContext *avctx)
     s->channels = avctx->ch_layout.nb_channels;
 
     s->needs_pce = 1;
-    for (i = 0; i < FF_ARRAY_ELEMS(aac_normal_chan_layouts); i++) {
-        if (!av_channel_layout_compare(&avctx->ch_layout, &aac_normal_chan_layouts[i])) {
+    for (chcfg = 1; chcfg < FF_ARRAY_ELEMS(aac_normal_chan_layouts); chcfg++) {
+        if (!av_channel_layout_compare(&avctx->ch_layout, &aac_normal_chan_layouts[chcfg])) {
             s->needs_pce = s->options.pce;
             break;
         }
@@ -1273,9 +1190,10 @@ static av_cold int aac_encode_init(AVCodecContext *avctx)
         s->pce = aac_pce_configs[i];
         s->reorder_map = s->pce.reorder_map;
         s->chan_map = s->pce.config_map;
+        chcfg = 0;
     } else {
-        s->reorder_map = aac_chan_maps[s->channels - 1];
-        s->chan_map = aac_chan_configs[s->channels - 1];
+        s->reorder_map = aac_chan_maps[chcfg - 1];
+        s->chan_map = aac_chan_configs[chcfg - 1];
     }
 
     if (!avctx->bit_rate) {
@@ -1287,14 +1205,13 @@ static av_cold int aac_encode_init(AVCodecContext *avctx)
     }
 
     /* Samplerate */
-    for (i = 0; i < 16; i++)
-        if (avctx->sample_rate == ff_mpeg4audio_sample_rates[i])
+    for (int i = 0;; i++) {
+        av_assert1(i < 13);
+        if (avctx->sample_rate == ff_mpeg4audio_sample_rates[i]) {
+            s->samplerate_index = i;
             break;
-    s->samplerate_index = i;
-    ERROR_IF(s->samplerate_index == 16 ||
-             s->samplerate_index >= ff_aac_swb_size_1024_len ||
-             s->samplerate_index >= ff_aac_swb_size_128_len,
-             "Unsupported sample rate %d\n", avctx->sample_rate);
+        }
+    }
 
     /* Bitrate limiting */
     WARN_IF(1024.0 * avctx->bit_rate / avctx->sample_rate > 6144 * s->channels,
@@ -1310,48 +1227,17 @@ static av_cold int aac_encode_init(AVCodecContext *avctx)
     for (i = 0; i < FF_ARRAY_ELEMS(aacenc_profiles); i++)
         if (avctx->profile == aacenc_profiles[i])
             break;
+    ERROR_IF(i == FF_ARRAY_ELEMS(aacenc_profiles), "Profile not supported!\n");
     if (avctx->profile == AV_PROFILE_MPEG2_AAC_LOW) {
         avctx->profile = AV_PROFILE_AAC_LOW;
-        ERROR_IF(s->options.pred,
-                 "Main prediction unavailable in the \"mpeg2_aac_low\" profile\n");
-        ERROR_IF(s->options.ltp,
-                 "LTP prediction unavailable in the \"mpeg2_aac_low\" profile\n");
         WARN_IF(s->options.pns,
                 "PNS unavailable in the \"mpeg2_aac_low\" profile, turning off\n");
         s->options.pns = 0;
-    } else if (avctx->profile == AV_PROFILE_AAC_LTP) {
-        s->options.ltp = 1;
-        ERROR_IF(s->options.pred,
-                 "Main prediction unavailable in the \"aac_ltp\" profile\n");
-    } else if (avctx->profile == AV_PROFILE_AAC_MAIN) {
-        s->options.pred = 1;
-        ERROR_IF(s->options.ltp,
-                 "LTP prediction unavailable in the \"aac_main\" profile\n");
-    } else if (s->options.ltp) {
-        avctx->profile = AV_PROFILE_AAC_LTP;
-        WARN_IF(1,
-                "Chainging profile to \"aac_ltp\"\n");
-        ERROR_IF(s->options.pred,
-                 "Main prediction unavailable in the \"aac_ltp\" profile\n");
-    } else if (s->options.pred) {
-        avctx->profile = AV_PROFILE_AAC_MAIN;
-        WARN_IF(1,
-                "Chainging profile to \"aac_main\"\n");
-        ERROR_IF(s->options.ltp,
-                 "LTP prediction unavailable in the \"aac_main\" profile\n");
     }
     s->profile = avctx->profile;
 
     /* Coder limitations */
     s->coder = &ff_aac_coders[s->options.coder];
-    if (s->options.coder == AAC_CODER_ANMR) {
-        ERROR_IF(avctx->strict_std_compliance > FF_COMPLIANCE_EXPERIMENTAL,
-                 "The ANMR coder is considered experimental, add -strict -2 to enable!\n");
-        s->options.intensity_stereo = 0;
-        s->options.pns = 0;
-    }
-    ERROR_IF(s->options.ltp && avctx->strict_std_compliance > FF_COMPLIANCE_EXPERIMENTAL,
-             "The LPT profile requires experimental compliance, add -strict -2 to enable!\n");
 
     /* M/S introduces horrible artifacts with multichannel files, this is temporary */
     if (s->channels > 3)
@@ -1366,7 +1252,7 @@ static av_cold int aac_encode_init(AVCodecContext *avctx)
     if ((ret = alloc_buffers(avctx, s)) < 0)
         return ret;
 
-    if ((ret = put_audio_specific_config(avctx)))
+    if ((ret = put_audio_specific_config(avctx, chcfg)))
         return ret;
 
     sizes[0]   = ff_aac_swb_size_1024[s->samplerate_index];
@@ -1378,7 +1264,6 @@ static av_cold int aac_encode_init(AVCodecContext *avctx)
     if ((ret = ff_psy_init(&s->psy, avctx, 2, sizes, lengths,
                            s->chan_map[0], grouping)) < 0)
         return ret;
-    s->psypp = ff_psy_preprocess_init(avctx);
     ff_lpc_init(&s->lpc, 2*avctx->frame_size, TNS_MAX_ORDER, FF_LPC_TYPE_LEVINSON);
     s->random_state = 0x1f2e3d4c;
 
@@ -1392,15 +1277,12 @@ static av_cold int aac_encode_init(AVCodecContext *avctx)
 #define AACENC_FLAGS AV_OPT_FLAG_ENCODING_PARAM | AV_OPT_FLAG_AUDIO_PARAM
 static const AVOption aacenc_options[] = {
     {"aac_coder", "Coding algorithm", offsetof(AACEncContext, options.coder), AV_OPT_TYPE_INT, {.i64 = AAC_CODER_TWOLOOP}, 0, AAC_CODER_NB-1, AACENC_FLAGS, .unit = "coder"},
-        {"anmr",     "ANMR method",               0, AV_OPT_TYPE_CONST, {.i64 = AAC_CODER_ANMR},    INT_MIN, INT_MAX, AACENC_FLAGS, .unit = "coder"},
         {"twoloop",  "Two loop searching method", 0, AV_OPT_TYPE_CONST, {.i64 = AAC_CODER_TWOLOOP}, INT_MIN, INT_MAX, AACENC_FLAGS, .unit = "coder"},
         {"fast",     "Fast search",               0, AV_OPT_TYPE_CONST, {.i64 = AAC_CODER_FAST},    INT_MIN, INT_MAX, AACENC_FLAGS, .unit = "coder"},
     {"aac_ms", "Force M/S stereo coding", offsetof(AACEncContext, options.mid_side), AV_OPT_TYPE_BOOL, {.i64 = -1}, -1, 1, AACENC_FLAGS},
     {"aac_is", "Intensity stereo coding", offsetof(AACEncContext, options.intensity_stereo), AV_OPT_TYPE_BOOL, {.i64 = 1}, -1, 1, AACENC_FLAGS},
     {"aac_pns", "Perceptual noise substitution", offsetof(AACEncContext, options.pns), AV_OPT_TYPE_BOOL, {.i64 = 1}, -1, 1, AACENC_FLAGS},
     {"aac_tns", "Temporal noise shaping", offsetof(AACEncContext, options.tns), AV_OPT_TYPE_BOOL, {.i64 = 1}, -1, 1, AACENC_FLAGS},
-    {"aac_ltp", "Long term prediction", offsetof(AACEncContext, options.ltp), AV_OPT_TYPE_BOOL, {.i64 = 0}, -1, 1, AACENC_FLAGS},
-    {"aac_pred", "AAC-Main prediction", offsetof(AACEncContext, options.pred), AV_OPT_TYPE_BOOL, {.i64 = 0}, -1, 1, AACENC_FLAGS},
     {"aac_pce", "Forces the use of PCEs", offsetof(AACEncContext, options.pce), AV_OPT_TYPE_BOOL, {.i64 = 0}, -1, 1, AACENC_FLAGS},
     FF_AAC_PROFILE_OPTS
     {NULL}
@@ -1430,9 +1312,8 @@ const FFCodec ff_aac_encoder = {
     FF_CODEC_ENCODE_CB(aac_encode_frame),
     .close          = aac_encode_end,
     .defaults       = aac_encode_defaults,
-    .p.supported_samplerates = ff_mpeg4audio_sample_rates,
+    CODEC_SAMPLERATES_ARRAY(ff_mpeg4audio_sample_rates),
     .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
-    .p.sample_fmts  = (const enum AVSampleFormat[]){ AV_SAMPLE_FMT_FLTP,
-                                                     AV_SAMPLE_FMT_NONE },
+    CODEC_SAMPLEFMTS(AV_SAMPLE_FMT_FLTP),
     .p.priv_class   = &aacenc_class,
 };

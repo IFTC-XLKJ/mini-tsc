@@ -44,6 +44,7 @@ static int vvc_probe(const AVProbeData *p)
 {
     uint32_t code = -1;
     int sps = 0, pps = 0, irap = 0;
+    int valid_pps = 0, valid_irap = 0;
     int i;
 
     for (i = 0; i < p->buf_size - 1; i++) {
@@ -55,22 +56,37 @@ static int vvc_probe(const AVProbeData *p)
             if (code & 0x80) // forbidden_zero_bit
                 return 0;
 
+            if ((code & 0x3F) > 55) // nuh_layer_id must be in [0, 55]
+                return 0;
+
             if (!check_temporal_id(nal2 & 0x7, type))
                 return 0;
 
             switch (type) {
             case VVC_SPS_NUT:       sps++;  break;
-            case VVC_PPS_NUT:       pps++;  break;
+            case VVC_PPS_NUT:
+                pps++;
+                if (sps)
+                    valid_pps++;
+                break;
             case VVC_IDR_N_LP:
             case VVC_IDR_W_RADL:
             case VVC_CRA_NUT:
-            case VVC_GDR_NUT:       irap++; break;
+            case VVC_GDR_NUT:
+                irap++;
+                if (valid_pps)
+                    valid_irap++;
+                break;
             }
         }
     }
 
-    if (sps && pps && irap)
+    if (valid_irap)
         return AVPROBE_SCORE_EXTENSION + 1; // 1 more than .mpg
+    if (sps && pps && irap)
+        return AVPROBE_SCORE_EXTENSION / 2;
+    if (sps || pps || irap)
+        return AVPROBE_SCORE_EXTENSION / 4;
     return 0;
 }
 

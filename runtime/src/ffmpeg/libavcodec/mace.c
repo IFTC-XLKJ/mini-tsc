@@ -252,7 +252,10 @@ static int mace_decode_frame(AVCodecContext *avctx, AVFrame *frame,
     }
 
     /* get output buffer */
-    frame->nb_samples = 3 * (buf_size << (1 - is_mace3)) / channels;
+    int64_t nb_samples = 3 * ((int64_t)buf_size << (1 - is_mace3)) / channels;
+    if (nb_samples > INT_MAX)
+        return AVERROR_INVALIDDATA;
+    frame->nb_samples = nb_samples;
     if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
         return ret;
     samples = (int16_t **)frame->extended_data;
@@ -293,8 +296,6 @@ const FFCodec ff_mace3_decoder = {
     .init           = mace_decode_init,
     FF_CODEC_DECODE_CB(mace_decode_frame),
     .p.capabilities = AV_CODEC_CAP_DR1,
-    .p.sample_fmts  = (const enum AVSampleFormat[]) { AV_SAMPLE_FMT_S16P,
-                                                      AV_SAMPLE_FMT_NONE },
 };
 
 const FFCodec ff_mace6_decoder = {
@@ -306,6 +307,4 @@ const FFCodec ff_mace6_decoder = {
     .init           = mace_decode_init,
     FF_CODEC_DECODE_CB(mace_decode_frame),
     .p.capabilities = AV_CODEC_CAP_DR1,
-    .p.sample_fmts  = (const enum AVSampleFormat[]) { AV_SAMPLE_FMT_S16P,
-                                                      AV_SAMPLE_FMT_NONE },
 };

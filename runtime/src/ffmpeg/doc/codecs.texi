@@ -646,6 +646,8 @@ Do not skip samples and export skip information as frame side data.
 Do not reset ASS ReadOrder field on flush.
 @item icc_profiles
 Generate/parse embedded ICC profiles from/to colorimetry tags.
+@item fixed_frame_size
+Force audio encoders to use a fixed frame size.
 @end table
 
 @item export_side_data @var{flags} (@emph{decoding/encoding,audio,video,subtitles})
@@ -664,6 +666,8 @@ for codecs that support it. At present, those are H.264 and VP9.
 @item film_grain
 Export film grain parameters through frame side data (see @code{AV_FRAME_DATA_FILM_GRAIN_PARAMS}).
 Supported at present by AV1 decoders.
+@item enhancements
+Export picture enhancement metadata through frame side data, e.g. LCEVC (see @code{AV_FRAME_DATA_LCEVC}).
 @end table
 
 @item threads @var{integer} (@emph{decoding/encoding,video})
@@ -910,6 +914,14 @@ Possible values:
 @item bottom
 
 @end table
+
+@item alpha_mode @var{integer} (@emph{decoding/encoding,video})
+Possible values:
+@table @samp
+@item premultiplied
+@item straight
+@end table
+
 
 @item log_level_offset @var{integer}
 Set the log level offset.

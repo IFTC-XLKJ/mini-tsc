@@ -22,6 +22,7 @@
 
 #include <string.h>
 
+#include "libavutil/attributes.h"
 #include "libavutil/common.h"
 #include "libavutil/cuda_check.h"
 #include "libavutil/hwcontext.h"
@@ -61,7 +62,8 @@ typedef struct CUDAColorspaceContext {
     CUfunction cu_convert[AVCOL_RANGE_NB];
 
     enum AVPixelFormat pix_fmt;
-    enum AVColorRange range;
+    /* enum AVColorRange */
+    int range;
 
     int num_planes;
 } CUDAColorspaceContext;
@@ -282,7 +284,7 @@ static int conv_cuda_convert(AVFilterContext* ctx, AVFrame* out, AVFrame* in)
             break;
         case AV_PIX_FMT_YUV420P:
             width = comp_id ? in->width / 2 : in->width;
-            /* fall-through */
+            av_fallthrough;
         case AV_PIX_FMT_NV12:
             height = comp_id ? in->height / 2 : in->height;
             break;
@@ -418,15 +420,16 @@ static const AVFilterPad cudacolorspace_outputs[] = {
     },
 };
 
-const AVFilter ff_vf_colorspace_cuda = {
-    .name = "colorspace_cuda",
-    .description = NULL_IF_CONFIG_SMALL("CUDA accelerated video color converter"),
+const FFFilter ff_vf_colorspace_cuda = {
+    .p.name        = "colorspace_cuda",
+    .p.description = NULL_IF_CONFIG_SMALL("CUDA accelerated video color converter"),
+
+    .p.priv_class  = &cudacolorspace_class,
 
     .init = cudacolorspace_init,
     .uninit = cudacolorspace_uninit,
 
     .priv_size = sizeof(CUDAColorspaceContext),
-    .priv_class = &cudacolorspace_class,
 
     FILTER_INPUTS(cudacolorspace_inputs),
     FILTER_OUTPUTS(cudacolorspace_outputs),

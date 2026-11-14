@@ -21,6 +21,7 @@
  */
 
 #include "hwaccel_internal.h"
+#include "libavutil/attributes.h"
 #include "mpegutils.h"
 #include "mpegvideo.h"
 #include "mpegvideodec.h"
@@ -39,7 +40,10 @@ static inline int mpeg2_get_is_frame_start(const MpegEncContext *s)
     return s->first_field || s->picture_structure == PICT_FRAME;
 }
 
-static int vaapi_mpeg2_start_frame(AVCodecContext *avctx, av_unused const uint8_t *buffer, av_unused uint32_t size)
+static int vaapi_mpeg2_start_frame(AVCodecContext *avctx,
+                                   av_unused const AVBufferRef *buffer_ref,
+                                   av_unused const uint8_t *buffer,
+                                   av_unused uint32_t size)
 {
     const MpegEncContext *s = avctx->priv_data;
     VAAPIDecodePicture *pic = s->cur_pic.ptr->hwaccel_picture_private;
@@ -74,7 +78,7 @@ static int vaapi_mpeg2_start_frame(AVCodecContext *avctx, av_unused const uint8_
     switch (s->pict_type) {
     case AV_PICTURE_TYPE_B:
         pic_param.backward_reference_picture = ff_vaapi_get_surface_id(s->next_pic.ptr->f);
-        // fall-through
+        av_fallthrough;
     case AV_PICTURE_TYPE_P:
         pic_param.forward_reference_picture = ff_vaapi_get_surface_id(s->last_pic.ptr->f);
         break;

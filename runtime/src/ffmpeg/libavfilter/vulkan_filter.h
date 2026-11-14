@@ -23,7 +23,7 @@
 
 #include "avfilter.h"
 
-#include "vulkan.h"
+#include "libavutil/vulkan.h"
 
 /**
  * General lavfi IO functions
@@ -43,23 +43,26 @@ int ff_vk_filter_init_context(AVFilterContext *avctx, FFVulkanContext *s,
  * Submit a compute shader with a zero/one input and single out for execution.
  */
 int ff_vk_filter_process_simple(FFVulkanContext *vkctx, FFVkExecPool *e,
-                                FFVulkanPipeline *pl, AVFrame *out_f, AVFrame *in_f,
-                                VkSampler sampler, void *push_src, size_t push_size);
+                                FFVulkanShader *shd, AVFrame *out_f, AVFrame *in_f,
+                                VkSampler sampler, uint32_t wgc_z,
+                                void *push_src, size_t push_size);
 
 /**
  * Submit a compute shader with a single in and single out with 2 stages.
  */
 int ff_vk_filter_process_2pass(FFVulkanContext *vkctx, FFVkExecPool *e,
-                               FFVulkanPipeline *pls[2],
+                               FFVulkanShader *shd_list[2],
                                AVFrame *out, AVFrame *tmp, AVFrame *in,
-                               VkSampler sampler, void *push_src, size_t push_size);
+                               VkSampler sampler, uint32_t wgc_z,
+                               void *push_src, size_t push_size);
 
 /**
  * Up to 16 inputs, one output
  */
 int ff_vk_filter_process_Nin(FFVulkanContext *vkctx, FFVkExecPool *e,
-                             FFVulkanPipeline *pl,
+                             FFVulkanShader *shd,
                              AVFrame *out, AVFrame *in[], int nb_in,
-                             VkSampler sampler, void *push_src, size_t push_size);
+                             VkSampler sampler, uint32_t wgc_z,
+                             void *push_src, size_t push_size);
 
 #endif /* AVFILTER_VULKAN_FILTER_H */

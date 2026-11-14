@@ -34,11 +34,11 @@
 #include <inttypes.h>
 #include <stdio.h>
 
+#include "libavutil/attributes.h"
 #include "libavutil/avstring.h"
 #include "libavutil/base64.h"
 #include "libavutil/bprint.h"
 #include "libavutil/dict.h"
-#include "libavutil/dict_internal.h"
 #include "libavutil/display.h"
 #include "libavutil/hdr_dynamic_metadata.h"
 #include "libavutil/intfloat.h"
@@ -57,7 +57,7 @@
 #include "libavcodec/flac.h"
 #include "libavcodec/itut35.h"
 #include "libavcodec/mpeg4audio.h"
-#include "libavcodec/packet_internal.h"
+#include "packet_internal.h"
 
 #include "avformat.h"
 #include "avio_internal.h"
@@ -86,7 +86,7 @@
 #define LEVEL_ENDED                   3 /* return value of ebml_parse when the
                                          * syntax level used for parsing ended. */
 #define SKIP_THRESHOLD      1024 * 1024 /* In non-seekable mode, if more than SKIP_THRESHOLD
-                                         * of unkown, potentially damaged data is encountered,
+                                         * of unknown, potentially damaged data is encountered,
                                          * it is considered an error. */
 #define UNKNOWN_EQUIV         50 * 1024 /* An unknown element is considered equivalent
                                          * to this many bytes of unknown data for the
@@ -1281,8 +1281,8 @@ static int ebml_parse(MatroskaDemuxContext *matroska,
     MatroskaLevel *level = matroska->num_levels ? &matroska->levels[matroska->num_levels - 1] : NULL;
 
     if (!matroska->current_id) {
-        uint64_t id;
-        res = ebml_read_num(matroska, pb, 4, &id, 0);
+        uint64_t id64;
+        res = ebml_read_num(matroska, pb, 4, &id64, 0);
         if (res < 0) {
             if (pb->eof_reached && res == AVERROR_EOF) {
                 if (matroska->is_live)
@@ -1301,7 +1301,7 @@ static int ebml_parse(MatroskaDemuxContext *matroska,
             }
             return res;
         }
-        matroska->current_id = id | 1 << 7 * res;
+        matroska->current_id = id64 | 1 << 7 * res;
         pos_alt = pos + res;
     } else {
         pos_alt = pos;
@@ -1426,7 +1426,7 @@ static int ebml_parse(MatroskaDemuxContext *matroska,
         }
 
         if (!(pb->seekable & AVIO_SEEKABLE_NORMAL)) {
-            // Loosing sync will likely manifest itself as encountering unknown
+            // Losing sync will likely manifest itself as encountering unknown
             // elements which are not reliably distinguishable from elements
             // belonging to future extensions of the format.
             // We use a heuristic to detect such situations: If the current
@@ -1444,7 +1444,7 @@ static int ebml_parse(MatroskaDemuxContext *matroska,
             // UNKNOWN_EQUIV of skipped bytes for the check.
             // The whole check is only done for non-seekable output, because
             // in this situation skipped data can't simply be rechecked later.
-            // This is especially important when using unkown length elements
+            // This is especially important when using unknown length elements
             // as the check for whether a child exceeds its containing master
             // element is not effective in this situation.
             if (update_pos) {
@@ -1610,6 +1610,7 @@ static void ebml_free(EbmlSyntax *syntax, void *data)
                 list->alloc_elem_size = 0;
             } else
                 ebml_free(syntax[i].def.n, data_off);
+            break;
         default:
             break;
         }
@@ -1687,7 +1688,7 @@ static int matroska_decode_buffer(uint8_t **buf, int *buf_size,
     uint8_t *data = *buf;
     int isize = *buf_size;
     uint8_t *pkt_data = NULL;
-    uint8_t av_unused *newpktdata;
+    av_unused uint8_t *newpktdata;
     int pkt_size = isize;
     int result = 0;
     int olen;
@@ -2144,7 +2145,7 @@ static int matroska_aac_sri(int samplerate)
 static void matroska_metadata_creation_time(AVDictionary **metadata, int64_t date_utc)
 {
     /* Convert to seconds and adjust by number of seconds between 2001-01-01 and Epoch */
-    avpriv_dict_set_timestamp(metadata, "creation_time", date_utc / 1000 + 978307200000000LL);
+    ff_dict_set_timestamp(metadata, "creation_time", date_utc / 1000 + 978307200000000LL);
 }
 
 static int matroska_parse_flac(AVFormatContext *s,
@@ -2509,6 +2510,26 @@ static int mkv_parse_dvcc_dvvc(AVFormatContext *s, AVStream *st, const MatroskaT
     return ff_isom_parse_dvcc_dvvc(s, st, bin->data, bin->size);
 }
 
+static int mkv_parse_hvce(AVFormatContext *s, AVStream *st, EbmlBin *bin)
+{
+    AVPacketSideData *sd;
+
+    if (bin->size < 23) {
+        av_log(s, AV_LOG_ERROR, "Invalid hvcE size %d\n", bin->size);
+        return AVERROR_INVALIDDATA;
+    }
+
+    sd = av_packet_side_data_new(&st->codecpar->coded_side_data,
+                                 &st->codecpar->nb_coded_side_data,
+                                 AV_PKT_DATA_HEVC_CONF,
+                                 bin->size, 0);
+    if (!sd)
+        return AVERROR(ENOMEM);
+
+    memcpy(sd->data, bin->data, bin->size);
+    return 0;
+}
+
 static int mkv_parse_block_addition_mappings(AVFormatContext *s, AVStream *st, MatroskaTrack *track)
 {
     const EbmlList *mappings_list = &track->block_addition_mappings;
@@ -2525,7 +2546,7 @@ static int mkv_parse_block_addition_mappings(AVFormatContext *s, AVStream *st, M
                    "Explicit block Addition Mapping type \"Use BlockAddIDValue\", value %"PRIu64","
                    " name \"%s\" found.\n", mapping->value, mapping->name ? mapping->name : "");
             type = MATROSKA_BLOCK_ADD_ID_TYPE_OPAQUE;
-            // fall-through
+            av_fallthrough;
         case MATROSKA_BLOCK_ADD_ID_TYPE_OPAQUE:
         case MATROSKA_BLOCK_ADD_ID_TYPE_ITU_T_T35:
             if (mapping->value != type) {
@@ -2541,6 +2562,11 @@ static int mkv_parse_block_addition_mappings(AVFormatContext *s, AVStream *st, M
         case MATROSKA_BLOCK_ADD_ID_TYPE_DVCC:
         case MATROSKA_BLOCK_ADD_ID_TYPE_DVVC:
             if ((ret = mkv_parse_dvcc_dvvc(s, st, track, &mapping->extradata)) < 0)
+                return ret;
+
+            break;
+        case MATROSKA_BLOCK_ADD_ID_TYPE_HVCE:
+            if ((ret = mkv_parse_hvce(s, st, &mapping->extradata)) < 0)
                 return ret;
 
             break;
@@ -2872,6 +2898,7 @@ static int mka_parse_audio(MatroskaTrack *track, AVStream *st,
                                             (AVRational){1, 1000000000},
                                             (AVRational){1, par->codec_id == AV_CODEC_ID_OPUS ?
                                                             48000 : par->sample_rate});
+        sti->skip_samples = par->initial_padding;
     }
     if (track->seek_preroll > 0) {
         par->seek_preroll = av_rescale_q(track->seek_preroll,
@@ -3057,7 +3084,7 @@ static int mkv_parse_video(MatroskaTrack *track, AVStream *st,
     if (track->video.stereo_mode < MATROSKA_VIDEO_STEREOMODE_TYPE_NB &&
         track->video.stereo_mode != MATROSKA_VIDEO_STEREOMODE_TYPE_ANAGLYPH_CYAN_RED &&
         track->video.stereo_mode != MATROSKA_VIDEO_STEREOMODE_TYPE_ANAGLYPH_GREEN_MAG) {
-        int ret = mkv_stereo3d_conv(st, track->video.stereo_mode);
+        ret = mkv_stereo3d_conv(st, track->video.stereo_mode);
         if (ret < 0)
             return ret;
     }
@@ -3180,11 +3207,20 @@ static int matroska_parse_tracks(AVFormatContext *s)
                     track->default_duration = default_duration;
                 }
             }
-            if (track->video.pixel_cropl >= INT_MAX - track->video.pixel_cropr ||
+            int has_dimensions = track->video.pixel_width || track->video.pixel_height;
+            if ((matroska->ctx->strict_std_compliance >= FF_COMPLIANCE_STRICT &&
+                 (!track->video.pixel_width || !track->video.pixel_height)) ||
+                (track->video.pixel_cropl >= INT_MAX - track->video.pixel_cropr ||
                 track->video.pixel_cropt >= INT_MAX - track->video.pixel_cropb ||
-                (track->video.pixel_cropl + track->video.pixel_cropr) >= track->video.pixel_width ||
-                (track->video.pixel_cropt + track->video.pixel_cropb) >= track->video.pixel_height)
+                (track->video.pixel_cropl + track->video.pixel_cropr) >= track->video.pixel_width  + !has_dimensions ||
+                (track->video.pixel_cropt + track->video.pixel_cropb) >= track->video.pixel_height + !has_dimensions)) {
+                av_log(matroska->ctx, AV_LOG_ERROR,
+                       "Invalid coded dimensions %"PRId64"x%"PRId64" [%"PRId64", %"PRId64", %"PRId64", %"PRId64"].\n",
+                       track->video.pixel_width, track->video.pixel_height,
+                       track->video.pixel_cropl, track->video.pixel_cropr,
+                       track->video.pixel_cropt, track->video.pixel_cropb);
                 return AVERROR_INVALIDDATA;
+            }
             track->video.cropped_width  = track->video.pixel_width  -
                                           track->video.pixel_cropl  - track->video.pixel_cropr;
             track->video.cropped_height = track->video.pixel_height -
@@ -3308,6 +3344,75 @@ static int matroska_parse_tracks(AVFormatContext *s)
         if (ret < 0)
             return ret;
     }
+
+    return 0;
+}
+
+static int matroska_parse_dovi_streams(AVFormatContext *s)
+{
+    AVStream *bl_st = NULL, *el_st = NULL;
+    AVStreamGroup *stg;
+    int err;
+
+    /* Matroska has no explicit cross-track Dolby Vision reference, so the
+     * pairing is recovered from the dvcC/dvvC config records. Find a single
+     * HEVC track whose record declares a profile 7 enhancement layer
+     * (el_present_flag=1) and a single sibling HEVC BL candidate. If either
+     * side is ambiguous, leave the streams ungrouped. */
+    if (s->nb_streams <= 1)
+        return 0;
+
+    for (int i = 0; i < s->nb_streams; i++) {
+        AVStream *st = s->streams[i];
+        const AVPacketSideData *sd;
+        const AVDOVIDecoderConfigurationRecord *dovi;
+
+        if (st->codecpar->codec_id != AV_CODEC_ID_HEVC)
+            continue;
+
+        sd = av_packet_side_data_get(st->codecpar->coded_side_data,
+                                     st->codecpar->nb_coded_side_data,
+                                     AV_PKT_DATA_DOVI_CONF);
+        if (sd) {
+            dovi = (const AVDOVIDecoderConfigurationRecord *)sd->data;
+            if (dovi->dv_profile == 7 && dovi->el_present_flag) {
+                /* bl_present_flag is not checked, because the files in the
+                 * wild set it to 1 for EL stream, while the expectation, based
+                 * on Dolby spec for MPEG-TS would be that it's set to 0.
+                 * Ignore this, if we have EL track and single other video track
+                 * it's safe to assume it's BL. */
+                if (el_st)
+                    return 0;
+                el_st = st;
+                continue;
+            }
+        }
+
+        if (bl_st)
+            return 0;
+        bl_st = st;
+    }
+
+    if (!el_st || !bl_st)
+        return 0;
+
+    stg = avformat_stream_group_create(s, AV_STREAM_GROUP_PARAMS_DOLBY_VISION, NULL);
+    if (!stg)
+        return AVERROR(ENOMEM);
+
+    stg->id = el_st->id;
+
+    err = avformat_stream_group_add_stream(stg, bl_st);
+    if (err < 0)
+        return err;
+
+    err = avformat_stream_group_add_stream(stg, el_st);
+    if (err < 0)
+        return err;
+
+    stg->params.layered_video->el_index = stg->nb_streams - 1;
+    stg->params.layered_video->width = bl_st->codecpar->width;
+    stg->params.layered_video->height = bl_st->codecpar->height;
 
     return 0;
 }
@@ -3461,6 +3566,10 @@ static int matroska_read_header(AVFormatContext *s)
 
     matroska_convert_tags(s);
 
+    res = matroska_parse_dovi_streams(s);
+    if (res < 0)
+        return res;
+
     return 0;
 }
 
@@ -3475,7 +3584,7 @@ static int matroska_deliver_packet(MatroskaDemuxContext *matroska,
         MatroskaTrack *tracks = matroska->tracks.elem;
         MatroskaTrack *track;
 
-        avpriv_packet_list_get(&matroska->queue, pkt);
+        ff_packet_list_get(&matroska->queue, pkt);
         track = &tracks[pkt->stream_index];
         if (track->has_palette) {
             uint8_t *pal = av_packet_new_side_data(pkt, AV_PKT_DATA_PALETTE, AVPALETTE_SIZE);
@@ -3497,7 +3606,7 @@ static int matroska_deliver_packet(MatroskaDemuxContext *matroska,
  */
 static void matroska_clear_queue(MatroskaDemuxContext *matroska)
 {
-    avpriv_packet_list_free(&matroska->queue);
+    ff_packet_list_free(&matroska->queue);
 }
 
 static int matroska_parse_laces(MatroskaDemuxContext *matroska, uint8_t **buf,
@@ -3663,7 +3772,7 @@ static int matroska_parse_rm_audio(MatroskaDemuxContext *matroska,
         track->audio.buf_timecode = AV_NOPTS_VALUE;
         pkt->pos                  = pos;
         pkt->stream_index         = st->index;
-        ret = avpriv_packet_list_put(&matroska->queue, pkt, NULL, 0);
+        ret = ff_packet_list_put(&matroska->queue, pkt, NULL, 0);
         if (ret < 0) {
             av_packet_unref(pkt);
             return AVERROR(ENOMEM);
@@ -3841,9 +3950,6 @@ static int matroska_parse_webvtt(MatroskaDemuxContext *matroska,
         text_len = len;
     }
 
-    if (text_len <= 0)
-        return AVERROR_INVALIDDATA;
-
     err = av_new_packet(pkt, text_len);
     if (err < 0) {
         return err;
@@ -3885,7 +3991,7 @@ static int matroska_parse_webvtt(MatroskaDemuxContext *matroska,
     pkt->duration = duration;
     pkt->pos = pos;
 
-    err = avpriv_packet_list_put(&matroska->queue, pkt, NULL, 0);
+    err = ff_packet_list_put(&matroska->queue, pkt, NULL, 0);
     if (err < 0) {
         av_packet_unref(pkt);
         return AVERROR(ENOMEM);
@@ -3943,43 +4049,102 @@ static int matroska_parse_block_additional(MatroskaDemuxContext *matroska,
 
         /* ITU-T T.35 metadata */
         country_code  = bytestream2_get_byteu(&bc);
-        provider_code = bytestream2_get_be16u(&bc);
+        switch (country_code) {
+        case ITU_T_T35_COUNTRY_CODE_US:
+            provider_code = bytestream2_get_be16u(&bc);
 
-        if (country_code != ITU_T_T35_COUNTRY_CODE_US ||
-            provider_code != ITU_T_T35_PROVIDER_CODE_SMTPE)
-            break; // ignore
+            switch (provider_code) {
+            case ITU_T_T35_PROVIDER_CODE_SAMSUNG: {
+                provider_oriented_code = bytestream2_get_be16u(&bc);
+                application_identifier = bytestream2_get_byteu(&bc);
 
-        provider_oriented_code = bytestream2_get_be16u(&bc);
-        application_identifier = bytestream2_get_byteu(&bc);
+                if (provider_oriented_code != 1 || application_identifier != 4)
+                    break; // ignore
 
-        if (provider_oriented_code != 1 || application_identifier != 4)
-            break; // ignore
+                hdrplus = av_dynamic_hdr_plus_alloc(&hdrplus_size);
+                if (!hdrplus)
+                    return AVERROR(ENOMEM);
 
-        hdrplus = av_dynamic_hdr_plus_alloc(&hdrplus_size);
-        if (!hdrplus)
-            return AVERROR(ENOMEM);
+                if ((res = av_dynamic_hdr_plus_from_t35(hdrplus, bc.buffer,
+                                                        bytestream2_get_bytes_left(&bc))) < 0 ||
+                    (res = av_packet_add_side_data(pkt, AV_PKT_DATA_DYNAMIC_HDR10_PLUS,
+                                                   (uint8_t *)hdrplus, hdrplus_size)) < 0) {
+                    av_free(hdrplus);
+                    return res;
+                }
 
-        if ((res = av_dynamic_hdr_plus_from_t35(hdrplus, bc.buffer,
-                                                bytestream2_get_bytes_left(&bc))) < 0 ||
-            (res = av_packet_add_side_data(pkt, AV_PKT_DATA_DYNAMIC_HDR10_PLUS,
-                                           (uint8_t *)hdrplus, hdrplus_size)) < 0) {
-            av_free(hdrplus);
-            return res;
+                break;
+            }
+            case ITU_T_T35_PROVIDER_CODE_SMPTE: {
+                AVDynamicHDRSmpte2094App5 *hdr_smpte_2094_app5;
+                size_t hdr_smpte_2094_app5_size;
+
+                provider_oriented_code = bytestream2_get_be16u(&bc);
+                if (provider_oriented_code != 1)
+                    break; // ignore
+
+                hdr_smpte_2094_app5 = av_dynamic_hdr_smpte2094_app5_alloc(&hdr_smpte_2094_app5_size);
+                if (!hdr_smpte_2094_app5)
+                    return AVERROR(ENOMEM);
+
+                if ((res = av_dynamic_hdr_smpte2094_app5_from_t35(hdr_smpte_2094_app5,
+                                                                  bc.buffer,
+                                                                  bytestream2_get_bytes_left(&bc))) < 0 ||
+                    (res = av_packet_add_side_data(pkt,
+                                                   AV_PKT_DATA_DYNAMIC_HDR_SMPTE_2094_APP5,
+                                                   (uint8_t *)hdr_smpte_2094_app5,
+                                                   hdr_smpte_2094_app5_size)) < 0) {
+                    av_free(hdr_smpte_2094_app5);
+                    return res;
+                }
+
+                break;
+            }
+            default:
+                break;
+            }
+            break;
+        case ITU_T_T35_COUNTRY_CODE_UK:
+            bytestream2_skipu(&bc, 1); // t35_uk_country_code_second_octet
+            if (bytestream2_get_bytes_left(&bc) < 2)
+                return AVERROR_INVALIDDATA;
+
+            provider_code = bytestream2_get_be16u(&bc);
+
+            switch (provider_code) {
+            case ITU_T_T35_PROVIDER_CODE_VNOVA: {
+                uint8_t *data;
+                int left = bytestream2_get_bytes_left(&bc);
+
+                if (left < 2)
+                    return AVERROR_INVALIDDATA;
+                data = av_packet_new_side_data(pkt, AV_PKT_DATA_LCEVC, left);
+                if (!data)
+                    return AVERROR(ENOMEM);
+
+                bytestream2_get_bufferu(&bc, data, left);
+
+                return 0;
+            }
+            default:
+                break;
+            }
+            break;
+        default:
+            break;
         }
-
-        return 0;
-    }
-    default:
         break;
     }
-
-    side_data = av_packet_new_side_data(pkt, AV_PKT_DATA_MATROSKA_BLOCKADDITIONAL,
+    default:
+        side_data = av_packet_new_side_data(pkt, AV_PKT_DATA_MATROSKA_BLOCKADDITIONAL,
                                         size + (size_t)8);
-    if (!side_data)
-        return AVERROR(ENOMEM);
+        if (!side_data)
+            return AVERROR(ENOMEM);
 
-    AV_WB64(side_data, id);
-    memcpy(side_data + 8, data, size);
+        AV_WB64(side_data, id);
+        memcpy(side_data + 8, data, size);
+        break;
+    }
 
     return 0;
 }
@@ -4090,7 +4255,7 @@ static int matroska_parse_frame(MatroskaDemuxContext *matroska,
     pkt->pos = pos;
     pkt->duration = lace_duration;
 
-    res = avpriv_packet_list_put(&matroska->queue, pkt, NULL, 0);
+    res = ff_packet_list_put(&matroska->queue, pkt, NULL, 0);
     if (res < 0) {
         av_packet_unref(pkt);
         return AVERROR(ENOMEM);
@@ -4767,8 +4932,8 @@ static int webm_dash_manifest_cues(AVFormatContext *s, int64_t init_range)
     // Store cue point timestamps as a comma separated list
     // for checking subsegment alignment in the muxer.
     av_bprint_init(&bprint, 0, AV_BPRINT_SIZE_UNLIMITED);
-    for (int i = 0; i < sti->nb_index_entries; i++)
-        av_bprintf(&bprint, "%" PRId64",", sti->index_entries[i].timestamp);
+    for (int j = 0; j < sti->nb_index_entries; j++)
+        av_bprintf(&bprint, "%" PRId64",", sti->index_entries[j].timestamp);
     if (!av_bprint_is_complete(&bprint)) {
         av_bprint_finalize(&bprint, NULL);
         return AVERROR(ENOMEM);

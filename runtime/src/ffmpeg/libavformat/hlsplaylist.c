@@ -57,13 +57,18 @@ void ff_hls_write_audio_rendition(AVIOContext *out, const char *agroup,
 
 void ff_hls_write_subtitle_rendition(AVIOContext *out, const char *sgroup,
                                      const char *filename, const char *language,
-                                     int name_id, int is_default)
+                                     const char *sname, int name_id, int is_default)
 {
     if (!out || !filename)
         return;
 
     avio_printf(out, "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"%s\"", sgroup);
-    avio_printf(out, ",NAME=\"subtitle_%d\",DEFAULT=%s,", name_id, is_default ? "YES" : "NO");
+    if (sname) {
+        avio_printf(out, ",NAME=\"%s\",", sname);
+    } else {
+        avio_printf(out, ",NAME=\"subtitle_%d\",", name_id);
+    }
+    avio_printf(out, "DEFAULT=%s,", is_default ? "YES" : "NO");
     if (language) {
         avio_printf(out, "LANGUAGE=\"%s\",", language);
     }
@@ -142,7 +147,6 @@ int ff_hls_write_file_entry(AVIOContext *out, int insert_discont,
                             int64_t pos /* Used only if HLS_SINGLE_FILE flag is set */,
                             const char *baseurl /* Ignored if NULL */,
                             const char *filename, double *prog_date_time,
-                            int64_t video_keyframe_size, int64_t video_keyframe_pos,
                             int iframe_mode)
 {
     if (!out || !filename)
@@ -156,8 +160,7 @@ int ff_hls_write_file_entry(AVIOContext *out, int insert_discont,
     else
         avio_printf(out, "#EXTINF:%f,\n", duration);
     if (byterange_mode)
-        avio_printf(out, "#EXT-X-BYTERANGE:%"PRId64"@%"PRId64"\n", iframe_mode ? video_keyframe_size : size,
-                    iframe_mode ? video_keyframe_pos : pos);
+        avio_printf(out, "#EXT-X-BYTERANGE:%"PRId64"@%"PRId64"\n", size, pos);
 
     if (prog_date_time) {
         time_t tt, wrongsecs;

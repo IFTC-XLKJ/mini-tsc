@@ -23,6 +23,8 @@
 #ifndef AVCODEC_VVC_CTU_H
 #define AVCODEC_VVC_CTU_H
 
+#include <stdbool.h>
+
 #include "libavcodec/cabac.h"
 #include "libavutil/mem_internal.h"
 
@@ -34,6 +36,7 @@
 #define MIN_CU_SIZE             4
 #define MIN_CU_LOG2             2
 #define MAX_CU_DEPTH            7
+#define MAX_PALETTE_CU_SIZE     64
 
 #define MAX_PARTS_IN_CTU        ((MAX_CTU_SIZE >> MIN_CU_LOG2) * (MAX_CTU_SIZE >> MIN_CU_LOG2))
 
@@ -84,6 +87,8 @@
 #define ALF_GRADIENT_SIZE       ((MAX_CU_SIZE + ALF_GRADIENT_BORDER * 2) / ALF_GRADIENT_STEP)
 #define ALF_NUM_DIR             4
 
+#define ALF_MAX_BLOCKS_IN_CTU   (MAX_CTU_SIZE * MAX_CTU_SIZE / ALF_BLOCK_SIZE / ALF_BLOCK_SIZE)
+#define ALF_MAX_FILTER_SIZE     (ALF_MAX_BLOCKS_IN_CTU * ALF_NUM_COEFF_LUMA)
 
 /**
  * Value of the luma sample at position (x, y) in the 2D array tab.
@@ -172,6 +177,7 @@ typedef struct TransformUnit {
     int y0;
     int width;
     int height;
+    bool avail[CHROMA + 1];                             // contains luma/chroma block
 
     uint8_t joint_cbcr_residual_flag;                   ///< tu_joint_cbcr_residual_flag
 
@@ -221,6 +227,7 @@ typedef enum PredFlag {
     PF_L1    = 0x2,
     PF_BI    = 0x3,
     PF_IBC   = PF_L0 | 0x4,
+    PF_PLT   = 0x8,
 } PredFlag;
 
 typedef enum IntraPredMode {
@@ -274,6 +281,11 @@ typedef struct PredictionUnit {
     int cb_prof_flag[2];
 } PredictionUnit;
 
+typedef struct Palette {
+    uint8_t size;
+    uint16_t entries[VVC_MAX_NUM_PALETTE_PREDICTOR_SIZE];
+} Palette;
+
 typedef struct CodingUnit {
     VVCTreeType tree_type;
     int x0;
@@ -323,6 +335,8 @@ typedef struct CodingUnit {
 
     int8_t qp[4];                                   ///< QpY, Qp′Cb, Qp′Cr, Qp′CbCr
 
+    Palette plt[VVC_MAX_SAMPLE_ARRAYS];
+
     PredictionUnit pu;
 
     struct CodingUnit *next;                        ///< RefStruct reference
@@ -351,15 +365,17 @@ typedef struct VVCCabacState {
 typedef struct EntryPoint {
     int8_t qp_y;                                    ///< QpY
 
-    int stat_coeff[VVC_MAX_SAMPLE_ARRAYS];          ///< StatCoeff
-
-    VVCCabacState cabac_state[VVC_CONTEXTS];
-    CABACContext cc;
+    uint8_t is_first_qg;                            // first quantization group
 
     int ctu_start;
     int ctu_end;
 
-    uint8_t is_first_qg;                            // first quantization group
+    int stat_coeff[VVC_MAX_SAMPLE_ARRAYS];          ///< StatCoeff
+
+    CABACContext cc;
+    VVCCabacState cabac_state[VVC_CONTEXTS];
+
+    Palette pp[VVC_MAX_SAMPLE_ARRAYS];              // PalettePredictor
 
     MvField hmvp[MAX_NUM_HMVP_CANDS];               ///< HmvpCandList
     int     num_hmvp;                               ///< NumHmvpCand
@@ -374,17 +390,6 @@ typedef struct VVCLocalContext {
     uint8_t ctb_up_left_flag;
     int     end_of_tiles_x;
     int     end_of_tiles_y;
-
-    /* *2 for high bit depths */
-    DECLARE_ALIGNED(32, uint8_t, edge_emu_buffer)[EDGE_EMU_BUFFER_STRIDE * EDGE_EMU_BUFFER_STRIDE * 2];
-    DECLARE_ALIGNED(32, int16_t, tmp)[MAX_PB_SIZE * MAX_PB_SIZE];
-    DECLARE_ALIGNED(32, int16_t, tmp1)[MAX_PB_SIZE * MAX_PB_SIZE];
-    DECLARE_ALIGNED(32, int16_t, tmp2)[MAX_PB_SIZE * MAX_PB_SIZE];
-    DECLARE_ALIGNED(32, uint8_t, ciip_tmp)[MAX_PB_SIZE * MAX_PB_SIZE * 2];
-    DECLARE_ALIGNED(32, uint8_t, sao_buffer)[(MAX_CTU_SIZE + 2 * SAO_PADDING_SIZE) * EDGE_EMU_BUFFER_STRIDE * 2];
-    DECLARE_ALIGNED(32, uint8_t, alf_buffer_luma)[(MAX_CTU_SIZE + 2 * ALF_PADDING_SIZE) * EDGE_EMU_BUFFER_STRIDE * 2];
-    DECLARE_ALIGNED(32, uint8_t, alf_buffer_chroma)[(MAX_CTU_SIZE + 2 * ALF_PADDING_SIZE) * EDGE_EMU_BUFFER_STRIDE * 2];
-    DECLARE_ALIGNED(32, int32_t, alf_gradient_tmp)[ALF_GRADIENT_SIZE * ALF_GRADIENT_SIZE * ALF_NUM_DIR];
 
     struct {
         int sbt_num_fourths_tb0;                ///< SbtNumFourthsTb0
@@ -412,11 +417,12 @@ typedef struct VVCLocalContext {
         int y_vpdu;
     } lmcs;
 
-    CodingUnit *cu;
-    ReconstructedArea ras[2][MAX_PARTS_IN_CTU];
-    int num_ras[2];
+    SliceContext *sc;
+    VVCFrameContext *fc;
+    EntryPoint *ep;
+    int *coeffs;
 
-    NeighbourAvailable na;
+    CodingUnit *cu;
 
 #define BOUNDARY_LEFT_SLICE     (1 << 0)
 #define BOUNDARY_LEFT_TILE      (1 << 1)
@@ -428,10 +434,34 @@ typedef struct VVCLocalContext {
      * of the deblocking filter */
     int boundary_flags;
 
-    SliceContext *sc;
-    VVCFrameContext *fc;
-    EntryPoint *ep;
-    int *coeffs;
+    int num_ras[2];
+    ReconstructedArea ras[2][MAX_PARTS_IN_CTU];
+
+    NeighbourAvailable na;
+
+    union {
+        struct {
+            /* *2 for high bit depths */
+            DECLARE_ALIGNED(32, uint8_t, edge_emu_buffer)[EDGE_EMU_BUFFER_STRIDE * EDGE_EMU_BUFFER_STRIDE * 2];
+            DECLARE_ALIGNED(32, int16_t, tmp)[MAX_PB_SIZE * MAX_PB_SIZE];
+            DECLARE_ALIGNED(32, int16_t, tmp1)[MAX_PB_SIZE * MAX_PB_SIZE];
+            union {
+                DECLARE_ALIGNED(32, int16_t, prof_tmp)[MAX_PB_SIZE * MAX_PB_SIZE];
+                DECLARE_ALIGNED(32, uint8_t, ciip_tmp)[MAX_PB_SIZE * MAX_PB_SIZE * 2];
+            };
+        } pred; ///< only accessed in ff_vvc_predict_inter() and ff_vvc_predict_ciip()
+                ///< during the inter and reconstruction stages
+        struct {
+            DECLARE_ALIGNED(32, uint8_t, buffer)[(MAX_CTU_SIZE + 2 * SAO_PADDING_SIZE) * EDGE_EMU_BUFFER_STRIDE * 2];
+        } sao; ///< only accessed in ff_vvc_sao_filter() during the sao processing stage
+        struct {
+            DECLARE_ALIGNED(32, uint8_t, buffer_luma)[(MAX_CTU_SIZE + 2 * ALF_PADDING_SIZE) * EDGE_EMU_BUFFER_STRIDE * 2];
+            DECLARE_ALIGNED(32, uint8_t, buffer_chroma)[(MAX_CTU_SIZE + 2 * ALF_PADDING_SIZE) * EDGE_EMU_BUFFER_STRIDE * 2];
+            DECLARE_ALIGNED(32, int32_t, gradient_tmp)[ALF_GRADIENT_SIZE * ALF_GRADIENT_SIZE * ALF_NUM_DIR];
+            DECLARE_ALIGNED(32, int16_t, coeff_tmp)[ALF_MAX_FILTER_SIZE];
+            DECLARE_ALIGNED(32, int16_t, clip_tmp)[ALF_MAX_FILTER_SIZE];
+        } alf; ///< only accessed in ff_vvc_alf_filter() during the alf processing stage
+    };
 } VVCLocalContext;
 
 typedef struct VVCAllowedSplit {
@@ -486,5 +516,6 @@ void ff_vvc_decode_neighbour(VVCLocalContext *lc, int x_ctb, int y_ctb, int rx, 
 void ff_vvc_ctu_free_cus(CodingUnit **cus);
 int ff_vvc_get_qPy(const VVCFrameContext *fc, int xc, int yc);
 void ff_vvc_ep_init_stat_coeff(EntryPoint *ep, int bit_depth, int persistent_rice_adaptation_enabled_flag);
+void ff_vvc_channel_range(int *start, int *end, VVCTreeType tree_type, uint8_t chroma_format_idc);
 
 #endif // AVCODEC_VVC_CTU_H

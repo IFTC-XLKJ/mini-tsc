@@ -29,6 +29,7 @@
 #include "hwcontext.h"
 #include "hwcontext_internal.h"
 #include "hwcontext_videotoolbox.h"
+#include "attributes.h"
 #include "mem.h"
 #include "pixfmt.h"
 #include "pixdesc.h"
@@ -53,6 +54,7 @@ static const struct {
 #ifdef kCFCoreFoundationVersionNumber10_7
     { kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,  false, AV_PIX_FMT_NV12 },
     { kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,   true,  AV_PIX_FMT_NV12 },
+    { kCVPixelFormatType_4444AYpCbCr8,                  false, AV_PIX_FMT_AYUV },
     { kCVPixelFormatType_4444AYpCbCr16,                 false, AV_PIX_FMT_AYUV64 },
 #endif
 #if HAVE_KCVPIXELFORMATTYPE_420YPCBCR10BIPLANARVIDEORANGE
@@ -81,11 +83,16 @@ static const struct {
 #if HAVE_KCVPIXELFORMATTYPE_444YPCBCR16BIPLANARVIDEORANGE
     { kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange, false, AV_PIX_FMT_P416 },
 #endif
+#if HAVE_KCVPIXELFORMATTYPE_422YPCBCR8_YUVS
+    { kCVPixelFormatType_422YpCbCr8_yuvs,               false, AV_PIX_FMT_YUYV422 },
+#endif
+    { 'bp16'/*kCVPixelFormatType_16VersatileBayer*/,    false, AV_PIX_FMT_BAYER_RGGB16},
 };
 
 static const enum AVPixelFormat supported_formats[] = {
 #ifdef kCFCoreFoundationVersionNumber10_7
     AV_PIX_FMT_NV12,
+    AV_PIX_FMT_AYUV,
     AV_PIX_FMT_AYUV64,
 #endif
     AV_PIX_FMT_YUV420P,
@@ -111,7 +118,11 @@ static const enum AVPixelFormat supported_formats[] = {
 #if HAVE_KCVPIXELFORMATTYPE_444YPCBCR16BIPLANARVIDEORANGE
     AV_PIX_FMT_P416,
 #endif
+#if HAVE_KCVPIXELFORMATTYPE_422YPCBCR8_YUVS
+    AV_PIX_FMT_YUYV422,
+#endif
     AV_PIX_FMT_BGRA,
+    AV_PIX_FMT_BAYER_RGGB16,
 };
 
 static int vt_frames_get_constraints(AVHWDeviceContext *ctx,
@@ -454,6 +465,7 @@ CFStringRef av_map_videotoolbox_color_matrix_from_av(enum AVColorSpace space)
 #if HAVE_KCVIMAGEBUFFERTRANSFERFUNCTION_ITU_R_2100_HLG
         if (__builtin_available(macOS 10.13, iOS 11, tvOS 11, watchOS 4, *))
             return CVYCbCrMatrixGetStringForIntegerCodePoint(space);
+        av_fallthrough;
 #endif
     case AVCOL_SPC_UNSPECIFIED:
         return NULL;
@@ -479,6 +491,7 @@ CFStringRef av_map_videotoolbox_color_primaries_from_av(enum AVColorPrimaries pr
 #if HAVE_KCVIMAGEBUFFERTRANSFERFUNCTION_ITU_R_2100_HLG
         if (__builtin_available(macOS 10.13, iOS 11, tvOS 11, watchOS 4, *))
             return CVColorPrimariesGetStringForIntegerCodePoint(pri);
+        av_fallthrough;
 #endif
     case AVCOL_PRI_UNSPECIFIED:
         return NULL;
@@ -526,6 +539,7 @@ CFStringRef av_map_videotoolbox_color_trc_from_av(enum AVColorTransferCharacteri
 #if HAVE_KCVIMAGEBUFFERTRANSFERFUNCTION_ITU_R_2100_HLG
         if (__builtin_available(macOS 10.13, iOS 11, tvOS 11, watchOS 4, *))
             return CVTransferFunctionGetStringForIntegerCodePoint(trc);
+        av_fallthrough;
 #endif
     case AVCOL_TRC_UNSPECIFIED:
         return NULL;
@@ -538,8 +552,6 @@ CFStringRef av_map_videotoolbox_color_trc_from_av(enum AVColorTransferCharacteri
 static CFDictionaryRef vt_cv_buffer_copy_attachments(CVBufferRef buffer,
                                                      CVAttachmentMode attachment_mode)
 {
-    CFDictionaryRef dict;
-
     // Check that our SDK is at least macOS 12 / iOS 15 / tvOS 15
     #if (TARGET_OS_OSX  && defined(__MAC_12_0)    && __MAC_OS_X_VERSION_MAX_ALLOWED  >= __MAC_12_0)     || \
         (TARGET_OS_IOS  && defined(__IPHONE_15_0) && __IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_15_0)  || \
@@ -556,7 +568,7 @@ static CFDictionaryRef vt_cv_buffer_copy_attachments(CVBufferRef buffer,
         (TARGET_OS_IOS  && (!defined(__IPHONE_15_0) || __IPHONE_OS_VERSION_MIN_REQUIRED < __IPHONE_15_0))  || \
         (TARGET_OS_TV   && (!defined(__TVOS_15_0)   || __TV_OS_VERSION_MIN_REQUIRED     < __TVOS_15_0))
         // Fallback on SDKs or runtime versions < macOS 12 / iOS 15 / tvOS 15
-        dict = CVBufferGetAttachments(buffer, attachment_mode);
+        CFDictionaryRef dict = CVBufferGetAttachments(buffer, attachment_mode);
         return (dict) ? CFDictionaryCreateCopy(NULL, dict) : NULL;
     #else
         return NULL; // Impossible, just make the compiler happy
@@ -588,7 +600,7 @@ static int vt_pixbuf_set_colorspace(void *log_ctx,
             colorpri, kCVAttachmentMode_ShouldPropagate);
     else {
         CVBufferRemoveAttachment(pixbuf, kCVImageBufferColorPrimariesKey);
-        if (src->color_primaries != AVCOL_SPC_UNSPECIFIED)
+        if (src->color_primaries != AVCOL_PRI_UNSPECIFIED)
             av_log(log_ctx, AV_LOG_WARNING,
                 "Color primaries %s is not supported.\n",
                 av_color_primaries_name(src->color_primaries));

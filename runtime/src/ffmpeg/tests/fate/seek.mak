@@ -62,7 +62,6 @@ FATE_SEEK_VSYNTH_LENA += asv1 asv2                      \
                          mpeg2-422    mpeg2-idct-int    \
                          mpeg2-ilace  mpeg2-ivlc-qprd   \
                          mpeg2-thread mpeg2-thread-ivlc \
-                         mpeg4 $(FATE_MPEG4_AVI)        \
                          msmpeg4 msmpeg4v2              \
                          rgb                            \
                          roqvideo                       \
@@ -71,6 +70,8 @@ FATE_SEEK_VSYNTH_LENA += asv1 asv2                      \
                          svq1                           \
                          wmv1 wmv2                      \
                          yuv                            \
+
+FATE_SEEK_VSYNTH_LENA += $(if $(CONFIG_MPEG4VIDEO_PARSER), mpeg4 $(FATE_MPEG4_AVI))
 
 fate-seek-vsynth_lena-asv1:              SRC = fate/vsynth_lena-asv1.avi
 fate-seek-vsynth_lena-asv2:              SRC = fate/vsynth_lena-asv2.avi
@@ -152,7 +153,7 @@ FATE_SEEK += $(FATE_SEEK_LAVF_CONTAINER)
 
 # files from fate-lavf-video
 
-FATE_SEEK_LAVF_VIDEO += gif y4m
+FATE_SEEK_LAVF_VIDEO += gif pdv y4m
 
 FATE_SEEK_LAVF_VIDEO := $(FATE_SEEK_LAVF_VIDEO:%=fate-seek-lavf-%)
 FATE_SEEK_LAVF_VIDEO := $(filter $(subst fate-,fate-seek-,$(FATE_LAVF_VIDEO)), $(FATE_SEEK_LAVF_VIDEO))
@@ -183,12 +184,14 @@ FATE_SEEK += $(FATE_SEEK_LAVF_IMAGE2PIPE)
 FATE_SEEK_EXTRA-$(CONFIG_MP3_DEMUXER)   += fate-seek-extra-mp3
 FATE_SEEK_EXTRA-$(call ALLYES, CACHE_PROTOCOL PIPE_PROTOCOL MP3_DEMUXER) += fate-seek-cache-pipe
 FATE_SEEK_EXTRA-$(CONFIG_MATROSKA_DEMUXER) += fate-seek-mkv-codec-delay
-FATE_SEEK_EXTRA-$(call ALLYES, MOV_DEMUXER FILE_PROTOCOL) += fate-seek-extra-mp4
-FATE_SEEK_EXTRA-$(call ALLYES, MOV_DEMUXER FILE_PROTOCOL) += fate-seek-empty-edit-mp4
-FATE_SEEK_EXTRA-$(call ALLYES, MOV_DEMUXER FILE_PROTOCOL) += fate-seek-test-iibbibb-mp4
-FATE_SEEK_EXTRA-$(call ALLYES, MOV_DEMUXER FILE_PROTOCOL) += fate-seek-test-iibbibb-neg-ctts-mp4
+FATE_SEEK_EXTRA-$(call ALLYES, MOV_DEMUXER) += fate-seek-extra-mp4
+FATE_SEEK_EXTRA-$(call ALLYES, MOV_DEMUXER) += fate-seek-empty-edit-mp4
+FATE_SEEK_EXTRA-$(call ALLYES, MOV_DEMUXER) += fate-seek-test-iibbibb-mp4
+FATE_SEEK_EXTRA-$(call ALLYES, MOV_DEMUXER) += fate-seek-test-iibbibb-neg-ctts-mp4
+FATE_SEEK_EXTRA-$(CONFIG_WAV_DEMUXER)       += fate-seek-bad-avg-byterate
 
 fate-seek-extra-mp3:  CMD = run libavformat/tests/seek$(EXESUF) $(TARGET_SAMPLES)/gapless/gapless.mp3 -fastseek 1
+fate-seek-bad-avg-byterate: CMD = run libavformat/tests/seek$(EXESUF) $(TARGET_SAMPLES)/wav/wrong-avg-byterate.wav -seekback 500 -stream_id 0
 fate-seek-extra-mp4:  CMD = run libavformat/tests/seek$(EXESUF) $(TARGET_SAMPLES)/mov/buck480p30_na.mp4 -duration 180 -frames 4
 fate-seek-empty-edit-mp4:  CMD = run libavformat/tests/seek$(EXESUF) $(TARGET_SAMPLES)/mov/empty_edit_5s.mp4 -duration 15 -frames 4
 fate-seek-test-iibbibb-mp4:  CMD = run libavformat/tests/seek$(EXESUF) $(TARGET_SAMPLES)/mov/test_iibbibb.mp4 -duration 13 -frames 4
@@ -196,15 +199,30 @@ fate-seek-test-iibbibb-neg-ctts-mp4:  CMD = run libavformat/tests/seek$(EXESUF) 
 fate-seek-cache-pipe: CMD = cat $(SAMPLES)/gapless/gapless.mp3 | run libavformat/tests/seek$(EXESUF) cache:pipe:0 -read_ahead_limit -1
 fate-seek-mkv-codec-delay:   CMD = run libavformat/tests/seek$(EXESUF) $(TARGET_SAMPLES)/mkv/codec_delay_opus.mkv
 
+# A master playlist with separate audio and video media playlists with different DTS.
+tests/data/hls-seek.m3u8: ffmpeg$(PROGSSUF)$(EXESUF) | tests/data
+	$(M)$(TARGET_EXEC) $(TARGET_PATH)/$< -nostdin \
+        -f lavfi -i "testsrc2=size=128x72:rate=10:d=6" \
+        -f lavfi -i "aevalsrc=cos(2*PI*t)*sin(2*PI*(440+4*t)*t):d=6" \
+        -map 0:v -map 1:a -c:v mpeg2video -bf 2 -g 15 -dct int -idct int -flags +bitexact -c:a mp2fixed \
+        -f hls -hls_time 2 -hls_list_size 0 \
+        -var_stream_map "v:0,agroup:a a:0,agroup:a,default:yes" -master_pl_name hls-seek.m3u8 \
+        -hls_segment_filename $(TARGET_PATH)/tests/data/hls-seek-s%v-%d.ts \
+        $(TARGET_PATH)/tests/data/hls-seek-v%v.m3u8 2>/dev/null
+
 FATE_SEEK_EXTRA += $(FATE_SEEK_EXTRA-yes)
 
+FATE_SEEK_FFMPEG-$(call ALLYES, TESTSRC2_FILTER AEVALSRC_FILTER ARESAMPLE_FILTER LAVFI_INDEV MPEG2VIDEO_ENCODER MP2FIXED_ENCODER HLS_MUXER MPEGTS_MUXER HLS_DEMUXER MPEGTS_DEMUXER FILE_PROTOCOL) += fate-seek-hls
+fate-seek-hls: tests/data/hls-seek.m3u8
+fate-seek-hls: CMD = run libavformat/tests/seek$(EXESUF) $(TARGET_PATH)/tests/data/hls-seek.m3u8 -duration 6
 
-$(FATE_SEEK) $(FATE_SAMPLES_SEEK) $(FATE_SEEK_EXTRA): libavformat/tests/seek$(EXESUF)
+$(FATE_SEEK) $(FATE_SAMPLES_SEEK) $(FATE_SEEK_EXTRA) $(FATE_SEEK_FFMPEG-yes): libavformat/tests/seek$(EXESUF)
 $(FATE_SEEK) $(FATE_SAMPLES_SEEK): CMD = run libavformat/tests/seek$(EXESUF) $(TARGET_PATH)/tests/data/$(SRC)
 $(FATE_SEEK) $(FATE_SAMPLES_SEEK): fate-seek-%: fate-%
 $(subst fate-seek-,fate-,$(FATE_SAMPLES_SEEK) $(FATE_SEEK)): KEEP_FILES ?= 1
 fate-seek-%: REF = $(SRC_PATH)/tests/ref/seek/$(@:fate-seek-%=%)
 
 FATE_AVCONV += $(FATE_SEEK)
+FATE_FFMPEG += $(FATE_SEEK_FFMPEG-yes)
 FATE_SAMPLES_AVCONV += $(FATE_SAMPLES_SEEK) $(FATE_SEEK_EXTRA)
-fate-seek:     $(FATE_SEEK) $(FATE_SAMPLES_SEEK) $(FATE_SEEK_EXTRA)
+fate-seek:     $(FATE_SEEK) $(FATE_SAMPLES_SEEK) $(FATE_SEEK_EXTRA) $(FATE_SEEK_FFMPEG-yes)

@@ -25,6 +25,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "libavutil/attributes.h"
 #include "libavutil/frame.h"
 #include "libavutil/mem_internal.h"
 
@@ -146,7 +147,7 @@ enum cavs_mv_loc {
   MV_BWD_X3
 };
 
-DECLARE_ALIGNED(8, typedef, struct) {
+typedef struct cavs_vector {
     int16_t x;
     int16_t y;
     int16_t dist;
@@ -207,7 +208,7 @@ typedef struct AVSContext {
        D is the macroblock to the top-left (0)
 
        the same is repeated for backward motion vectors */
-    cavs_vector mv[2*4*3];
+    DECLARE_ALIGNED(8, cavs_vector, mv)[2*4*3];
     cavs_vector *top_mv[2];
     cavs_vector *col_mv;
 
@@ -223,6 +224,7 @@ typedef struct AVSContext {
     int qp_fixed;
     int pic_qp_fixed;
     int cbp;
+    DECLARE_ALIGNED(32, int16_t, block)[64];
     uint8_t permutated_scantable[64];
 
     /** intra prediction is done with un-deblocked samples
@@ -244,7 +246,6 @@ typedef struct AVSContext {
     uint8_t *edge_emu_buffer;
 
     int got_keyframe;
-    int16_t *block;
 } AVSContext;
 
 extern const uint8_t     ff_cavs_chroma_qp[64];
@@ -257,6 +258,7 @@ static inline void set_mvs(cavs_vector *mv, enum cavs_block size) {
     case BLK_16X16:
         mv[MV_STRIDE  ] = mv[0];
         mv[MV_STRIDE+1] = mv[0];
+        av_fallthrough;
     case BLK_16X8:
         mv[1] = mv[0];
         break;

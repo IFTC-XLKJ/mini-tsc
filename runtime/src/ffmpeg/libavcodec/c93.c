@@ -23,6 +23,7 @@
 #include "bytestream.h"
 #include "codec_internal.h"
 #include "decode.h"
+#include "libavutil/attributes.h"
 
 typedef struct C93DecoderContext {
     AVFrame *pictures[2];
@@ -174,6 +175,7 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *rframe,
 
             case C93_4X4_FROM_CURR:
                 copy_from = newpic->data[0];
+                av_fallthrough;
             case C93_4X4_FROM_PREV:
                 for (int j = 0; j < 8; j += 4) {
                     for (i = 0; i < 8; i += 4) {
@@ -246,11 +248,6 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *rframe,
         for (i = 0; i < 256; i++) {
             palette[i] = 0xFFU << 24 | bytestream2_get_be24(&gb);
         }
-#if FF_API_PALETTE_HAS_CHANGED
-FF_DISABLE_DEPRECATION_WARNINGS
-        newpic->palette_has_changed = 1;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
     } else {
         if (oldpic->data[1])
             memcpy(newpic->data[1], oldpic->data[1], 256 * 4);

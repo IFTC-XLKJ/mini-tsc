@@ -28,6 +28,7 @@
 #include <inttypes.h>
 #include <zlib.h>
 
+#include "libavutil/attributes.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/mem.h"
 #include "libavutil/mem_internal.h"
@@ -662,7 +663,7 @@ static int epic_decode_run_length(ePICContext *dc, int x, int y, int tile_width,
                         break;
                     }
                 }
-                /* fall through */
+                av_fallthrough;
             default:
                 NWneW = 1;
                 old_WWneW = WWneW;
@@ -891,7 +892,7 @@ static int epic_jb_decode_tile(G2MContext *c, int tile_x, int tile_y,
     }
 
     if (src_size < els_dsize) {
-        av_log(avctx, AV_LOG_ERROR, "ePIC: data too short, needed %"SIZE_SPECIFIER", got %"SIZE_SPECIFIER"\n",
+        av_log(avctx, AV_LOG_ERROR, "ePIC: data too short, needed %zu, got %zu\n",
                els_dsize, src_size);
         return AVERROR_INVALIDDATA;
     }

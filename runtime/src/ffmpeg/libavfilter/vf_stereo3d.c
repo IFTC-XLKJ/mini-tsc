@@ -279,9 +279,11 @@ static const enum AVPixelFormat other_pix_fmts[] = {
     AV_PIX_FMT_NONE
 };
 
-static int query_formats(AVFilterContext *ctx)
+static int query_formats(const AVFilterContext *ctx,
+                         AVFilterFormatsConfig **cfg_in,
+                         AVFilterFormatsConfig **cfg_out)
 {
-    Stereo3DContext *s = ctx->priv;
+    const Stereo3DContext *s = ctx->priv;
     const enum AVPixelFormat *pix_fmts;
 
     switch (s->out.format) {
@@ -305,7 +307,7 @@ static int query_formats(AVFilterContext *ctx)
         pix_fmts = other_pix_fmts;
     }
 
-    return ff_set_common_formats_from_list(ctx, pix_fmts);
+    return ff_set_pixel_formats_from_list2(ctx, cfg_in, cfg_out, pix_fmts);
 }
 
 static inline uint8_t ana_convert(const int *coeff, const uint8_t *left, const uint8_t *right)
@@ -412,24 +414,28 @@ static int config_output(AVFilterLink *outlink)
     switch (s->in.format) {
     case SIDE_BY_SIDE_2_LR:
         s->aspect.num  *= 2;
+        av_fallthrough;
     case SIDE_BY_SIDE_LR:
         s->width        = inlink->w / 2;
         s->in.off_right = s->width;
         break;
     case SIDE_BY_SIDE_2_RL:
         s->aspect.num  *= 2;
+        av_fallthrough;
     case SIDE_BY_SIDE_RL:
         s->width        = inlink->w / 2;
         s->in.off_left  = s->width;
         break;
     case ABOVE_BELOW_2_LR:
         s->aspect.den  *= 2;
+        av_fallthrough;
     case ABOVE_BELOW_LR:
         s->in.row_right =
         s->height       = inlink->h / 2;
         break;
     case ABOVE_BELOW_2_RL:
         s->aspect.den  *= 2;
+        av_fallthrough;
     case ABOVE_BELOW_RL:
         s->in.row_left  =
         s->height       = inlink->h / 2;
@@ -494,18 +500,21 @@ static int config_output(AVFilterLink *outlink)
     }
     case SIDE_BY_SIDE_2_LR:
         s->aspect.den   *= 2;
+        av_fallthrough;
     case SIDE_BY_SIDE_LR:
         s->out.width     = s->width * 2;
         s->out.off_right = s->width;
         break;
     case SIDE_BY_SIDE_2_RL:
         s->aspect.den   *= 2;
+        av_fallthrough;
     case SIDE_BY_SIDE_RL:
         s->out.width     = s->width * 2;
         s->out.off_left  = s->width;
         break;
     case ABOVE_BELOW_2_LR:
         s->aspect.num   *= 2;
+        av_fallthrough;
     case ABOVE_BELOW_LR:
         s->out.height    = s->height * 2;
         s->out.row_right = s->height;
@@ -522,6 +531,7 @@ static int config_output(AVFilterLink *outlink)
         break;
     case ABOVE_BELOW_2_RL:
         s->aspect.num   *= 2;
+        av_fallthrough;
     case ABOVE_BELOW_RL:
         s->out.height    = s->height * 2;
         s->out.row_left  = s->height;
@@ -593,7 +603,7 @@ static int config_output(AVFilterLink *outlink)
     s->vsub = desc->log2_chroma_h;
 
     s->dsp.anaglyph = anaglyph;
-#if ARCH_X86
+#if ARCH_X86 && HAVE_X86ASM
     ff_stereo3d_init_x86(&s->dsp);
 #endif
 
@@ -803,6 +813,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
                 oleft->linesize[i]  *= 2;
                 oright->linesize[i] *= 2;
             }
+            av_fallthrough;
         case ABOVE_BELOW_LR:
         case ABOVE_BELOW_RL:
         case ABOVE_BELOW_2_LR:
@@ -834,6 +845,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
             for (j = h; j < h + b; j++)
                 memset(oleft->data[i] + j * s->linesize[i], 0, s->linesize[i]);
         }
+        av_fallthrough;
     case SIDE_BY_SIDE_LR:
     case SIDE_BY_SIDE_RL:
     case SIDE_BY_SIDE_2_LR:
@@ -870,6 +882,7 @@ copy:
         break;
     case MONO_L:
         iright = ileft;
+        av_fallthrough;
     case MONO_R:
         switch (s->in.format) {
         case INTERLEAVE_ROWS_LR:
@@ -877,6 +890,7 @@ copy:
             for (i = 0; i < s->nb_planes; i++) {
                 out->linesize[i] *= 2;
             }
+            av_fallthrough;
         case ABOVE_BELOW_LR:
         case ABOVE_BELOW_RL:
         case ABOVE_BELOW_2_LR:
@@ -1109,14 +1123,14 @@ static const AVFilterPad stereo3d_outputs[] = {
     },
 };
 
-const AVFilter ff_vf_stereo3d = {
-    .name          = "stereo3d",
-    .description   = NULL_IF_CONFIG_SMALL("Convert video stereoscopic 3D view."),
+const FFFilter ff_vf_stereo3d = {
+    .p.name        = "stereo3d",
+    .p.description = NULL_IF_CONFIG_SMALL("Convert video stereoscopic 3D view."),
+    .p.priv_class  = &stereo3d_class,
+    .p.flags       = AVFILTER_FLAG_SLICE_THREADS,
     .priv_size     = sizeof(Stereo3DContext),
     .uninit        = uninit,
     FILTER_INPUTS(stereo3d_inputs),
     FILTER_OUTPUTS(stereo3d_outputs),
-    FILTER_QUERY_FUNC(query_formats),
-    .priv_class    = &stereo3d_class,
-    .flags         = AVFILTER_FLAG_SLICE_THREADS,
+    FILTER_QUERY_FUNC2(query_formats),
 };

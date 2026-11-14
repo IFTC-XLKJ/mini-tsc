@@ -61,7 +61,6 @@ static av_cold int s302m_encode_init(AVCodecContext *avctx)
         }
     }
 
-    avctx->frame_size = 0;
     avctx->bit_rate   = 48000 * avctx->ch_layout.nb_channels *
                        (avctx->bits_per_raw_sample + 4);
     s->framing_index  = 0;
@@ -181,8 +180,6 @@ const FFCodec ff_s302m_encoder = {
     .priv_data_size        = sizeof(S302MEncContext),
     .init                  = s302m_encode_init,
     FF_CODEC_ENCODE_CB(s302m_encode2_frame),
-    .p.sample_fmts         = (const enum AVSampleFormat[]){ AV_SAMPLE_FMT_S32,
-                                                            AV_SAMPLE_FMT_S16,
-                                                            AV_SAMPLE_FMT_NONE },
-    .p.supported_samplerates = (const int[]) { 48000, 0 },
+    CODEC_SAMPLEFMTS(AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_S16),
+    CODEC_SAMPLERATES(48000),
 };

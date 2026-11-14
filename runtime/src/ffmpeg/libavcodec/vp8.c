@@ -26,6 +26,7 @@
 
 #include "config_components.h"
 
+#include "libavutil/attributes.h"
 #include "libavutil/mem.h"
 #include "libavutil/mem_internal.h"
 
@@ -36,7 +37,7 @@
 #include "hwconfig.h"
 #include "mathops.h"
 #include "progressframe.h"
-#include "refstruct.h"
+#include "libavutil/refstruct.h"
 #include "thread.h"
 #include "vp8.h"
 #include "vp89_rac.h"
@@ -107,7 +108,7 @@ static int vp8_alloc_frame(VP8Context *s, VP8Frame *f, int ref)
                                            ref ? AV_GET_BUFFER_FLAG_REF : 0);
     if (ret < 0)
         return ret;
-    f->seg_map = ff_refstruct_allocz(s->mb_width * s->mb_height);
+    f->seg_map = av_refstruct_allocz(s->mb_width * s->mb_height);
     if (!f->seg_map) {
         ret = AVERROR(ENOMEM);
         goto fail;
@@ -119,15 +120,15 @@ static int vp8_alloc_frame(VP8Context *s, VP8Frame *f, int ref)
     return 0;
 
 fail:
-    ff_refstruct_unref(&f->seg_map);
+    av_refstruct_unref(&f->seg_map);
     ff_progress_frame_unref(&f->tf);
     return ret;
 }
 
 static void vp8_release_frame(VP8Frame *f)
 {
-    ff_refstruct_unref(&f->seg_map);
-    ff_refstruct_unref(&f->hwaccel_picture_private);
+    av_refstruct_unref(&f->seg_map);
+    av_refstruct_unref(&f->hwaccel_picture_private);
     ff_progress_frame_unref(&f->tf);
 }
 
@@ -733,7 +734,7 @@ static int vp8_decode_frame_header(VP8Context *s, const uint8_t *buf, int buf_si
     int height = s->avctx->height;
 
     if (buf_size < 3) {
-        av_log(s->avctx, AV_LOG_ERROR, "Insufficent data (%d) for header\n", buf_size);
+        av_log(s->avctx, AV_LOG_ERROR, "Insufficient data (%d) for header\n", buf_size);
         return AVERROR_INVALIDDATA;
     }
 
@@ -1660,7 +1661,7 @@ int check_intra_pred4x4_mode_emuedge(int mode, int mb_x, int mb_y,
             *copy_buf = 1;
             return mode;
         }
-        /* fall-through */
+        av_fallthrough;
     case DIAG_DOWN_LEFT_PRED:
     case VERT_LEFT_PRED:
         return !mb_y ? (vp7 ? DC_128_PRED : DC_127_PRED) : mode;
@@ -1669,7 +1670,7 @@ int check_intra_pred4x4_mode_emuedge(int mode, int mb_x, int mb_y,
             *copy_buf = 1;
             return mode;
         }
-        /* fall-through */
+        av_fallthrough;
     case HOR_UP_PRED:
         return !mb_x ? (vp7 ? DC_128_PRED : DC_129_PRED) : mode;
     case TM_VP8_PRED:
@@ -2416,7 +2417,7 @@ static av_always_inline int decode_mb_row_no_filter(AVCodecContext *avctx, void 
         mb = s->macroblocks_base + ((s->mb_width + 1) * (mb_y + 1) + 1);
     else {
         // Make sure the previous frame has read its segmentation map,
-        // if we re-use the same map.
+        // if we reuse the same map.
         if (prev_frame && s->segmentation.enabled &&
             !s->segmentation.update_map)
             ff_progress_frame_await(&prev_frame->tf, mb_y);
@@ -2515,18 +2516,6 @@ static av_always_inline int decode_mb_row_no_filter(AVCodecContext *avctx, void 
     return 0;
 }
 
-static int vp7_decode_mb_row_no_filter(AVCodecContext *avctx, void *tdata,
-                                        int jobnr, int threadnr)
-{
-    return decode_mb_row_no_filter(avctx, tdata, jobnr, threadnr, 1);
-}
-
-static int vp8_decode_mb_row_no_filter(AVCodecContext *avctx, void *tdata,
-                                        int jobnr, int threadnr)
-{
-    return decode_mb_row_no_filter(avctx, tdata, jobnr, threadnr, 0);
-}
-
 static av_always_inline void filter_mb_row(AVCodecContext *avctx, void *tdata,
                               int jobnr, int threadnr, int is_vp7)
 {
@@ -2534,18 +2523,12 @@ static av_always_inline void filter_mb_row(AVCodecContext *avctx, void *tdata,
     VP8ThreadData *td = &s->thread_data[threadnr];
     int mb_x, mb_y = atomic_load(&td->thread_mb_pos) >> 16, num_jobs = s->num_jobs;
     AVFrame *curframe = s->curframe->tf.f;
-    VP8Macroblock *mb;
     VP8ThreadData *prev_td, *next_td;
     uint8_t *dst[3] = {
         curframe->data[0] + 16 * mb_y * s->linesize,
         curframe->data[1] +  8 * mb_y * s->uvlinesize,
         curframe->data[2] +  8 * mb_y * s->uvlinesize
     };
-
-    if (s->mb_layout == 1)
-        mb = s->macroblocks_base + ((s->mb_width + 1) * (mb_y + 1) + 1);
-    else
-        mb = s->macroblocks + (s->mb_height - mb_y - 1) * 2;
 
     if (mb_y == 0)
         prev_td = td;
@@ -2556,7 +2539,7 @@ static av_always_inline void filter_mb_row(AVCodecContext *avctx, void *tdata,
     else
         next_td = &s->thread_data[(jobnr + 1) % num_jobs];
 
-    for (mb_x = 0; mb_x < s->mb_width; mb_x++, mb++) {
+    for (mb_x = 0; mb_x < s->mb_width; mb_x++) {
         const VP8FilterStrength *f = &td->filter_strength[mb_x];
         if (prev_td != td)
             check_thread_pos(td, prev_td,
@@ -2584,18 +2567,6 @@ static av_always_inline void filter_mb_row(AVCodecContext *avctx, void *tdata,
 
         update_pos(td, mb_y, (s->mb_width + 3) + mb_x);
     }
-}
-
-static void vp7_filter_mb_row(AVCodecContext *avctx, void *tdata,
-                              int jobnr, int threadnr)
-{
-    filter_mb_row(avctx, tdata, jobnr, threadnr, 1);
-}
-
-static void vp8_filter_mb_row(AVCodecContext *avctx, void *tdata,
-                              int jobnr, int threadnr)
-{
-    filter_mb_row(avctx, tdata, jobnr, threadnr, 0);
 }
 
 static av_always_inline
@@ -2754,9 +2725,9 @@ int vp78_decode_frame(AVCodecContext *avctx, AVFrame *rframe, int *got_frame,
     if (!is_vp7 && !s->actually_webp)
         ff_thread_finish_setup(avctx);
 
-    if (avctx->hwaccel) {
+    if (!is_vp7 && avctx->hwaccel) {
         const FFHWAccel *hwaccel = ffhwaccel(avctx->hwaccel);
-        ret = hwaccel->start_frame(avctx, avpkt->data, avpkt->size);
+        ret = hwaccel->start_frame(avctx, avpkt->buf, avpkt->data, avpkt->size);
         if (ret < 0)
             goto err;
 
@@ -2785,7 +2756,7 @@ int vp78_decode_frame(AVCodecContext *avctx, AVFrame *rframe, int *got_frame,
 
         if (s->mb_layout == 1) {
             // Make sure the previous frame has read its segmentation map,
-            // if we re-use the same map.
+            // if we reuse the same map.
             if (prev_frame && s->segmentation.enabled &&
                 !s->segmentation.update_map)
                 ff_progress_frame_await(&prev_frame->tf, 1);
@@ -2840,20 +2811,6 @@ err:
     return ret;
 }
 
-int ff_vp8_decode_frame(AVCodecContext *avctx, AVFrame *frame,
-                        int *got_frame, AVPacket *avpkt)
-{
-    return vp78_decode_frame(avctx, frame, got_frame, avpkt, IS_VP8);
-}
-
-#if CONFIG_VP7_DECODER
-static int vp7_decode_frame(AVCodecContext *avctx, AVFrame *frame,
-                            int *got_frame, AVPacket *avpkt)
-{
-    return vp78_decode_frame(avctx, frame, got_frame, avpkt, IS_VP7);
-}
-#endif /* CONFIG_VP7_DECODER */
-
 av_cold int ff_vp8_decode_free(AVCodecContext *avctx)
 {
     vp8_decode_flush_impl(avctx, 1);
@@ -2861,8 +2818,7 @@ av_cold int ff_vp8_decode_free(AVCodecContext *avctx)
     return 0;
 }
 
-static av_always_inline
-int vp78_decode_init(AVCodecContext *avctx, int is_vp7)
+static av_cold void vp78_decode_init(AVCodecContext *avctx)
 {
     VP8Context *s = avctx->priv_data;
 
@@ -2873,43 +2829,49 @@ int vp78_decode_init(AVCodecContext *avctx, int is_vp7)
     ff_videodsp_init(&s->vdsp, 8);
 
     ff_vp78dsp_init(&s->vp8dsp);
-    if (CONFIG_VP7_DECODER && is_vp7) {
-        ff_h264_pred_init(&s->hpc, AV_CODEC_ID_VP7, 8, 1);
-        ff_vp7dsp_init(&s->vp8dsp);
-        s->decode_mb_row_no_filter = vp7_decode_mb_row_no_filter;
-        s->filter_mb_row           = vp7_filter_mb_row;
-    } else if (CONFIG_VP8_DECODER && !is_vp7) {
-        ff_h264_pred_init(&s->hpc, AV_CODEC_ID_VP8, 8, 1);
-        ff_vp8dsp_init(&s->vp8dsp);
-        s->decode_mb_row_no_filter = vp8_decode_mb_row_no_filter;
-        s->filter_mb_row           = vp8_filter_mb_row;
-    }
 
     /* does not change for VP8 */
     memcpy(s->prob[0].scan, ff_zigzag_scan, sizeof(s->prob[0].scan));
+}
+
+#if CONFIG_VP8_DECODER
+static int vp8_decode_mb_row_no_filter(AVCodecContext *avctx, void *tdata,
+                                        int jobnr, int threadnr)
+{
+    return decode_mb_row_no_filter(avctx, tdata, jobnr, threadnr, 0);
+}
+
+static void vp8_filter_mb_row(AVCodecContext *avctx, void *tdata,
+                              int jobnr, int threadnr)
+{
+    filter_mb_row(avctx, tdata, jobnr, threadnr, 0);
+}
+
+int ff_vp8_decode_frame(AVCodecContext *avctx, AVFrame *frame,
+                        int *got_frame, AVPacket *avpkt)
+{
+    return vp78_decode_frame(avctx, frame, got_frame, avpkt, IS_VP8);
+}
+
+av_cold int ff_vp8_decode_init(AVCodecContext *avctx)
+{
+    VP8Context *s = avctx->priv_data;
+
+    vp78_decode_init(avctx);
+    ff_h264_pred_init(&s->hpc, AV_CODEC_ID_VP8, 8, 1);
+    ff_vp8dsp_init(&s->vp8dsp);
+    s->decode_mb_row_no_filter = vp8_decode_mb_row_no_filter;
+    s->filter_mb_row           = vp8_filter_mb_row;
 
     return 0;
 }
 
-#if CONFIG_VP7_DECODER
-static int vp7_decode_init(AVCodecContext *avctx)
-{
-    return vp78_decode_init(avctx, IS_VP7);
-}
-#endif /* CONFIG_VP7_DECODER */
-
-av_cold int ff_vp8_decode_init(AVCodecContext *avctx)
-{
-    return vp78_decode_init(avctx, IS_VP8);
-}
-
-#if CONFIG_VP8_DECODER
 #if HAVE_THREADS
 static void vp8_replace_frame(VP8Frame *dst, const VP8Frame *src)
 {
     ff_progress_frame_replace(&dst->tf, &src->tf);
-    ff_refstruct_replace(&dst->seg_map, src->seg_map);
-    ff_refstruct_replace(&dst->hwaccel_picture_private,
+    av_refstruct_replace(&dst->seg_map, src->seg_map);
+    av_refstruct_replace(&dst->hwaccel_picture_private,
                           src->hwaccel_picture_private);
 }
 
@@ -2947,6 +2909,37 @@ static int vp8_decode_update_thread_context(AVCodecContext *dst,
 #endif /* CONFIG_VP8_DECODER */
 
 #if CONFIG_VP7_DECODER
+static int vp7_decode_mb_row_no_filter(AVCodecContext *avctx, void *tdata,
+                                        int jobnr, int threadnr)
+{
+    return decode_mb_row_no_filter(avctx, tdata, jobnr, threadnr, 1);
+}
+
+static void vp7_filter_mb_row(AVCodecContext *avctx, void *tdata,
+                              int jobnr, int threadnr)
+{
+    filter_mb_row(avctx, tdata, jobnr, threadnr, 1);
+}
+
+static int vp7_decode_frame(AVCodecContext *avctx, AVFrame *frame,
+                            int *got_frame, AVPacket *avpkt)
+{
+    return vp78_decode_frame(avctx, frame, got_frame, avpkt, IS_VP7);
+}
+
+av_cold static int vp7_decode_init(AVCodecContext *avctx)
+{
+    VP8Context *s = avctx->priv_data;
+
+    vp78_decode_init(avctx);
+    ff_h264_pred_init(&s->hpc, AV_CODEC_ID_VP7, 8, 1);
+    ff_vp7dsp_init(&s->vp8dsp);
+    s->decode_mb_row_no_filter = vp7_decode_mb_row_no_filter;
+    s->filter_mb_row           = vp7_filter_mb_row;
+
+    return 0;
+}
+
 const FFCodec ff_vp7_decoder = {
     .p.name                = "vp7",
     CODEC_LONG_NAME("On2 VP7"),
@@ -2987,4 +2980,4 @@ const FFCodec ff_vp8_decoder = {
                                NULL
                            },
 };
-#endif /* CONFIG_VP7_DECODER */
+#endif /* CONFIG_VP8_DECODER */

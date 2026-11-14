@@ -19,6 +19,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "libavutil/attributes.h"
 #include "libavutil/opt.h"
 
 #include "avcodec.h"
@@ -154,7 +155,7 @@ static av_cold int sunrast_encode_init(AVCodecContext *avctx)
     case AV_PIX_FMT_PAL8 :
         s->maptype   = RMT_EQUAL_RGB;
         s->maplength = 3 * 256;
-        /* fall-through */
+        av_fallthrough;
     case AV_PIX_FMT_GRAY8:
         s->depth = 8;
         break;
@@ -218,9 +219,8 @@ const FFCodec ff_sunrast_encoder = {
     .init           = sunrast_encode_init,
     FF_CODEC_ENCODE_CB(sunrast_encode_frame),
     .p.priv_class   = &sunrast_class,
-    .p.pix_fmts     = (const enum AVPixelFormat[]){ AV_PIX_FMT_BGR24,
-                                                  AV_PIX_FMT_PAL8,
-                                                  AV_PIX_FMT_GRAY8,
-                                                  AV_PIX_FMT_MONOWHITE,
-                                                  AV_PIX_FMT_NONE },
+    CODEC_PIXFMTS(AV_PIX_FMT_BGR24,
+                  AV_PIX_FMT_PAL8,
+                  AV_PIX_FMT_GRAY8,
+                  AV_PIX_FMT_MONOWHITE),
 };

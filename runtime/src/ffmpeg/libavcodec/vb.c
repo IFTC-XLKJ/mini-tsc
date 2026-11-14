@@ -24,6 +24,7 @@
  * VB Video decoder
  */
 
+#include "libavutil/attributes.h"
 #include "libavutil/mem.h"
 #include "avcodec.h"
 #include "bytestream.h"
@@ -159,6 +160,7 @@ static int vb_decode_framedata(VBDecContext *c, int offset)
                 break;
             case 1:
                 pattern = ~pattern;
+                av_fallthrough;
             case 2:
                 a = bytestream2_get_byte(&g);
                 for (y = 0; y < 4; y++)
@@ -231,11 +233,6 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
     }
 
     memcpy(frame->data[1], c->pal, AVPALETTE_SIZE);
-#if FF_API_PALETTE_HAS_CHANGED
-FF_DISABLE_DEPRECATION_WARNINGS
-    frame->palette_has_changed = flags & VB_HAS_PALETTE;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
 
     outptr = frame->data[0];
     srcptr = c->frame;

@@ -100,7 +100,11 @@ AVRational av_add_q(AVRational b, AVRational c) {
 
 AVRational av_sub_q(AVRational b, AVRational c)
 {
-    return av_add_q(b, (AVRational) { -c.num, c.den });
+    av_reduce(&b.num, &b.den,
+               b.num * (int64_t) c.den -
+               c.num * (int64_t) b.den,
+               b.den * (int64_t) c.den, INT_MAX);
+    return b;
 }
 
 AVRational av_d2q(double d, int max)
@@ -118,8 +122,6 @@ AVRational av_d2q(double d, int max)
     // (int64_t)rint() and llrint() do not work with gcc on ia64 and sparc64,
     // see Ticket2713 for affected gcc/glibc versions
     av_reduce(&a.num, &a.den, floor(d * den + 0.5), den, max);
-    if ((!a.num || !a.den) && d && max>0 && max<INT_MAX)
-        av_reduce(&a.num, &a.den, floor(d * den + 0.5), den, INT_MAX);
 
     return a;
 }

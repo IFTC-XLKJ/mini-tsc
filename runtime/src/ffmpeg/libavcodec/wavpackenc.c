@@ -18,6 +18,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "libavutil/attributes.h"
 #define BITSTREAM_WRITER_LE
 
 #include "libavutil/channel_layout.h"
@@ -2844,6 +2845,7 @@ static void fill_buffer(WavPackEncodeContext *s,
             COPY_SAMPLES(int32_t, 0, 8);
             break;
         }
+        av_fallthrough;
     case AV_SAMPLE_FMT_FLTP:
         memcpy(dst, src, nb_samples * 4);
     }
@@ -2980,9 +2982,6 @@ const FFCodec ff_wavpack_encoder = {
     .init           = wavpack_encode_init,
     FF_CODEC_ENCODE_CB(wavpack_encode_frame),
     .close          = wavpack_encode_close,
-    .p.sample_fmts  = (const enum AVSampleFormat[]){ AV_SAMPLE_FMT_U8P,
-                                                     AV_SAMPLE_FMT_S16P,
-                                                     AV_SAMPLE_FMT_S32P,
-                                                     AV_SAMPLE_FMT_FLTP,
-                                                     AV_SAMPLE_FMT_NONE },
+    CODEC_SAMPLEFMTS(AV_SAMPLE_FMT_U8P,  AV_SAMPLE_FMT_S16P,
+                     AV_SAMPLE_FMT_S32P, AV_SAMPLE_FMT_FLTP),
 };

@@ -878,16 +878,21 @@ static int w64_read_header(AVFormatContext *s)
     WAVDemuxContext *wav = s->priv_data;
     AVStream *st;
     uint8_t guid[16];
-    int ret;
+    int ret = ffio_read_size(pb, guid, 16);
 
-    if (avio_read(pb, guid, 16) != 16 || memcmp(guid, ff_w64_guid_riff, 16))
+    if (ret < 0)
+        return ret;
+
+    if (memcmp(guid, ff_w64_guid_riff, 16))
         return AVERROR_INVALIDDATA;
 
     /* riff + wave + fmt + sizes */
     if (avio_rl64(pb) < 16 + 8 + 16 + 8 + 16 + 8)
         return AVERROR_INVALIDDATA;
 
-    avio_read(pb, guid, 16);
+    ret = ffio_read_size(pb, guid, 16);
+    if (ret < 0)
+        return ret;
     if (memcmp(guid, ff_w64_guid_wave, 16)) {
         av_log(s, AV_LOG_ERROR, "could not find wave guid\n");
         return AVERROR_INVALIDDATA;
@@ -903,7 +908,7 @@ static int w64_read_header(AVFormatContext *s)
         if (avio_read(pb, guid, 16) != 16)
             break;
         size = avio_rl64(pb);
-        if (size <= 24 || INT64_MAX - size < avio_tell(pb)) {
+        if (size <= 24 || INT64_MAX - size - 7 < avio_tell(pb)) {
             if (data_ofs)
                 break;
             return AVERROR_INVALIDDATA;
@@ -1018,6 +1023,7 @@ const FFInputFormat ff_w64_demuxer = {
     .p.codec_tag    = ff_wav_codec_tags_list,
     .p.priv_class   = &w64_demuxer_class,
     .priv_data_size = sizeof(WAVDemuxContext),
+    .flags_internal = FF_INFMT_FLAG_ID3V2_AUTO,
     .read_probe     = w64_probe,
     .read_header    = w64_read_header,
     .read_packet    = wav_read_packet,

@@ -172,9 +172,11 @@ static const AVOption v360_options[] = {
 
 AVFILTER_DEFINE_CLASS(v360);
 
-static int query_formats(AVFilterContext *ctx)
+static int query_formats(const AVFilterContext *ctx,
+                         AVFilterFormatsConfig **cfg_in,
+                         AVFilterFormatsConfig **cfg_out)
 {
-    V360Context *s = ctx->priv;
+    const V360Context *s = ctx->priv;
     static const enum AVPixelFormat pix_fmts[] = {
         // YUVA444
         AV_PIX_FMT_YUVA444P,   AV_PIX_FMT_YUVA444P9,
@@ -250,7 +252,8 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_NONE
     };
 
-    return ff_set_common_formats_from_list(ctx, s->alpha ? alpha_pix_fmts : pix_fmts);
+    return ff_set_pixel_formats_from_list2(ctx, cfg_in, cfg_out,
+                                            s->alpha ? alpha_pix_fmts : pix_fmts);
 }
 
 #define DEFINE_REMAP1_LINE(bits, div)                                                    \
@@ -391,7 +394,7 @@ void ff_v360_init(V360Context *s, int depth)
         break;
     }
 
-#if ARCH_X86
+#if ARCH_X86 && HAVE_X86ASM
     ff_v360_init_x86(s, depth);
 #endif
 }
@@ -803,7 +806,7 @@ static inline int ereflectx(int x, int y, int w, int h)
 static inline int reflectx(int x, int y, int w, int h)
 {
     if (y < 0 || y >= h)
-        return w - 1 - x;
+        return av_clip(w - 1 - x, 0, w - 1);
 
     return mod(x, w);
 }
@@ -1864,9 +1867,14 @@ static int stereographic_to_xyz(const V360Context *s,
     const float theta = atanf(r) * 2.f;
     const float sin_theta = sinf(theta);
 
-    vec[0] = x / r * sin_theta;
-    vec[1] = y / r * sin_theta;
-    vec[2] = cosf(theta);
+    if (r > 0.f) {
+        vec[0] = x / r * sin_theta;
+        vec[1] = y / r * sin_theta;
+        vec[2] = cosf(theta);
+    } else {
+        vec[0] = vec[1] = 0.f;
+        vec[2] = 1.f;
+    }
 
     return 1;
 }
@@ -1968,9 +1976,14 @@ static int equisolid_to_xyz(const V360Context *s,
     const float theta = asinf(r) * 2.f;
     const float sin_theta = sinf(theta);
 
-    vec[0] = x / r * sin_theta;
-    vec[1] = y / r * sin_theta;
-    vec[2] = cosf(theta);
+    if (r > 0.f) {
+        vec[0] = x / r * sin_theta;
+        vec[1] = y / r * sin_theta;
+        vec[2] = cosf(theta);
+    } else {
+        vec[0] = vec[1] = 0.f;
+        vec[2] = 1.f;
+    }
 
     return 1;
 }
@@ -4263,6 +4276,10 @@ static int v360_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
                     out_mask = s->out_transform(s, j, i, height, width, vec);
                 else
                     out_mask = s->out_transform(s, i, j, width, height, vec);
+                if (!isfinite(vec[0]) || !isfinite(vec[1]) || !isfinite(vec[2])) {
+                    vec[0] = vec[1] = 0.f;
+                    vec[2] = 1.f;
+                }
                 offset_vector(vec, s->h_offset, s->v_offset);
                 normalize_vector(vec);
                 av_assert1(!isnan(vec[0]) && !isnan(vec[1]) && !isnan(vec[2]));
@@ -4304,6 +4321,20 @@ static int get_output_dimension(AVFilterContext *ctx, const char *name,
 
     *dim = lrintf(val);
     return 0;
+}
+
+static void projection_min_size(int projection, int *min_w, int *min_h)
+{
+    switch (projection) {
+    case CUBEMAP_3_2:  *min_w = 3; *min_h = 2; break;
+    case CUBEMAP_1_6:  *min_w = 1; *min_h = 6; break;
+    case CUBEMAP_6_1:  *min_w = 6; *min_h = 1; break;
+    case EQUIANGULAR:  *min_w = 5; *min_h = 9; break;
+    case BARREL:       *min_w = 5; *min_h = 2; break;
+    case BARREL_SPLIT: *min_w = 3; *min_h = 4; break;
+    case DUAL_FISHEYE: *min_w = 2; *min_h = 1; break;
+    default:           *min_w = 1; *min_h = 1; break;
+    }
 }
 
 static int config_output(AVFilterLink *outlink)
@@ -4438,7 +4469,7 @@ static int config_output(AVFilterLink *outlink)
         in_offset_h = h;
         break;
     default:
-        av_assert0(0);
+        av_unreachable("All valid cases are handled");
     }
 
     set_dimensions(s->inplanewidth, s->inplaneheight, w, h, desc);
@@ -4460,6 +4491,7 @@ static int config_output(AVFilterLink *outlink)
     case FISHEYE:
         default_ih_fov = 180.f;
         default_iv_fov = 180.f;
+        break;
     default:
         break;
     }
@@ -4483,6 +4515,22 @@ static int config_output(AVFilterLink *outlink)
                "Input dimensions %dx%d are outside the allowed range [1, %d].\n",
                s->in_width, s->in_height, INT16_MAX);
         return AVERROR(EINVAL);
+    }
+
+    {
+        int min_w, min_h;
+        const int pw = s->in_transpose ? AV_CEIL_RSHIFT(h, desc->log2_chroma_h)
+                                       : AV_CEIL_RSHIFT(w, desc->log2_chroma_w);
+        const int ph = s->in_transpose ? AV_CEIL_RSHIFT(w, desc->log2_chroma_w)
+                                       : AV_CEIL_RSHIFT(h, desc->log2_chroma_h);
+
+        projection_min_size(s->in, &min_w, &min_h);
+        if (pw < min_w || ph < min_h) {
+            av_log(ctx, AV_LOG_ERROR,
+                   "Input %dx%d is too small for the input projection "
+                   "(requires at least %dx%d per plane).\n", pw, ph, min_w, min_h);
+            return AVERROR(EINVAL);
+        }
     }
 
     switch (s->in) {
@@ -4872,6 +4920,22 @@ static int config_output(AVFilterLink *outlink)
 
     set_dimensions(s->pr_width, s->pr_height, w, h, desc);
 
+    {
+        int min_w, min_h;
+        const int pw = s->out_transpose ? AV_CEIL_RSHIFT(h, desc->log2_chroma_h)
+                                        : AV_CEIL_RSHIFT(w, desc->log2_chroma_w);
+        const int ph = s->out_transpose ? AV_CEIL_RSHIFT(w, desc->log2_chroma_w)
+                                        : AV_CEIL_RSHIFT(h, desc->log2_chroma_h);
+
+        projection_min_size(s->out, &min_w, &min_h);
+        if (pw < min_w || ph < min_h) {
+            av_log(ctx, AV_LOG_ERROR,
+                   "Output %dx%d is too small for the output projection "
+                   "(requires at least %dx%d per plane).\n", pw, ph, min_w, min_h);
+            return AVERROR(EINVAL);
+        }
+    }
+
     switch (s->out_stereo) {
     case STEREO_2D:
         out_offset_w = out_offset_h = 0;
@@ -5028,16 +5092,16 @@ static const AVFilterPad outputs[] = {
     },
 };
 
-const AVFilter ff_vf_v360 = {
-    .name          = "v360",
-    .description   = NULL_IF_CONFIG_SMALL("Convert 360 projection of video."),
+const FFFilter ff_vf_v360 = {
+    .p.name        = "v360",
+    .p.description = NULL_IF_CONFIG_SMALL("Convert 360 projection of video."),
+    .p.priv_class  = &v360_class,
+    .p.flags       = AVFILTER_FLAG_SLICE_THREADS,
     .priv_size     = sizeof(V360Context),
     .init          = init,
     .uninit        = uninit,
     FILTER_INPUTS(inputs),
     FILTER_OUTPUTS(outputs),
-    FILTER_QUERY_FUNC(query_formats),
-    .priv_class    = &v360_class,
-    .flags         = AVFILTER_FLAG_SLICE_THREADS,
+    FILTER_QUERY_FUNC2(query_formats),
     .process_command = process_command,
 };

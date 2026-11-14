@@ -27,6 +27,7 @@
 
 #include <float.h>
 
+#include "libavutil/internal.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
@@ -238,7 +239,7 @@ static int vif_filter1d(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
                     int ii = i - filt_w / 2 + filt_i;
                     float img_coeff;
 
-                    ii = ii < 0 ? -ii : (ii >= h ? 2 * h - ii - 1 : ii);
+                    ii = avpriv_mirror(ii, h - 1);
 
                     img_coeff = src[ii * src_stride + j];
                     sum += filt_coeff * img_coeff;
@@ -267,7 +268,7 @@ static int vif_filter1d(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
                     int jj = j - filt_w / 2 + filt_j;
                     float img_coeff;
 
-                    jj = jj < 0 ? -jj : (jj >= w ? 2 * w - jj - 1 : jj);
+                    jj = avpriv_mirror(jj, w - 1);
 
                     img_coeff = temp[jj];
                     sum += filt_coeff * img_coeff;
@@ -627,18 +628,18 @@ static const AVFilterPad vif_outputs[] = {
     },
 };
 
-const AVFilter ff_vf_vif = {
-    .name          = "vif",
-    .description   = NULL_IF_CONFIG_SMALL("Calculate the VIF between two video streams."),
+const FFFilter ff_vf_vif = {
+    .p.name        = "vif",
+    .p.description = NULL_IF_CONFIG_SMALL("Calculate the VIF between two video streams."),
+    .p.priv_class  = &vif_class,
+    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL |
+                     AVFILTER_FLAG_SLICE_THREADS             |
+                     AVFILTER_FLAG_METADATA_ONLY,
     .preinit       = vif_framesync_preinit,
     .uninit        = uninit,
     .priv_size     = sizeof(VIFContext),
-    .priv_class    = &vif_class,
     .activate      = activate,
     FILTER_INPUTS(vif_inputs),
     FILTER_OUTPUTS(vif_outputs),
     FILTER_PIXFMTS_ARRAY(pix_fmts),
-    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL |
-                     AVFILTER_FLAG_SLICE_THREADS             |
-                     AVFILTER_FLAG_METADATA_ONLY,
 };

@@ -23,6 +23,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "libavutil/attributes.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "avformat.h"
@@ -303,7 +304,7 @@ static int ty_read_header(AVFormatContext *s)
     if (ty->tivo_series == TIVO_SERIES_UNKNOWN ||
         ty->audio_type == TIVO_AUDIO_UNKNOWN ||
         ty->tivo_type == TIVO_TYPE_UNKNOWN)
-        return AVERROR(EIO);
+        return AVERROR_INVALIDDATA;
 
     st = avformat_new_stream(s, NULL);
     if (!st)
@@ -577,7 +578,7 @@ static int demux_audio(AVFormatContext *s, TyRecHdr *rec_hdr, AVPacket *pkt)
         if (ty->audio_type == TIVO_AUDIO_AC3 &&
                 ty->tivo_series == TIVO_SERIES2) {
             if (ty->ac3_pkt_size + pkt->size > AC3_PKT_LENGTH) {
-                pkt->size -= 2;
+                pkt->size -= FFMIN(pkt->size, 2);
                 ty->ac3_pkt_size = 0;
             } else {
                 ty->ac3_pkt_size += pkt->size;
@@ -695,6 +696,7 @@ static int ty_read_packet(AVFormatContext *s, AVPacket *pkt)
             break;
         default:
             ff_dlog(s, "Invalid record type 0x%02x\n", rec->rec_type);
+            av_fallthrough;
         case 0x01:
         case 0x02:
         case 0x03: /* TiVo data services */

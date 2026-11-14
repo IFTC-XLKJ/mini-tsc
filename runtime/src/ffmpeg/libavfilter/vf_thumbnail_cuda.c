@@ -44,7 +44,10 @@ static const enum AVPixelFormat supported_formats[] = {
     AV_PIX_FMT_YUV420P,
     AV_PIX_FMT_YUV444P,
     AV_PIX_FMT_P010,
+    AV_PIX_FMT_P012,
     AV_PIX_FMT_P016,
+    AV_PIX_FMT_YUV444P10MSB,
+    AV_PIX_FMT_YUV444P12MSB,
     AV_PIX_FMT_YUV444P16,
 };
 
@@ -226,12 +229,15 @@ static int thumbnail(AVFilterContext *ctx, int *histogram, AVFrame *in)
             histogram + 512, in->data[2], in->width, in->height, in->linesize[2], 1);
         break;
     case AV_PIX_FMT_P010LE:
+    case AV_PIX_FMT_P012LE:
     case AV_PIX_FMT_P016LE:
         thumbnail_kernel(ctx, s->cu_func_ushort, 1,
             histogram, in->data[0], in->width, in->height, in->linesize[0], 2);
         thumbnail_kernel(ctx, s->cu_func_ushort2, 2,
             histogram + 256, in->data[1], in->width / 2, in->height / 2, in->linesize[1], 2);
         break;
+    case AV_PIX_FMT_YUV444P10MSB:
+    case AV_PIX_FMT_YUV444P12MSB:
     case AV_PIX_FMT_YUV444P16:
         thumbnail_kernel(ctx, s->cu_func_ushort2, 1,
             histogram, in->data[0], in->width, in->height, in->linesize[0], 2);
@@ -284,7 +290,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         return ret;
 
     if (hw_frames_ctx->sw_format == AV_PIX_FMT_NV12 || hw_frames_ctx->sw_format == AV_PIX_FMT_YUV420P ||
-        hw_frames_ctx->sw_format == AV_PIX_FMT_P010LE || hw_frames_ctx->sw_format == AV_PIX_FMT_P016LE)
+        hw_frames_ctx->sw_format == AV_PIX_FMT_P010LE || hw_frames_ctx->sw_format == AV_PIX_FMT_P012LE ||
+        hw_frames_ctx->sw_format == AV_PIX_FMT_P016LE)
     {
         int i;
         for (i = 256; i < HIST_SIZE; i++)
@@ -436,15 +443,15 @@ static const AVFilterPad thumbnail_cuda_outputs[] = {
     },
 };
 
-const AVFilter ff_vf_thumbnail_cuda = {
-    .name          = "thumbnail_cuda",
-    .description   = NULL_IF_CONFIG_SMALL("Select the most representative frame in a given sequence of consecutive frames."),
+const FFFilter ff_vf_thumbnail_cuda = {
+    .p.name        = "thumbnail_cuda",
+    .p.description = NULL_IF_CONFIG_SMALL("Select the most representative frame in a given sequence of consecutive frames using CUDA."),
+    .p.priv_class  = &thumbnail_cuda_class,
     .priv_size     = sizeof(ThumbnailCudaContext),
     .init          = init,
     .uninit        = uninit,
     FILTER_INPUTS(thumbnail_cuda_inputs),
     FILTER_OUTPUTS(thumbnail_cuda_outputs),
     FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
-    .priv_class    = &thumbnail_cuda_class,
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
 };

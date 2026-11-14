@@ -334,22 +334,28 @@ static const struct {
     enum AVCodecID codec_id;
     const enum MovChannelLayoutTag *layouts;
 } mov_codec_ch_layouts[] = {
-    { AV_CODEC_ID_AAC,     mov_ch_layouts_aac      },
-    { AV_CODEC_ID_AC3,     mov_ch_layouts_ac3      },
-    { AV_CODEC_ID_ALAC,    mov_ch_layouts_alac     },
-    { AV_CODEC_ID_PCM_U8,    mov_ch_layouts_wav    },
-    { AV_CODEC_ID_PCM_S8,    mov_ch_layouts_wav    },
-    { AV_CODEC_ID_PCM_S16LE, mov_ch_layouts_wav    },
-    { AV_CODEC_ID_PCM_S16BE, mov_ch_layouts_wav    },
-    { AV_CODEC_ID_PCM_S24LE, mov_ch_layouts_wav    },
-    { AV_CODEC_ID_PCM_S24BE, mov_ch_layouts_wav    },
-    { AV_CODEC_ID_PCM_S32LE, mov_ch_layouts_wav    },
-    { AV_CODEC_ID_PCM_S32BE, mov_ch_layouts_wav    },
-    { AV_CODEC_ID_PCM_F32LE, mov_ch_layouts_wav    },
-    { AV_CODEC_ID_PCM_F32BE, mov_ch_layouts_wav    },
-    { AV_CODEC_ID_PCM_F64LE, mov_ch_layouts_wav    },
-    { AV_CODEC_ID_PCM_F64BE, mov_ch_layouts_wav    },
-    { AV_CODEC_ID_NONE,    NULL                    },
+    { AV_CODEC_ID_AAC,          mov_ch_layouts_aac  },
+    { AV_CODEC_ID_AC3,          mov_ch_layouts_ac3  },
+    { AV_CODEC_ID_ADPCM_IMA_QT, mov_ch_layouts_wav  },
+    { AV_CODEC_ID_ALAC,         mov_ch_layouts_alac },
+    { AV_CODEC_ID_MACE3,        mov_ch_layouts_wav  },
+    { AV_CODEC_ID_MACE6,        mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_ALAW,     mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_F32BE,    mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_F32LE,    mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_F64BE,    mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_F64LE,    mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_MULAW,    mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_S16BE,    mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_S16LE,    mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_S24BE,    mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_S24LE,    mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_S32BE,    mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_S32LE,    mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_S8,       mov_ch_layouts_wav  },
+    { AV_CODEC_ID_PCM_U8,       mov_ch_layouts_wav  },
+    { AV_CODEC_ID_SPEEX,        mov_ch_layouts_wav  },
+    { AV_CODEC_ID_NONE,         NULL                },
 };
 
 static const struct MovChannelLayoutMap* find_layout_map(uint32_t tag, const struct MovChannelLayoutMap *map)
@@ -396,8 +402,10 @@ static int mov_get_channel_layout(AVChannelLayout *ch_layout, uint32_t tag, uint
         }
 
         ret = av_channel_layout_retype(&tmp, 0, AV_CHANNEL_LAYOUT_RETYPE_FLAG_CANONICAL);
-        if (ret < 0)
+        if (ret < 0) {
+            av_channel_layout_uninit(&tmp);
             return ret;
+        }
 
         av_channel_layout_uninit(ch_layout);
         *ch_layout = tmp;
@@ -498,11 +506,24 @@ int ff_mov_get_channel_layout_tag(const AVCodecParameters *par,
     /* if no tag was found, use channel bitmap or description as a backup if possible */
     if (tag == 0) {
         uint32_t *channel_desc;
-        if (par->ch_layout.order == AV_CHANNEL_ORDER_NATIVE &&
-            par->ch_layout.u.mask < 0x40000) {
-            *layout = MOV_CH_LAYOUT_USE_BITMAP;
-            *bitmap = (uint32_t)par->ch_layout.u.mask;
-            return 0;
+
+        if (par->ch_layout.order == AV_CHANNEL_ORDER_NATIVE) {
+            /* Parsers and encoders (e.g. AC3, AAC, ALAC) indicate/propagate the bitstream's
+             * channel configuration using "standard" layouts in AV_CHANNEL_ORDER_NATIVE but
+             * the encoded bitstream's channels are not actually in that order. Don't return
+             * a channel layout bitmap or description using a conflicting channel order, as
+             * some software will incorrectly override the bitstream-provided information
+             * using the chan atom's data instead (e.g. afinfo/afplay for AAC in MOV) */
+            if (layouts != mov_ch_layouts_wav) {
+                *layout = MOV_CH_LAYOUT_UNKNOWN;
+                return 0;
+            }
+
+            if (par->ch_layout.u.mask < 0x40000) {
+                *layout = MOV_CH_LAYOUT_USE_BITMAP;
+                *bitmap = (uint32_t)par->ch_layout.u.mask;
+                return 0;
+            }
         } else if (par->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC)
             return AVERROR(ENOSYS);
 
@@ -552,7 +573,7 @@ int ff_mov_read_chan(AVFormatContext *s, AVIOContext *pb, AVStream *st,
         int nb_channels = ch_layout->nb_channels;
 
         if (!num_descr || num_descr < nb_channels) {
-            av_log(s, AV_LOG_ERROR, "got %d channel descriptions when at least %d were needed\n",
+            av_log(s, AV_LOG_ERROR, "got %"PRIu32" channel descriptions when at least %d were needed\n",
                    num_descr, nb_channels);
             return AVERROR_INVALIDDATA;
         }
@@ -560,7 +581,7 @@ int ff_mov_read_chan(AVFormatContext *s, AVIOContext *pb, AVStream *st,
         if (num_descr > nb_channels) {
             int strict = s->strict_std_compliance >= FF_COMPLIANCE_STRICT;
             av_log(s, strict ? AV_LOG_ERROR : AV_LOG_WARNING,
-                   "got %d channel descriptions when number of channels is %d\n",
+                   "got %"PRIu32" channel descriptions when number of channels is %d\n",
                    num_descr, nb_channels);
             if (strict)
                 return AVERROR_INVALIDDATA;
@@ -577,6 +598,7 @@ int ff_mov_read_chan(AVFormatContext *s, AVIOContext *pb, AVStream *st,
             if (pb->eof_reached) {
                 av_log(s, AV_LOG_ERROR,
                        "reached EOF while reading channel layout\n");
+                av_channel_layout_uninit(&tmp);
                 return AVERROR_INVALIDDATA;
             }
             label     = avio_rb32(pb);          // mChannelLabel
@@ -589,11 +611,13 @@ int ff_mov_read_chan(AVFormatContext *s, AVIOContext *pb, AVStream *st,
         }
 
         ret = av_channel_layout_retype(&tmp, 0, AV_CHANNEL_LAYOUT_RETYPE_FLAG_CANONICAL);
-        if (ret < 0)
+        if (ret < 0) {
+            av_channel_layout_uninit(&tmp);
             goto out;
+        }
 
-       av_channel_layout_uninit(ch_layout);
-       *ch_layout = tmp;
+        av_channel_layout_uninit(ch_layout);
+        *ch_layout = tmp;
     } else if (layout_tag == MOV_CH_LAYOUT_USE_BITMAP) {
         if (!ch_layout->nb_channels || av_popcount(bitmap) == ch_layout->nb_channels) {
             if (bitmap < 0x40000) {
@@ -692,7 +716,14 @@ int ff_mov_get_channel_config_from_layout(const AVChannelLayout *layout, int *co
     return 0;
 }
 
-int ff_mov_get_channel_layout_from_config(int config, AVChannelLayout *layout, uint64_t omitted_channel_map)
+/**
+ * Get AVChannelLayout from ISO/IEC 23001-8 ChannelConfiguration.
+ *
+ * @return 1  if the config was unknown, layout is untouched in this case
+ *         0  if the config was found
+ *         <0 on error
+ */
+static int mov_get_channel_layout_from_config(int config, AVChannelLayout *layout, uint64_t omitted_channel_map)
 {
     if (config > 0) {
         uint32_t layout_tag;
@@ -734,10 +765,17 @@ int ff_mov_get_channel_positions_from_layout(const AVChannelLayout *layout,
     return 0;
 }
 
-int ff_mov_read_chnl(AVFormatContext *s, AVIOContext *pb, AVStream *st)
+int ff_mov_read_chnl(AVFormatContext *s, AVIOContext *pb, AVStream *st, int version)
 {
     int stream_structure = avio_r8(pb);
+    int base_channel_count;
+    int obj_count = 0;
     int ret;
+
+    if (version == 1) {
+        stream_structure >>= 4;
+        base_channel_count = avio_r8(pb);
+    }
 
     // stream carries channels
     if (stream_structure & 1) {
@@ -747,6 +785,13 @@ int ff_mov_read_chnl(AVFormatContext *s, AVIOContext *pb, AVStream *st)
         if (!layout) {
             AVChannelLayout tmp = { 0 }, *ch_layout = &st->codecpar->ch_layout;
             int nb_channels = ch_layout->nb_channels;
+
+            if (version == 1) {
+                nb_channels = avio_r8(pb);
+                obj_count = base_channel_count - nb_channels;
+                if (obj_count < 0)
+                    return AVERROR_INVALIDDATA;
+            }
 
             ret = av_channel_layout_custom_init(&tmp, nb_channels);
             if (ret < 0)
@@ -773,22 +818,40 @@ int ff_mov_read_chnl(AVFormatContext *s, AVIOContext *pb, AVStream *st)
             }
 
             ret = av_channel_layout_retype(&tmp, 0, AV_CHANNEL_LAYOUT_RETYPE_FLAG_CANONICAL);
-            if (ret < 0)
+            if (ret < 0) {
+                av_channel_layout_uninit(&tmp);
                 return ret;
-
+            }
             av_channel_layout_uninit(ch_layout);
             *ch_layout = tmp;
         } else {
-            uint64_t omitted_channel_map = avio_rb64(pb);
-            ret = ff_mov_get_channel_layout_from_config(layout, &st->codecpar->ch_layout, omitted_channel_map);
-            if (ret < 0)
-                return ret;
+            uint64_t omitted_channel_map = 0;
+            int omitted_channel_present = 1, channel_order_definition = 0;
+
+            if (version == 1) {
+                int byte = avio_r8(pb);
+                omitted_channel_present  =  byte       & 1;
+                channel_order_definition = (byte >> 1) & 0x7;
+            }
+
+            if (omitted_channel_present)
+                omitted_channel_map = avio_rb64(pb);
+            if (!channel_order_definition) {
+                ret = mov_get_channel_layout_from_config(layout, &st->codecpar->ch_layout, omitted_channel_map);
+                if (ret < 0)
+                    return ret;
+            } else
+                av_log(s, AV_LOG_TRACE, "'chnl' with channel_order_definition %d\n", channel_order_definition);
+
+            if (version == 1)
+                obj_count = base_channel_count - st->codecpar->ch_layout.nb_channels;
         }
     }
 
     // stream carries objects
     if (stream_structure & 2) {
-        int obj_count = avio_r8(pb);
+        if (version == 0)
+            obj_count = avio_r8(pb);
         av_log(s, AV_LOG_TRACE, "'chnl' with object_count %d\n", obj_count);
     }
 

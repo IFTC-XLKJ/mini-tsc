@@ -370,10 +370,23 @@ int ff_mp4_read_dec_config_descr(void *logctx, AVStream *st, AVIOContext *pb)
                 st->codecpar->sample_rate = cfg.ext_sample_rate;
             else
                 st->codecpar->sample_rate = cfg.sample_rate;
+            switch (cfg.object_type) {
+            case AOT_AAC_MAIN:
+            case AOT_AAC_LC:
+            case AOT_AAC_SSR:
+            case AOT_AAC_LTP:
+            case AOT_ER_AAC_LC:
+            case AOT_ER_AAC_LD:
+            case AOT_ER_AAC_ELD:
+            case AOT_USAC:
+                st->codecpar->frame_size = cfg.frame_length;
+                break;
+            }
             av_log(logctx, AV_LOG_TRACE, "mp4a config channels %d obj %d ext obj %d "
-                    "sample rate %d ext sample rate %d\n", cfg.channels,
+                    "sample rate %d ext sample rate %d frame_length %d\n", cfg.channels,
                     cfg.object_type, cfg.ext_object_type,
-                    cfg.sample_rate, cfg.ext_sample_rate);
+                    cfg.sample_rate, cfg.ext_sample_rate,
+                    cfg.frame_length);
             if (!(st->codecpar->codec_id = ff_codec_get_id(mp4_audio_types,
                                                         cfg.object_type)))
                 st->codecpar->codec_id = AV_CODEC_ID_AAC;
@@ -404,12 +417,12 @@ static const MovChannelLayout mov_channel_layout[] = {
     { AV_CH_LAYOUT_7POINT1,                      (128<<16) | 8}, // kCAFChannelLayoutTag_MPEG_7_1_C
     { AV_CH_LAYOUT_7POINT1_WIDE,                 (126<<16) | 8}, // kCAFChannelLayoutTag_MPEG_7_1_A
     { AV_CH_LAYOUT_5POINT1_BACK|AV_CH_LAYOUT_STEREO_DOWNMIX, (130<<16) | 8}, // kCAFChannelLayoutTag_SMPTE_DTV
-    { AV_CH_LAYOUT_STEREO|AV_CH_LOW_FREQUENCY,   (133<<16) | 3}, // kCAFChannelLayoutTag_DVD_4
+    { AV_CH_LAYOUT_2POINT1,                      (133<<16) | 3}, // kCAFChannelLayoutTag_DVD_4
     { AV_CH_LAYOUT_2_1|AV_CH_LOW_FREQUENCY,      (134<<16) | 4}, // kCAFChannelLayoutTag_DVD_5
     { AV_CH_LAYOUT_QUAD|AV_CH_LOW_FREQUENCY,     (135<<16) | 4}, // kCAFChannelLayoutTag_DVD_6
     { AV_CH_LAYOUT_2_2|AV_CH_LOW_FREQUENCY,      (135<<16) | 4}, // kCAFChannelLayoutTag_DVD_6
-    { AV_CH_LAYOUT_SURROUND|AV_CH_LOW_FREQUENCY, (136<<16) | 4}, // kCAFChannelLayoutTag_DVD_10
-    { AV_CH_LAYOUT_4POINT0|AV_CH_LOW_FREQUENCY,  (137<<16) | 5}, // kCAFChannelLayoutTag_DVD_11
+    { AV_CH_LAYOUT_3POINT1,                      (136<<16) | 4}, // kCAFChannelLayoutTag_DVD_10
+    { AV_CH_LAYOUT_4POINT1,                      (137<<16) | 5}, // kCAFChannelLayoutTag_DVD_11
     { 0, 0},
 };
 

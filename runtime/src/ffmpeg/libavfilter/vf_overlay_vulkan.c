@@ -18,30 +18,29 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "libavutil/random_seed.h"
 #include "libavutil/opt.h"
 #include "vulkan_filter.h"
-#include "vulkan_spirv.h"
 
 #include "filters.h"
 #include "framesync.h"
 #include "video.h"
+
+extern const unsigned char ff_overlay_comp_spv_data[];
+extern const unsigned int ff_overlay_comp_spv_len;
 
 typedef struct OverlayVulkanContext {
     FFVulkanContext vkctx;
     FFFrameSync fs;
 
     int initialized;
-    FFVulkanPipeline pl;
     FFVkExecPool e;
-    FFVkQueueFamilyCtx qf;
-    FFVkSPIRVShader shd;
-    VkSampler sampler;
+    AVVulkanDeviceQueueFamily *qf;
+    FFVulkanShader shd;
 
     /* Push constants / options */
     struct {
-        int32_t o_offset[2*3];
-        int32_t o_size[2*3];
+        int32_t o_offset[2*4];
+        int32_t o_size[2*4];
     } opts;
 
     int overlay_x;
@@ -50,125 +49,59 @@ typedef struct OverlayVulkanContext {
     int overlay_h;
 } OverlayVulkanContext;
 
-static const char overlay_noalpha[] = {
-    C(0, void overlay_noalpha(int i, ivec2 pos)                                )
-    C(0, {                                                                     )
-    C(1,     if ((o_offset[i].x <= pos.x) && (o_offset[i].y <= pos.y) &&
-                 (pos.x < (o_offset[i].x + o_size[i].x)) &&
-                 (pos.y < (o_offset[i].y + o_size[i].y))) {                    )
-    C(2,         vec4 res = texture(overlay_img[i], pos - o_offset[i]);        )
-    C(2,         imageStore(output_img[i], pos, res);                          )
-    C(1,     } else {                                                          )
-    C(2,         vec4 res = texture(main_img[i], pos);                         )
-    C(2,         imageStore(output_img[i], pos, res);                          )
-    C(1,     }                                                                 )
-    C(0, }                                                                     )
-};
-
-static const char overlay_alpha[] = {
-    C(0, void overlay_alpha_opaque(int i, ivec2 pos)                           )
-    C(0, {                                                                     )
-    C(1,     vec4 res = texture(main_img[i], pos);                             )
-    C(1,     if ((o_offset[i].x <= pos.x) && (o_offset[i].y <= pos.y) &&
-                 (pos.x < (o_offset[i].x + o_size[i].x)) &&
-                 (pos.y < (o_offset[i].y + o_size[i].y))) {                    )
-    C(2,         vec4 ovr = texture(overlay_img[i], pos - o_offset[i]);        )
-    C(2,         res = ovr * ovr.a + res * (1.0f - ovr.a);                     )
-    C(2,         res.a = 1.0f;                                                 )
-    C(2,         imageStore(output_img[i], pos, res);                          )
-    C(1,     }                                                                 )
-    C(1,     imageStore(output_img[i], pos, res);                              )
-    C(0, }                                                                     )
-};
-
 static av_cold int init_filter(AVFilterContext *ctx)
 {
     int err;
-    uint8_t *spv_data;
-    size_t spv_len;
-    void *spv_opaque = NULL;
     OverlayVulkanContext *s = ctx->priv;
     FFVulkanContext *vkctx = &s->vkctx;
     const int planes = av_pix_fmt_count_planes(s->vkctx.output_format);
     const int ialpha = av_pix_fmt_desc_get(s->vkctx.input_format)->flags & AV_PIX_FMT_FLAG_ALPHA;
     const AVPixFmtDescriptor *pix_desc = av_pix_fmt_desc_get(s->vkctx.output_format);
-    FFVkSPIRVShader *shd = &s->shd;
-    FFVkSPIRVCompiler *spv;
-    FFVulkanDescriptorSetBinding *desc;
+    FFVulkanShader *shd = &s->shd;
 
-    spv = ff_vk_spirv_init();
-    if (!spv) {
-        av_log(ctx, AV_LOG_ERROR, "Unable to initialize SPIR-V compiler!\n");
-        return AVERROR_EXTERNAL;
+    s->qf = ff_vk_qf_find(vkctx, VK_QUEUE_COMPUTE_BIT, 0);
+    if (!s->qf) {
+        av_log(ctx, AV_LOG_ERROR, "Device has no compute queues\n");
+        err = AVERROR(ENOTSUP);
+        goto fail;
     }
 
-    ff_vk_qf_init(vkctx, &s->qf, VK_QUEUE_COMPUTE_BIT);
-    RET(ff_vk_exec_pool_init(vkctx, &s->qf, &s->e, s->qf.nb_queues*4, 0, 0, 0, NULL));
-    RET(ff_vk_init_sampler(vkctx, &s->sampler, 1, VK_FILTER_NEAREST));
-    RET(ff_vk_shader_init(&s->pl, &s->shd, "overlay_compute",
-                          VK_SHADER_STAGE_COMPUTE_BIT, 0));
+    RET(ff_vk_exec_pool_init(vkctx, s->qf, &s->e, s->qf->num*4, 0, 0, 0, NULL));
 
-    ff_vk_shader_set_compute_sizes(&s->shd, 32, 32, 1);
+    SPEC_LIST_CREATE(sl, 2, 2*sizeof(uint32_t))
+    SPEC_LIST_ADD(sl, 0, 32, planes);
+    SPEC_LIST_ADD(sl, 1, 32, ialpha);
 
-    GLSLC(0, layout(push_constant, std430) uniform pushConstants {        );
-    GLSLC(1,    ivec2 o_offset[3];                                        );
-    GLSLC(1,    ivec2 o_size[3];                                          );
-    GLSLC(0, };                                                           );
-    GLSLC(0,                                                              );
+    ff_vk_shader_load(&s->shd, VK_SHADER_STAGE_COMPUTE_BIT, sl,
+                      (int []) { 32, 32, 1 }, 0);
 
-    ff_vk_add_push_constant(&s->pl, 0, sizeof(s->opts),
-                            VK_SHADER_STAGE_COMPUTE_BIT);
+    ff_vk_shader_add_push_const(&s->shd, 0, sizeof(s->opts),
+                                VK_SHADER_STAGE_COMPUTE_BIT);
 
-    desc = (FFVulkanDescriptorSetBinding []) {
-        {
-            .name       = "main_img",
-            .type       = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .dimensions = 2,
-            .elems      = planes,
-            .stages     = VK_SHADER_STAGE_COMPUTE_BIT,
-            .samplers   = DUP_SAMPLER(s->sampler),
+    const FFVulkanDescriptorSetBinding desc[] = {
+        { /* main_img */
+            .type   = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .stages = VK_SHADER_STAGE_COMPUTE_BIT,
+            .elems  = planes,
         },
-        {
-            .name       = "overlay_img",
-            .type       = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .dimensions = 2,
-            .elems      = planes,
-            .stages     = VK_SHADER_STAGE_COMPUTE_BIT,
-            .samplers   = DUP_SAMPLER(s->sampler),
+        { /* overlay_img */
+            .type   = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .stages = VK_SHADER_STAGE_COMPUTE_BIT,
+            .elems  = planes,
         },
-        {
-            .name       = "output_img",
-            .type       = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .mem_layout = ff_vk_shader_rep_fmt(s->vkctx.output_format),
-            .mem_quali  = "writeonly",
-            .dimensions = 2,
-            .elems      = planes,
-            .stages     = VK_SHADER_STAGE_COMPUTE_BIT,
+        { /* output_img */
+            .type   = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .stages = VK_SHADER_STAGE_COMPUTE_BIT,
+            .elems  = planes,
         },
     };
+    ff_vk_shader_add_descriptor_set(vkctx, &s->shd, desc, 3, 0);
 
-    RET(ff_vk_pipeline_descriptor_set_add(vkctx, &s->pl, shd, desc, 3, 0, 0));
+    RET(ff_vk_shader_link(vkctx, shd,
+                          ff_overlay_comp_spv_data,
+                          ff_overlay_comp_spv_len, "main"));
 
-    GLSLD(   overlay_noalpha                                              );
-    GLSLD(   overlay_alpha                                                );
-    GLSLC(0, void main()                                                  );
-    GLSLC(0, {                                                            );
-    GLSLC(1,     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);             );
-    GLSLF(1,     int planes = %i;                                  ,planes);
-    GLSLC(1,     for (int i = 0; i < planes; i++) {                       );
-    if (ialpha)
-        GLSLC(2,         overlay_alpha_opaque(i, pos);                    );
-    else
-        GLSLC(2,         overlay_noalpha(i, pos);                         );
-    GLSLC(1,     }                                                        );
-    GLSLC(0, }                                                            );
-
-    RET(spv->compile_shader(spv, ctx, shd, &spv_data, &spv_len, "main",
-                            &spv_opaque));
-    RET(ff_vk_shader_create(vkctx, shd, spv_data, spv_len, "main"));
-
-    RET(ff_vk_init_compute_pipeline(vkctx, &s->pl, shd));
-    RET(ff_vk_exec_pipeline_register(vkctx, &s->e, &s->pl));
+    RET(ff_vk_shader_register_exec(vkctx, &s->e, &s->shd));
 
     s->opts.o_offset[0] = s->overlay_x;
     s->opts.o_offset[1] = s->overlay_y;
@@ -187,11 +120,6 @@ static av_cold int init_filter(AVFilterContext *ctx)
     s->initialized = 1;
 
 fail:
-    if (spv_opaque)
-        spv->free_shader(spv, &spv_opaque);
-    if (spv)
-        spv->uninit(&spv);
-
     return err;
 }
 
@@ -233,9 +161,9 @@ static int overlay_vulkan_blend(FFFrameSync *fs)
         goto fail;
     }
 
-    RET(ff_vk_filter_process_Nin(&s->vkctx, &s->e, &s->pl,
+    RET(ff_vk_filter_process_Nin(&s->vkctx, &s->e, &s->shd,
                                  out, (AVFrame *[]){ input_main, input_overlay }, 2,
-                                 s->sampler, &s->opts, sizeof(s->opts)));
+                                 VK_NULL_HANDLE, 1, &s->opts, sizeof(s->opts)));
 
     err = av_frame_copy_props(out, input_main);
     if (err < 0)
@@ -285,15 +213,9 @@ static void overlay_vulkan_uninit(AVFilterContext *avctx)
 {
     OverlayVulkanContext *s = avctx->priv;
     FFVulkanContext *vkctx = &s->vkctx;
-    FFVulkanFunctions *vk = &vkctx->vkfn;
 
     ff_vk_exec_pool_free(vkctx, &s->e);
-    ff_vk_pipeline_free(vkctx, &s->pl);
     ff_vk_shader_free(vkctx, &s->shd);
-
-    if (s->sampler)
-        vk->DestroySampler(vkctx->hwctx->act_dev, s->sampler,
-                           vkctx->hwctx->alloc);
 
     ff_vk_uninit(&s->vkctx);
     ff_framesync_uninit(&s->fs);
@@ -332,9 +254,11 @@ static const AVFilterPad overlay_vulkan_outputs[] = {
     },
 };
 
-const AVFilter ff_vf_overlay_vulkan = {
-    .name           = "overlay_vulkan",
-    .description    = NULL_IF_CONFIG_SMALL("Overlay a source on top of another"),
+const FFFilter ff_vf_overlay_vulkan = {
+    .p.name         = "overlay_vulkan",
+    .p.description  = NULL_IF_CONFIG_SMALL("Overlay a source on top of another"),
+    .p.priv_class   = &overlay_vulkan_class,
+    .p.flags        = AVFILTER_FLAG_HWDEVICE,
     .priv_size      = sizeof(OverlayVulkanContext),
     .init           = &overlay_vulkan_init,
     .uninit         = &overlay_vulkan_uninit,
@@ -342,7 +266,5 @@ const AVFilter ff_vf_overlay_vulkan = {
     FILTER_INPUTS(overlay_vulkan_inputs),
     FILTER_OUTPUTS(overlay_vulkan_outputs),
     FILTER_SINGLE_PIXFMT(AV_PIX_FMT_VULKAN),
-    .priv_class     = &overlay_vulkan_class,
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
-    .flags          = AVFILTER_FLAG_HWDEVICE,
 };

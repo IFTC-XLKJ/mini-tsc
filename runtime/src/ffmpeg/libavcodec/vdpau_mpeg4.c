@@ -25,15 +25,17 @@
 
 #include "avcodec.h"
 #include "hwaccel_internal.h"
+#include "libavutil/attributes.h"
 #include "mpeg4videodec.h"
 #include "vdpau.h"
 #include "vdpau_internal.h"
 
 static int vdpau_mpeg4_start_frame(AVCodecContext *avctx,
+                                   const AVBufferRef *buffer_ref,
                                    const uint8_t *buffer, uint32_t size)
 {
     Mpeg4DecContext *ctx = avctx->priv_data;
-    MpegEncContext * const s = &ctx->m;
+    MPVContext *const s = &ctx->h.c;
     MPVPicture *pic          = s->cur_pic.ptr;
     struct vdpau_picture_context *pic_ctx = pic->hwaccel_picture_private;
     VdpPictureInfoMPEG4Part2 *info = &pic_ctx->info.mpeg4;
@@ -51,7 +53,7 @@ static int vdpau_mpeg4_start_frame(AVCodecContext *avctx,
         assert(ref != VDP_INVALID_HANDLE);
         info->backward_reference = ref;
         info->vop_coding_type    = 2;
-        /* fall-through */
+        av_fallthrough;
     case AV_PICTURE_TYPE_P:
         ref = ff_vdpau_get_surface_id(s->last_pic.ptr->f);
         assert(ref != VDP_INVALID_HANDLE);
@@ -63,11 +65,11 @@ static int vdpau_mpeg4_start_frame(AVCodecContext *avctx,
     info->trd[1]                            = s->pp_field_time >> 1;
     info->trb[1]                            = s->pb_field_time >> 1;
     info->vop_time_increment_resolution     = s->avctx->framerate.num;
-    info->vop_fcode_forward                 = s->f_code;
-    info->vop_fcode_backward                = s->b_code;
+    info->vop_fcode_forward                 = ctx->f_code;
+    info->vop_fcode_backward                = ctx->b_code;
     info->resync_marker_disable             = !ctx->resync_marker;
     info->interlaced                        = !s->progressive_sequence;
-    info->quant_type                        = s->mpeg_quant;
+    info->quant_type                        = ctx->mpeg_quant;
     info->quarter_sample                    = s->quarter_sample;
     info->short_video_header                = avctx->codec->id == AV_CODEC_ID_H263;
     info->rounding_control                  = s->no_rounding;
@@ -90,7 +92,7 @@ static int vdpau_mpeg4_decode_slice(av_unused AVCodecContext *avctx,
      return 0;
 }
 
-static int vdpau_mpeg4_init(AVCodecContext *avctx)
+static av_cold int vdpau_mpeg4_init(AVCodecContext *avctx)
 {
     VdpDecoderProfile profile;
 

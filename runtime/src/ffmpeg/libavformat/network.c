@@ -18,8 +18,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include <string.h>
+
 #include "config.h"
 #include "config_components.h"
+#include "libavutil/attributes.h"
 
 #if CONFIG_TLS_PROTOCOL && CONFIG_OPENSSL
 #include <openssl/opensslv.h>
@@ -36,11 +39,6 @@
 int ff_tls_init(void)
 {
 #if CONFIG_TLS_PROTOCOL
-#if CONFIG_OPENSSL && OPENSSL_VERSION_NUMBER < 0x10100000L
-    int ret;
-    if ((ret = ff_openssl_init()) < 0)
-        return ret;
-#endif
 #if CONFIG_GNUTLS
     ff_gnutls_init();
 #endif
@@ -51,9 +49,6 @@ int ff_tls_init(void)
 void ff_tls_deinit(void)
 {
 #if CONFIG_TLS_PROTOCOL
-#if CONFIG_OPENSSL && OPENSSL_VERSION_NUMBER < 0x10100000L
-    ff_openssl_deinit();
-#endif
 #if CONFIG_GNUTLS
     ff_gnutls_deinit();
 #endif
@@ -296,6 +291,7 @@ int ff_listen_connect(int fd, const struct sockaddr *addr,
                     av_log(h, AV_LOG_ERROR, "Connection to %s failed: %s\n",
                            h->filename, av_err2str(ret));
             }
+            av_fallthrough;
         default:
             return ret;
         }

@@ -157,9 +157,9 @@ static int name##_##nbits(AVFilterContext *ctx, void *arg, int jobnr, int nb_job
                 const uint##nbits##_t *srx = src - steps_y * src_stride + x - steps_x;                \
                 uint##nbits##_t *dsx       = dst - steps_y * dst_stride + x - steps_x;                \
                                                                                                       \
-                res = (int32_t)*srx + ((((int32_t) * srx -                                            \
-                      (int32_t)((tmp1 + halfscale) >> scalebits)) * amount) >> (8+nbits));            \
-                *dsx = av_clip_uint##nbits(res);                                                      \
+                res = (int32_t)*srx + (int32_t)(((int64_t)((int32_t)*srx -                            \
+                      (int32_t)((tmp1 + halfscale) >> scalebits)) * amount) >> 16);                   \
+                *dsx = av_clip_uintp2(res, s->bitdepth);                                              \
             }                                                                                         \
         }                                                                                             \
         if (y >= 0) {                                                                                 \
@@ -394,15 +394,15 @@ static const AVFilterPad avfilter_vf_unsharp_inputs[] = {
     },
 };
 
-const AVFilter ff_vf_unsharp = {
-    .name          = "unsharp",
-    .description   = NULL_IF_CONFIG_SMALL("Sharpen or blur the input video."),
+const FFFilter ff_vf_unsharp = {
+    .p.name        = "unsharp",
+    .p.description = NULL_IF_CONFIG_SMALL("Sharpen or blur the input video."),
+    .p.priv_class  = &unsharp_class,
+    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC | AVFILTER_FLAG_SLICE_THREADS,
     .priv_size     = sizeof(UnsharpContext),
-    .priv_class    = &unsharp_class,
     .init          = init,
     .uninit        = uninit,
     FILTER_INPUTS(avfilter_vf_unsharp_inputs),
     FILTER_OUTPUTS(ff_video_default_filterpad),
     FILTER_PIXFMTS_ARRAY(pix_fmts),
-    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC | AVFILTER_FLAG_SLICE_THREADS,
 };

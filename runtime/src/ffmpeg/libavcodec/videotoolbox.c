@@ -23,6 +23,7 @@
 #include "config.h"
 #include "config_components.h"
 #include "videotoolbox.h"
+#include "libavutil/attributes.h"
 #include "libavutil/hwcontext_videotoolbox.h"
 #include "libavutil/mem.h"
 #include "vt_internal.h"
@@ -37,6 +38,7 @@
 #include "hwaccel_internal.h"
 #include "mpegvideo.h"
 #include "proresdec.h"
+#include "prores_raw.h"
 #include <Availability.h>
 #include <AvailabilityMacros.h>
 #include <TargetConditionals.h>
@@ -54,6 +56,10 @@ enum { kCMVideoCodecType_HEVC = 'hvc1' };
 
 #if !HAVE_KCMVIDEOCODECTYPE_VP9
 enum { kCMVideoCodecType_VP9 = 'vp09' };
+#endif
+
+#if !HAVE_KCMVIDEOCODECTYPE_AV1
+enum { kCMVideoCodecType_AV1 = 'av01' };
 #endif
 
 #define VIDEOTOOLBOX_ESDS_EXTRADATA_PADDING  12
@@ -79,8 +85,8 @@ int ff_videotoolbox_buffer_copy(VTContext *vtctx,
     void *tmp;
 
     tmp = av_fast_realloc(vtctx->bitstream,
-                         &vtctx->allocated_size,
-                         size);
+                          &vtctx->allocated_size,
+                          size);
 
     if (!tmp)
         return AVERROR(ENOMEM);
@@ -88,6 +94,26 @@ int ff_videotoolbox_buffer_copy(VTContext *vtctx,
     vtctx->bitstream = tmp;
     memcpy(vtctx->bitstream, buffer, size);
     vtctx->bitstream_size = size;
+
+    return 0;
+}
+
+int ff_videotoolbox_buffer_append(VTContext *vtctx,
+                                 const uint8_t *buffer,
+                                 uint32_t size)
+{
+    void *tmp;
+
+    tmp = av_fast_realloc(vtctx->bitstream,
+                          &vtctx->allocated_size,
+                          vtctx->bitstream_size + size);
+
+    if (!tmp)
+        return AVERROR(ENOMEM);
+
+    vtctx->bitstream = tmp;
+    memcpy(vtctx->bitstream + vtctx->bitstream_size, buffer, size);
+    vtctx->bitstream_size += size;
 
     return 0;
 }
@@ -128,7 +154,7 @@ int ff_videotoolbox_alloc_frame(AVCodecContext *avctx, AVFrame *frame)
     size_t      size = sizeof(VTHWFrame);
     uint8_t    *data = NULL;
     AVBufferRef *buf = NULL;
-    int ret = ff_attach_decode_data(frame);
+    int ret = ff_attach_decode_data(avctx, frame);
     FrameDecodeData *fdd;
     if (ret < 0)
         return ret;
@@ -143,8 +169,8 @@ int ff_videotoolbox_alloc_frame(AVCodecContext *avctx, AVFrame *frame)
     }
     frame->buf[0] = buf;
 
-    fdd = (FrameDecodeData*)frame->private_ref->data;
-    fdd->post_process = videotoolbox_postproc_frame;
+    fdd = frame->private_ref;
+    fdd->hwaccel_priv_post_process = videotoolbox_postproc_frame;
 
     frame->width  = avctx->width;
     frame->height = avctx->height;
@@ -391,6 +417,7 @@ CFDataRef ff_videotoolbox_hvcc_extradata_create(AVCodecContext *avctx)
 }
 
 int ff_videotoolbox_h264_start_frame(AVCodecContext *avctx,
+                                     const AVBufferRef *buffer_ref,
                                      const uint8_t *buffer,
                                      uint32_t size)
 {
@@ -703,8 +730,13 @@ static void videotoolbox_decoder_callback(void *opaque,
     }
 
     if (!image_buffer) {
+        // kVTVideoDecoderReferenceMissingErr, defined since the macOS 12 SDKs
+        if (status != -17694)
+            vtctx->reconfig_needed = true;
+
         av_log(vtctx->logctx, status ? AV_LOG_WARNING : AV_LOG_DEBUG,
-               "vt decoder cb: output image buffer is null: %i\n", status);
+               "vt decoder cb: output image buffer is null: %i, reconfig %d\n",
+               status, vtctx->reconfig_needed);
         return;
     }
 
@@ -813,7 +845,10 @@ static CFDictionaryRef videotoolbox_decoder_config_create(CMVideoCodecType codec
                                                                    &kCFTypeDictionaryValueCallBacks);
 
     CFDictionarySetValue(config_info,
-                         codec_type == kCMVideoCodecType_HEVC ?
+                        avctx->codec_id == AV_CODEC_ID_HEVC
+                        || avctx->codec_id == AV_CODEC_ID_PRORES
+                        || avctx->codec_id == AV_CODEC_ID_PRORES_RAW
+                            ?
                             kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder :
                             kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder,
                          kCFBooleanTrue);
@@ -845,6 +880,13 @@ static CFDictionaryRef videotoolbox_decoder_config_create(CMVideoCodecType codec
         data = ff_videotoolbox_vpcc_extradata_create(avctx);
         if (data)
             CFDictionarySetValue(avc_info, CFSTR("vpcC"), data);
+        break;
+#endif
+#if CONFIG_AV1_VIDEOTOOLBOX_HWACCEL
+    case kCMVideoCodecType_AV1 :
+        data = ff_videotoolbox_av1c_extradata_create(avctx);
+        if (data)
+            CFDictionarySetValue(avc_info, CFSTR("av1C"), data);
         break;
 #endif
     default:
@@ -898,7 +940,7 @@ static int videotoolbox_start(AVCodecContext *avctx)
         switch (avctx->codec_tag) {
         default:
             av_log(avctx, AV_LOG_WARNING, "Unknown prores profile %d\n", avctx->codec_tag);
-        // fall-through
+            av_fallthrough;
         case MKTAG('a','p','c','o'): // kCMVideoCodecType_AppleProRes422Proxy
         case MKTAG('a','p','c','s'): // kCMVideoCodecType_AppleProRes422LT
         case MKTAG('a','p','c','n'): // kCMVideoCodecType_AppleProRes422
@@ -909,15 +951,21 @@ static int videotoolbox_start(AVCodecContext *avctx)
             break;
         }
         break;
+    case AV_CODEC_ID_PRORES_RAW :
+        videotoolbox->cm_codec_type = av_bswap32(avctx->codec_tag);
+        break;
     case AV_CODEC_ID_VP9 :
         videotoolbox->cm_codec_type = kCMVideoCodecType_VP9;
+        break;
+    case AV_CODEC_ID_AV1 :
+        videotoolbox->cm_codec_type = kCMVideoCodecType_AV1;
         break;
     default :
         break;
     }
 
 #if defined(MAC_OS_X_VERSION_10_9) && !TARGET_OS_IPHONE && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_9) && AV_HAS_BUILTIN(__builtin_available)
-    if (avctx->codec_id == AV_CODEC_ID_PRORES) {
+    if (avctx->codec_id == AV_CODEC_ID_PRORES || avctx->codec_id == AV_CODEC_ID_PRORES_RAW) {
         if (__builtin_available(macOS 10.9, *)) {
             VTRegisterProfessionalVideoWorkflowVideoDecoders();
         }
@@ -1031,10 +1079,8 @@ int ff_videotoolbox_common_end_frame(AVCodecContext *avctx, AVFrame *frame)
         return AVERROR_UNKNOWN;
     }
 
-    if (!vtctx->frame) {
-        vtctx->reconfig_needed = true;
+    if (!vtctx->frame)
         return AVERROR_UNKNOWN;
-    }
 
     return videotoolbox_buffer_create(avctx, frame);
 }
@@ -1050,6 +1096,7 @@ static int videotoolbox_h264_end_frame(AVCodecContext *avctx)
 }
 
 static int videotoolbox_hevc_start_frame(AVCodecContext *avctx,
+                                         const AVBufferRef *buffer_ref,
                                          const uint8_t *buffer,
                                          uint32_t size)
 {
@@ -1093,6 +1140,7 @@ static int videotoolbox_hevc_end_frame(AVCodecContext *avctx)
 }
 
 static int videotoolbox_mpeg_start_frame(AVCodecContext *avctx,
+                                         const AVBufferRef *buffer_ref,
                                          const uint8_t *buffer,
                                          uint32_t size)
 {
@@ -1117,24 +1165,58 @@ static int videotoolbox_mpeg_end_frame(AVCodecContext *avctx)
 }
 
 static int videotoolbox_prores_start_frame(AVCodecContext *avctx,
-                                         const uint8_t *buffer,
-                                         uint32_t size)
+                                           const AVBufferRef *buffer_ref,
+                                           const uint8_t *buffer,
+                                           uint32_t size)
 {
-    return 0;
+    VTContext *vtctx = avctx->internal->hwaccel_priv_data;
+    ProresContext *ctx = avctx->priv_data;
+
+    /* Videotoolbox decodes both fields simultaneously */
+    if (!ctx->first_field)
+        return 0;
+
+    return ff_videotoolbox_buffer_copy(vtctx, buffer, size);
 }
 
 static int videotoolbox_prores_decode_slice(AVCodecContext *avctx,
                                           const uint8_t *buffer,
                                           uint32_t size)
 {
-    VTContext *vtctx = avctx->internal->hwaccel_priv_data;
-
-    return ff_videotoolbox_buffer_copy(vtctx, buffer, size);
+    return 0;
 }
 
 static int videotoolbox_prores_end_frame(AVCodecContext *avctx)
 {
     ProresContext *ctx = avctx->priv_data;
+    AVFrame *frame = ctx->frame;
+
+    if (!ctx->first_field)
+        return 0;
+
+    return ff_videotoolbox_common_end_frame(avctx, frame);
+}
+
+static int videotoolbox_prores_raw_start_frame(AVCodecContext *avctx,
+                                           const AVBufferRef *buffer_ref,
+                                           const uint8_t *buffer,
+                                           uint32_t size)
+{
+    VTContext *vtctx = avctx->internal->hwaccel_priv_data;
+
+    return ff_videotoolbox_buffer_copy(vtctx, buffer, size);
+}
+
+static int videotoolbox_prores_raw_decode_slice(AVCodecContext *avctx,
+                                          const uint8_t *buffer,
+                                          uint32_t size)
+{
+    return 0;
+}
+
+static int videotoolbox_prores_raw_end_frame(AVCodecContext *avctx)
+{
+    ProResRAWContext *ctx = avctx->priv_data;
     AVFrame *frame = ctx->frame;
 
     return ff_videotoolbox_common_end_frame(avctx, frame);
@@ -1146,11 +1228,13 @@ static enum AVPixelFormat videotoolbox_best_pixel_format(AVCodecContext *avctx) 
     if (!descriptor)
         return AV_PIX_FMT_NV12; // same as av_videotoolbox_alloc_context()
 
+    depth = descriptor->comp[0].depth;
 
     if (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA)
-        return AV_PIX_FMT_AYUV64;
+        return (depth > 8) ? AV_PIX_FMT_AYUV64 : AV_PIX_FMT_AYUV;
 
-    depth = descriptor->comp[0].depth;
+    if (descriptor->flags & AV_PIX_FMT_FLAG_BAYER)
+        return AV_PIX_FMT_BAYER_RGGB16;
 
 #if HAVE_KCVPIXELFORMATTYPE_444YPCBCR16BIPLANARVIDEORANGE
     if (depth > 10)
@@ -1396,6 +1480,21 @@ const FFHWAccel ff_prores_videotoolbox_hwaccel = {
     .start_frame    = videotoolbox_prores_start_frame,
     .decode_slice   = videotoolbox_prores_decode_slice,
     .end_frame      = videotoolbox_prores_end_frame,
+    .frame_params   = ff_videotoolbox_frame_params,
+    .init           = ff_videotoolbox_common_init,
+    .uninit         = ff_videotoolbox_uninit,
+    .priv_data_size = sizeof(VTContext),
+};
+
+const FFHWAccel ff_prores_raw_videotoolbox_hwaccel = {
+    .p.name         = "prores_raw_videotoolbox",
+    .p.type         = AVMEDIA_TYPE_VIDEO,
+    .p.id           = AV_CODEC_ID_PRORES_RAW,
+    .p.pix_fmt      = AV_PIX_FMT_VIDEOTOOLBOX,
+    .alloc_frame    = ff_videotoolbox_alloc_frame,
+    .start_frame    = videotoolbox_prores_raw_start_frame,
+    .decode_slice   = videotoolbox_prores_raw_decode_slice,
+    .end_frame      = videotoolbox_prores_raw_end_frame,
     .frame_params   = ff_videotoolbox_frame_params,
     .init           = ff_videotoolbox_common_init,
     .uninit         = ff_videotoolbox_uninit,

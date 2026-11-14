@@ -32,6 +32,7 @@
 #include "vdpau_internal.h"
 
 static int vdpau_mpeg_start_frame(AVCodecContext *avctx,
+                                  const AVBufferRef *buffer_ref,
                                   const uint8_t *buffer, uint32_t size)
 {
     MpegEncContext * const s = avctx->priv_data;
@@ -50,7 +51,7 @@ static int vdpau_mpeg_start_frame(AVCodecContext *avctx,
         ref = ff_vdpau_get_surface_id(s->next_pic.ptr->f);
         assert(ref != VDP_INVALID_HANDLE);
         info->backward_reference = ref;
-        /* fall through to forward prediction */
+        av_fallthrough;
     case AV_PICTURE_TYPE_P:
         ref = ff_vdpau_get_surface_id(s->last_pic.ptr->f);
         info->forward_reference  = ref;
@@ -100,7 +101,7 @@ static int vdpau_mpeg_decode_slice(AVCodecContext *avctx,
 }
 
 #if CONFIG_MPEG1_VDPAU_HWACCEL
-static int vdpau_mpeg1_init(AVCodecContext *avctx)
+static av_cold int vdpau_mpeg1_init(AVCodecContext *avctx)
 {
     return ff_vdpau_common_init(avctx, VDP_DECODER_PROFILE_MPEG1,
                                 VDP_DECODER_LEVEL_MPEG1_NA);
@@ -123,7 +124,7 @@ const FFHWAccel ff_mpeg1_vdpau_hwaccel = {
 #endif
 
 #if CONFIG_MPEG2_VDPAU_HWACCEL
-static int vdpau_mpeg2_init(AVCodecContext *avctx)
+static av_cold int vdpau_mpeg2_init(AVCodecContext *avctx)
 {
     VdpDecoderProfile profile;
 

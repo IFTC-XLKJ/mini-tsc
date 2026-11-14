@@ -27,6 +27,7 @@
  * @see http://www.svatopluk.com/andux/docs/dfvid.html
  */
 
+#include "libavutil/attributes.h"
 #include "libavutil/common.h"
 #include "avcodec.h"
 #include "bethsoftvideo.h"
@@ -63,11 +64,6 @@ static int set_palette(BethsoftvidContext *ctx, GetByteContext *g)
         palette[a] = 0xFFU << 24 | bytestream2_get_be24u(g) * 4;
         palette[a] |= palette[a] >> 6 & 0x30303;
     }
-#if FF_API_PALETTE_HAS_CHANGED
-FF_DISABLE_DEPRECATION_WARNINGS
-    ctx->frame->palette_has_changed = 1;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
     return 0;
 }
 
@@ -118,6 +114,7 @@ static int bethsoftvid_decode_frame(AVCodecContext *avctx, AVFrame *rframe,
             if(yoffset >= avctx->height)
                 return AVERROR_INVALIDDATA;
             dst += vid->frame->linesize[0] * yoffset;
+            av_fallthrough;
         case VIDEO_P_FRAME:
         case VIDEO_I_FRAME:
             break;

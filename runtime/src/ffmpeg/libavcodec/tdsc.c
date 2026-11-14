@@ -36,6 +36,7 @@
 #include <stdint.h>
 #include <zlib.h>
 
+#include "libavutil/attributes_internal.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/mem.h"
 
@@ -95,7 +96,6 @@ static av_cold int tdsc_close(AVCodecContext *avctx)
 static av_cold int tdsc_init(AVCodecContext *avctx)
 {
     TDSCContext *ctx = avctx->priv_data;
-    const AVCodec *codec;
     int ret;
 
     avctx->pix_fmt = AV_PIX_FMT_BGR24;
@@ -120,17 +120,15 @@ static av_cold int tdsc_init(AVCodecContext *avctx)
         return AVERROR(ENOMEM);
 
     /* Prepare everything needed for JPEG decoding */
-    codec = avcodec_find_decoder(AV_CODEC_ID_MJPEG);
-    if (!codec)
-        return AVERROR_BUG;
-    ctx->jpeg_avctx = avcodec_alloc_context3(codec);
+    EXTERN const FFCodec ff_mjpeg_decoder;
+    ctx->jpeg_avctx = avcodec_alloc_context3(&ff_mjpeg_decoder.p);
     if (!ctx->jpeg_avctx)
         return AVERROR(ENOMEM);
     ctx->jpeg_avctx->flags = avctx->flags;
     ctx->jpeg_avctx->flags2 = avctx->flags2;
     ctx->jpeg_avctx->idct_algo = avctx->idct_algo;
     ctx->jpeg_avctx->max_pixels = avctx->max_pixels;
-    ret = avcodec_open2(ctx->jpeg_avctx, codec, NULL);
+    ret = avcodec_open2(ctx->jpeg_avctx, NULL, NULL);
     if (ret < 0)
         return ret;
 
@@ -148,14 +146,23 @@ static void tdsc_paint_cursor(AVCodecContext *avctx, uint8_t *dst, int stride)
 {
     TDSCContext *ctx = avctx->priv_data;
     const uint8_t *cursor = ctx->cursor;
-    int x = ctx->cursor_x - ctx->cursor_hot_x;
-    int y = ctx->cursor_y - ctx->cursor_hot_y;
+    int x, y;
     int w = ctx->cursor_w;
     int h = ctx->cursor_h;
     int i, j;
 
     if (!ctx->cursor)
         return;
+
+    /* A cursor position outside the frame is invalid; skip drawing it.
+     * cursor_x/y come straight from the bitstream, so bound them before
+     * the (16 bit) hot spot shift to avoid overflowing the clip math. */
+    if ((unsigned)ctx->cursor_x >= ctx->width ||
+        (unsigned)ctx->cursor_y >= ctx->height)
+        return;
+
+    x = ctx->cursor_x - ctx->cursor_hot_x;
+    y = ctx->cursor_y - ctx->cursor_hot_y;
 
     if (x + w > ctx->width)
         w = ctx->width - x;
@@ -203,12 +210,6 @@ static int tdsc_load_cursor(AVCodecContext *avctx)
     ctx->cursor_stride = FFALIGN(ctx->cursor_w, 32) * 4;
     cursor_fmt = bytestream2_get_le32(&ctx->gbc);
 
-    if (ctx->cursor_x >= avctx->width || ctx->cursor_y >= avctx->height) {
-        av_log(avctx, AV_LOG_ERROR,
-               "Invalid cursor position (%d.%d outside %dx%d).\n",
-               ctx->cursor_x, ctx->cursor_y, avctx->width, avctx->height);
-        return AVERROR_INVALIDDATA;
-    }
     if (ctx->cursor_w < 1 || ctx->cursor_w > 256 ||
         ctx->cursor_h < 1 || ctx->cursor_h > 256) {
         av_log(avctx, AV_LOG_ERROR,
@@ -484,11 +485,15 @@ static int tdsc_parse_tdsf(AVCodecContext *avctx, int number_tiles)
             return ret;
         init_refframe = 1;
     }
-    ctx->refframe->width  = ctx->width  = w;
-    ctx->refframe->height = ctx->height = h;
+    ctx->width  = w;
+    ctx->height = h;
 
     /* Allocate the reference frame if not already done or on size change */
     if (init_refframe) {
+        av_frame_unref(ctx->refframe);
+        ctx->refframe->format = avctx->pix_fmt;
+        ctx->refframe->width  = w;
+        ctx->refframe->height = h;
         ret = av_frame_get_buffer(ctx->refframe, 0);
         if (ret < 0)
             return ret;
@@ -548,7 +553,7 @@ static int tdsc_decode_frame(AVCodecContext *avctx, AVFrame *frame,
 
     /* Frames are deflated, need to inflate them first */
     ret = uncompress(ctx->deflatebuffer, &dlen, avpkt->data, avpkt->size);
-    if (ret) {
+    if (ret != Z_OK) {
         av_log(avctx, AV_LOG_ERROR, "Deflate error %d.\n", ret);
         return AVERROR_UNKNOWN;
     }

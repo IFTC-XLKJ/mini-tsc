@@ -30,6 +30,7 @@
 #include "jpegquanttables.h"
 #include "jpegtables.h"
 #include "leaddata.h"
+#include "libavutil/attributes.h"
 #include "libavutil/mem.h"
 #include "libavutil/mem_internal.h"
 #include "libavutil/thread.h"
@@ -157,10 +158,15 @@ static int lead_decode_frame(AVCodecContext *avctx, AVFrame * frame,
         zero = 1;
         avctx->pix_fmt = AV_PIX_FMT_YUV420P;
         break;
+    case 0x6:
     case 0x8000:
         yuv20p_half = 1;
-        // fall-through
+        av_fallthrough;
     case 0x1000:
+        avctx->pix_fmt = AV_PIX_FMT_YUV420P;
+        break;
+    case 0x1006:
+        fields = 2;
         avctx->pix_fmt = AV_PIX_FMT_YUV420P;
         break;
     case 0x2000:
@@ -178,6 +184,15 @@ static int lead_decode_frame(AVCodecContext *avctx, AVFrame * frame,
     q = AV_RL16(buf + 6);
     calc_dequant(dequant[0], ff_mjpeg_std_luminance_quant_tbl, q);
     calc_dequant(dequant[1], ff_mjpeg_std_chrominance_quant_tbl, q);
+
+    int mb_size_log2 = 4 - (avctx->pix_fmt == AV_PIX_FMT_YUV444P);
+    int blocks_per_mb = 2 + (1<<mb_size_log2)*(1<<mb_size_log2) / 64 - 2*yuv20p_half;
+    // Check against a lower bound of the input bitstream size
+    // Each block has at least a dc and ac code
+    // The smallest DC and AC code are each 2 bit
+    // There are cases where a column at the right or row at the bottom cannot be encoded, these are disregarded in this check as they do not fulfill the contract of encoding width x height pixels. They are either unsupported by the format or our implementation is incorrect
+    if ((avpkt->size - 8LL) * 8 < AV_CEIL_RSHIFT(avctx->width, mb_size_log2) * AV_CEIL_RSHIFT(avctx->height, mb_size_log2) * blocks_per_mb * (2 + 2))
+        return AVERROR_INVALIDDATA;
 
     if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
         return ret;
@@ -236,7 +251,8 @@ static int lead_decode_frame(AVCodecContext *avctx, AVFrame * frame,
                         return ret;
                 }
     } else if (avctx->pix_fmt == AV_PIX_FMT_YUV420P) {
-        for (int mb_y = 0; mb_y < (avctx->height + 15) / 16; mb_y++)
+        for (int f = 0; f < fields; f++)
+        for (int mb_y = 0; mb_y < (avctx->height + 15) / 16 / fields; mb_y++)
             for (int mb_x = 0; mb_x < (avctx->width + 15) / 16; mb_x++)
                 for (int b = 0; b < (yuv20p_half ? 4 : 6); b++) {
                     int luma_block = yuv20p_half ? 2 : 4;
@@ -257,8 +273,8 @@ static int lead_decode_frame(AVCodecContext *avctx, AVFrame * frame,
 
                     ret = decode_block(s, &gb, dc_vlc, dc_bits, ac_vlc, ac_bits,
                         dc_pred + plane, dequant[!(b < 4)],
-                        frame->data[plane] + y*frame->linesize[plane] + x,
-                        (yuv20p_half && b < 2 ? 2 : 1) * frame->linesize[plane]);
+                        frame->data[plane] + (f + y*fields)*frame->linesize[plane] + x,
+                        (yuv20p_half && b < 2 ? 2 : 1) * fields * frame->linesize[plane]);
                     if (ret < 0)
                         return ret;
 

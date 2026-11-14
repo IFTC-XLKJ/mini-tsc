@@ -23,6 +23,7 @@
 #include <stdio.h>
 
 #include "cmdutils.h"
+#include "fopen_utf8.h"
 #include "opt_common.h"
 
 #include "libavutil/avassert.h"
@@ -60,13 +61,16 @@
 #include "libswresample/swresample.h"
 #include "libswresample/version.h"
 
-#include "libpostproc/postprocess.h"
-#include "libpostproc/version.h"
 
 enum show_muxdemuxers {
     SHOW_DEFAULT,
     SHOW_DEMUXERS,
     SHOW_MUXERS,
+};
+
+enum show_codec {
+    SHOW_DECODER,
+    SHOW_ENCODER,
 };
 
 static FILE *report_file;
@@ -191,7 +195,6 @@ static void print_all_libs_info(int flags, int level)
     PRINT_LIB_INFO(avfilter,   AVFILTER,   flags, level);
     PRINT_LIB_INFO(swscale,    SWSCALE,    flags, level);
     PRINT_LIB_INFO(swresample, SWRESAMPLE, flags, level);
-    PRINT_LIB_INFO(postproc,   POSTPROC,   flags, level);
 }
 
 static void print_program_info(int flags, int level)
@@ -323,6 +326,12 @@ static void print_codec(const AVCodec *c)
         printf("hardware ");
     if (c->capabilities & AV_CODEC_CAP_HYBRID)
         printf("hybrid ");
+    if (c->capabilities & AV_CODEC_CAP_ENCODER_REORDERED_OPAQUE)
+        printf("reorderedopaque ");
+    if (c->capabilities & AV_CODEC_CAP_ENCODER_FLUSH)
+        printf("flush ");
+    if (c->capabilities & AV_CODEC_CAP_ENCODER_RECON_FRAME)
+        printf("reconframe ");
     if (!c->capabilities)
         printf("none");
     printf("\n");
@@ -593,9 +602,9 @@ int show_help(void *optctx, const char *opt, const char *arg)
     if (!*topic) {
         show_help_default(topic, par);
     } else if (!strcmp(topic, "decoder")) {
-        show_help_codec(par, 0);
+        show_help_codec(par, SHOW_DECODER);
     } else if (!strcmp(topic, "encoder")) {
-        show_help_codec(par, 1);
+        show_help_codec(par, SHOW_ENCODER);
     } else if (!strcmp(topic, "demuxer")) {
         show_help_demuxer(par);
     } else if (!strcmp(topic, "muxer")) {
@@ -710,16 +719,16 @@ int show_codecs(void *optctx, const char *opt, const char *arg)
 
         /* print decoders/encoders when there's more than one or their
          * names are different from codec name */
-        while ((codec = next_codec_for_id(desc->id, &iter, 0))) {
+        while ((codec = next_codec_for_id(desc->id, &iter, SHOW_DECODER))) {
             if (strcmp(codec->name, desc->name)) {
-                print_codecs_for_id(desc->id, 0);
+                print_codecs_for_id(desc->id, SHOW_DECODER);
                 break;
             }
         }
         iter = NULL;
-        while ((codec = next_codec_for_id(desc->id, &iter, 1))) {
+        while ((codec = next_codec_for_id(desc->id, &iter, SHOW_ENCODER))) {
             if (strcmp(codec->name, desc->name)) {
-                print_codecs_for_id(desc->id, 1);
+                print_codecs_for_id(desc->id, SHOW_ENCODER);
                 break;
             }
         }
@@ -776,12 +785,12 @@ static int print_codecs(int encoder)
 
 int show_decoders(void *optctx, const char *opt, const char *arg)
 {
-    return print_codecs(0);
+    return print_codecs(SHOW_DECODER);
 }
 
 int show_encoders(void *optctx, const char *opt, const char *arg)
 {
-    return print_codecs(1);
+    return print_codecs(SHOW_ENCODER);
 }
 
 int show_bsfs(void *optctx, const char *opt, const char *arg)
@@ -808,11 +817,11 @@ int show_filters(void *optctx, const char *opt, const char *arg)
     printf("Filters:\n"
            "  T.. = Timeline support\n"
            "  .S. = Slice threading\n"
-           "  ..C = Command support\n"
            "  A = Audio input/output\n"
            "  V = Video input/output\n"
            "  N = Dynamic number and/or type of input/output\n"
-           "  | = Source or sink filter\n");
+           "  | = Source or sink filter\n"
+           "  ------\n");
     while ((filter = av_filter_iterate(&opaque))) {
         descr_cur = descr;
         for (i = 0; i < 2; i++) {
@@ -833,10 +842,9 @@ int show_filters(void *optctx, const char *opt, const char *arg)
                                   ( i && (filter->flags & AVFILTER_FLAG_DYNAMIC_OUTPUTS))) ? 'N' : '|';
         }
         *descr_cur = 0;
-        printf(" %c%c%c %-17s %-10s %s\n",
+        printf(" %c%c %-17s %-10s %s\n",
                filter->flags & AVFILTER_FLAG_SUPPORT_TIMELINE ? 'T' : '.',
                filter->flags & AVFILTER_FLAG_SLICE_THREADS    ? 'S' : '.',
-               filter->process_command                        ? 'C' : '.',
                filter->name, descr, filter->description);
     }
 #else
@@ -879,7 +887,7 @@ static int show_formats_devices(void *optctx, const char *opt, const char *arg, 
         const char *name      = NULL;
         const char *long_name = NULL;
 
-        if (muxdemuxers !=SHOW_DEMUXERS) {
+        if (muxdemuxers != SHOW_DEMUXERS) {
             ofmt_opaque = NULL;
             while ((ofmt = av_muxer_iterate(&ofmt_opaque))) {
                 is_dev = is_device(ofmt->priv_class);
@@ -995,7 +1003,7 @@ int show_pix_fmts(void *optctx, const char *opt, const char *arg)
 #endif
 
     while ((pix_desc = av_pix_fmt_desc_next(pix_desc))) {
-        enum AVPixelFormat av_unused pix_fmt = av_pix_fmt_desc_get_id(pix_desc);
+        av_unused enum AVPixelFormat pix_fmt = av_pix_fmt_desc_get_id(pix_desc);
         printf("%c%c%c%c%c %-16s       %d            %3d      %d",
                sws_isSupportedInput (pix_fmt)              ? 'I' : '.',
                sws_isSupportedOutput(pix_fmt)              ? 'O' : '.',
@@ -1209,7 +1217,7 @@ int init_report(const char *env, FILE **file)
     if (!envlevel)
         report_file_level = FFMAX(report_file_level, prog_loglevel);
 
-    report_file = fopen(filename.str, "w");
+    report_file = fopen_utf8(filename.str, "w");
     if (!report_file) {
         int ret = AVERROR(errno);
         av_log(NULL, AV_LOG_ERROR, "Failed to open report \"%s\": %s\n",
@@ -1294,6 +1302,18 @@ int opt_loglevel(void *optctx, const char *opt, const char *arg)
             } else {
                 flags |= AV_LOG_PRINT_LEVEL;
             }
+        } else if (av_strstart(token, "time", &arg)) {
+            if (cmd == '-') {
+                flags &= ~AV_LOG_PRINT_TIME;
+            } else {
+                flags |= AV_LOG_PRINT_TIME;
+            }
+        } else if (av_strstart(token, "datetime", &arg)) {
+            if (cmd == '-') {
+                flags &= ~AV_LOG_PRINT_DATETIME;
+            } else {
+                flags |= AV_LOG_PRINT_DATETIME;
+            }
         } else {
             break;
         }
@@ -1320,6 +1340,11 @@ int opt_loglevel(void *optctx, const char *opt, const char *arg)
                "Possible levels are numbers or:\n", arg);
         for (i = 0; i < FF_ARRAY_ELEMS(log_levels); i++)
             av_log(NULL, AV_LOG_FATAL, "\"%s\"\n", log_levels[i].name);
+        av_log(NULL, AV_LOG_FATAL, "Possible flags are:\n");
+        av_log(NULL, AV_LOG_FATAL, "\"repeat\"\n");
+        av_log(NULL, AV_LOG_FATAL, "\"level\"\n");
+        av_log(NULL, AV_LOG_FATAL, "\"time\"\n");
+        av_log(NULL, AV_LOG_FATAL, "\"datetime\"\n");
         return AVERROR(EINVAL);
     }
 

@@ -318,7 +318,7 @@ static int FUNC(payload_extension) (CodedBitstreamContext *ctx, RWContext *rw,
     GetBitContext tmp;
     int bits_left, payload_zero_bits;
 
-    if (!cbs_h265_payload_extension_present(rw, payload_size, cur_pos))
+    if (!ff_cbs_h2645_payload_extension_present(rw, payload_size, cur_pos))
         return 0;
 
     bits_left = 8 * payload_size - cur_pos;
@@ -373,7 +373,7 @@ static int FUNC(extension_data) (CodedBitstreamContext *ctx, RWContext *rw,
     GetBitContext start;
     uint8_t bit;
     start = *rw;
-    for (k = 0; cbs_h2645_read_more_rbsp_data(rw); k++)
+    for (k = 0; ff_cbs_h2645_read_more_rbsp_data(rw); k++)
         skip_bits(rw, 1);
     current->bit_length = k;
     if (k > 0) {
@@ -1078,7 +1078,7 @@ static int FUNC(sps)(CodedBitstreamContext *ctx, RWContext *rw,
     ub(4, sps_seq_parameter_set_id);
     ub(4, sps_video_parameter_set_id);
     if (current->sps_video_parameter_set_id == 0 && !h266->vps[0]) {
-        H266RawVPS *vps = ff_refstruct_allocz(sizeof(*vps));
+        H266RawVPS *vps = av_refstruct_allocz(sizeof(*vps));
         if (!vps)
             return AVERROR(ENOMEM);
         vps->vps_max_layers_minus1 = 0;
@@ -1725,7 +1725,7 @@ static int FUNC(pps) (CodedBitstreamContext *ctx, RWContext *rw,
          current->pps_pic_height_in_luma_samples !=
          sps->sps_pic_height_max_in_luma_samples)) {
         av_log(ctx->log_ctx, AV_LOG_ERROR,
-               "Resoltuion change is not allowed, "
+               "Resolution change is not allowed, "
                "in max resolution (%ux%u) mismatched with pps(%ux%u).\n",
                sps->sps_pic_width_max_in_luma_samples,
                sps->sps_pic_height_max_in_luma_samples,
@@ -1958,7 +1958,7 @@ static int FUNC(pps) (CodedBitstreamContext *ctx, RWContext *rw,
             infer(pps_single_slice_per_subpic_flag, 1);
         if (current->pps_rect_slice_flag &&
             !current->pps_single_slice_per_subpic_flag) {
-            int j;
+            int j, num_slices = 0;
             uint16_t tile_idx = 0, tile_x, tile_y, ctu_x, ctu_y;
             uint16_t slice_top_left_ctu_x[VVC_MAX_SLICES];
             uint16_t slice_top_left_ctu_y[VVC_MAX_SLICES];
@@ -1968,6 +1968,7 @@ static int FUNC(pps) (CodedBitstreamContext *ctx, RWContext *rw,
             else
                 infer(pps_tile_idx_delta_present_flag, 0);
             for (i = 0; i < current->pps_num_slices_in_pic_minus1; i++) {
+                current->slice_top_left_tile_idx[i] = tile_idx;
                 tile_x = tile_idx % current->num_tile_columns;
                 tile_y = tile_idx / current->num_tile_columns;
                 if (tile_y >= current->num_tile_rows)
@@ -2000,14 +2001,13 @@ static int FUNC(pps) (CodedBitstreamContext *ctx, RWContext *rw,
                 if (current->pps_slice_width_in_tiles_minus1[i] == 0 &&
                     current->pps_slice_height_in_tiles_minus1[i] == 0 &&
                     current->row_height_val[tile_y] > 1) {
-                    int num_slices_in_tile,
-                        uniform_slice_height, remaining_height_in_ctbs_y;
+                    int uniform_slice_height, remaining_height_in_ctbs_y;
                     remaining_height_in_ctbs_y =
                         current->row_height_val[tile_y];
                     ues(pps_num_exp_slices_in_tile[i],
                         0, current->row_height_val[tile_y] - 1, 1, i);
                     if (current->pps_num_exp_slices_in_tile[i] == 0) {
-                        num_slices_in_tile = 1;
+                        current->num_slices_in_tile[i] = 1;
                         current->slice_height_in_ctus[i] = current->row_height_val[tile_y];
                         slice_top_left_ctu_x[i] = ctu_x;
                         slice_top_left_ctu_y[i] = ctu_y;
@@ -2063,12 +2063,18 @@ static int FUNC(pps) (CodedBitstreamContext *ctx, RWContext *rw,
                             slice_top_left_ctu_y[i + j] = ctu_y;
                             j++;
                         }
-                        num_slices_in_tile = j;
+                        current->num_slices_in_tile[i] = j;
                     }
-                    i += num_slices_in_tile - 1;
+                    for (int k = 0; k < current->num_slices_in_tile[i]; k++)
+                        current->slice_top_left_tile_idx[i + k] = tile_idx;
+                    i += current->num_slices_in_tile[i] - 1;
                 } else {
                     uint16_t height = 0;
                     infer(pps_num_exp_slices_in_tile[i], 0);
+                    if (current->pps_slice_width_in_tiles_minus1[i] == 0 &&
+                        current->pps_slice_height_in_tiles_minus1[i] == 0)
+                        current->num_slices_in_tile[i] = 1;
+
                     for (j = 0;
                          j <= current->pps_slice_height_in_tiles_minus1[i];
                          j++) {
@@ -2108,6 +2114,8 @@ static int FUNC(pps) (CodedBitstreamContext *ctx, RWContext *rw,
             if (i == current->pps_num_slices_in_pic_minus1) {
                 uint16_t height = 0;
 
+                current->slice_top_left_tile_idx[i] = tile_idx;
+                current->num_slices_in_tile[i] = 1;
                 tile_x = tile_idx % current->num_tile_columns;
                 tile_y = tile_idx / current->num_tile_columns;
                 if (tile_y >= current->num_tile_rows)
@@ -2154,7 +2162,10 @@ static int FUNC(pps) (CodedBitstreamContext *ctx, RWContext *rw,
                         current->num_slices_in_subpic[i]++;
                     }
                 }
+                num_slices += current->num_slices_in_subpic[i];
             }
+            if (current->pps_num_slices_in_pic_minus1 + 1 != num_slices)
+                return AVERROR_INVALIDDATA;
         } else {
             if (current->pps_no_pic_partition_flag)
                 infer(pps_num_slices_in_pic_minus1, 0);
@@ -3444,13 +3455,59 @@ static int FUNC(slice_header) (CodedBitstreamContext *ctx, RWContext *rw,
             for (i = 0; i < current->curr_subpic_idx; i++) {
                 slice_idx += pps->num_slices_in_subpic[i];
             }
-            width_in_tiles =
-                pps->pps_slice_width_in_tiles_minus1[slice_idx] + 1;
 
-            if (entropy_sync)
-                height = pps->slice_height_in_ctus[slice_idx];
-            else
-                height = pps->pps_slice_height_in_tiles_minus1[slice_idx] + 1;
+            if (pps->pps_single_slice_per_subpic_flag) {
+                int width_in_ctus, height_in_ctus;
+                if (sps->sps_subpic_info_present_flag) {
+                    width_in_ctus = sps->sps_subpic_width_minus1[slice_idx] + 1;
+                    height_in_ctus = sps->sps_subpic_height_minus1[slice_idx] + 1;
+                } else {
+                    const int log2_ctb_size = sps->sps_log2_ctu_size_minus5 + 5;
+                    const int ctb_size = 1 << log2_ctb_size;
+                    width_in_ctus = (pps->pps_pic_width_in_luma_samples + ctb_size - 1) >> log2_ctb_size;
+                    height_in_ctus = (pps->pps_pic_height_in_luma_samples + ctb_size - 1) >> log2_ctb_size;
+                }
+
+                const int subpic_l = sps->sps_subpic_ctu_top_left_x[slice_idx];
+                const int subpic_r = subpic_l + width_in_ctus;
+
+                int ctb_x = 0, tile_x = 0;
+                for (; ctb_x < subpic_l && tile_x < pps->num_tile_columns; tile_x++)
+                    ctb_x += pps->col_width_val[tile_x];
+
+                width_in_tiles = 0;
+                for (; ctb_x < subpic_r && tile_x < pps->num_tile_columns; tile_x++) {
+                    ctb_x += pps->col_width_val[tile_x];
+                    width_in_tiles++;
+                }
+
+                if (entropy_sync) {
+                    height = height_in_ctus;
+                } else {
+                    const int subpic_t = sps->sps_subpic_ctu_top_left_y[slice_idx];
+                    const int subpic_b = subpic_t + height_in_ctus;
+
+                    int ctb_y = 0, tile_y = 0, height_in_tiles;
+                    for (; ctb_y < subpic_t && tile_y < pps->num_tile_rows; tile_y++)
+                        ctb_y += pps->row_height_val[tile_y];
+
+                    height_in_tiles = 0;
+                    for (; ctb_y < subpic_b && tile_y < pps->num_tile_rows; tile_y++) {
+                        ctb_y += pps->row_height_val[tile_y];
+                        height_in_tiles++;
+                    }
+
+                    height = height_in_tiles;
+                }
+            } else {
+                width_in_tiles =
+                    pps->pps_slice_width_in_tiles_minus1[slice_idx] + 1;
+
+                if (entropy_sync)
+                    height = pps->slice_height_in_ctus[slice_idx];
+                else
+                    height = pps->pps_slice_height_in_tiles_minus1[slice_idx] + 1;
+            }
 
             current->num_entry_points = width_in_tiles * height;
         } else {

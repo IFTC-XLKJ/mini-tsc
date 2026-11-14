@@ -43,6 +43,13 @@
 #include "formats.h"
 #include "video.h"
 
+#ifdef __APPLE__
+/* frei0r plugins use .so on macOS */
+#define FREI0R_SLIBSUF ".so"
+#else
+#define FREI0R_SLIBSUF SLIBSUF
+#endif
+
 typedef f0r_instance_t (*f0r_construct_f)(unsigned int width, unsigned int height);
 typedef void (*f0r_destruct_f)(f0r_instance_t instance);
 typedef void (*f0r_deinit_f)(void);
@@ -137,7 +144,7 @@ static int set_param(AVFilterContext *ctx, f0r_param_info_t info, int index, cha
 
 fail:
     av_log(ctx, AV_LOG_ERROR, "Invalid value '%s' for parameter '%s'.\n",
-           param, info.name);
+           param, info.name ? info.name : "(null)");
     return AVERROR(EINVAL);
 }
 
@@ -150,7 +157,7 @@ static int set_params(AVFilterContext *ctx, const char *params)
         return 0;
 
     for (i = 0; i < s->plugin_info.num_params; i++) {
-        f0r_param_info_t info;
+        f0r_param_info_t info = { 0 };
         char *param;
         int ret;
 
@@ -173,7 +180,7 @@ static int set_params(AVFilterContext *ctx, const char *params)
 
 static int load_path(AVFilterContext *ctx, void **handle_ptr, const char *prefix, const char *name)
 {
-    char *path = av_asprintf("%s%s%s", prefix, name, SLIBSUF);
+    char *path = av_asprintf("%s%s%s", prefix, name, FREI0R_SLIBSUF);
     if (!path)
         return AVERROR(ENOMEM);
     av_log(ctx, AV_LOG_DEBUG, "Looking for frei0r effect in '%s'.\n", path);
@@ -287,7 +294,8 @@ static av_cold int frei0r_init(AVFilterContext *ctx,
     av_log(ctx, AV_LOG_VERBOSE,
            "name:%s author:'%s' explanation:'%s' color_model:%s "
            "frei0r_version:%d version:%d.%d num_params:%d\n",
-           pi->name, pi->author, pi->explanation,
+           pi->name ? pi->name : "(null)", pi->author ? pi->author : "(null)",
+           pi->explanation ? pi->explanation : "(null)",
            pi->color_model == F0R_COLOR_MODEL_BGRA8888 ? "bgra8888" :
            pi->color_model == F0R_COLOR_MODEL_RGBA8888 ? "rgba8888" :
            pi->color_model == F0R_COLOR_MODEL_PACKED32 ? "packed32" : "unknown",
@@ -330,9 +338,11 @@ static int config_input_props(AVFilterLink *inlink)
     return set_params(ctx, s->params);
 }
 
-static int query_formats(AVFilterContext *ctx)
+static int query_formats(const AVFilterContext *ctx,
+                         AVFilterFormatsConfig **cfg_in,
+                         AVFilterFormatsConfig **cfg_out)
 {
-    Frei0rContext *s = ctx->priv;
+    const Frei0rContext *s = ctx->priv;
     AVFilterFormats *formats = NULL;
     int ret;
 
@@ -346,13 +356,13 @@ static int query_formats(AVFilterContext *ctx)
         static const enum AVPixelFormat pix_fmts[] = {
             AV_PIX_FMT_BGRA, AV_PIX_FMT_ARGB, AV_PIX_FMT_ABGR, AV_PIX_FMT_NONE
         };
-        formats = ff_make_format_list(pix_fmts);
+        formats = ff_make_pixel_format_list(pix_fmts);
     }
 
     if (!formats)
         return AVERROR(ENOMEM);
 
-    return ff_set_common_formats(ctx, formats);
+    return ff_set_common_formats2(ctx, cfg_in, cfg_out, formats);
 }
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
@@ -373,11 +383,15 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         if (!in2)
             goto fail;
         av_frame_copy(in2, in);
+        if (av_frame_copy_props(in2, in) < 0) {
+            av_frame_free(&in2);
+            goto fail;
+        }
         av_frame_free(&in);
         in = in2;
     }
 
-    s->update(s->instance, in->pts * av_q2d(inlink->time_base) * 1000,
+    s->update(s->instance, in->pts * av_q2d(inlink->time_base),
                    (const uint32_t *)in->data[0],
                    (uint32_t *)out->data[0]);
 
@@ -423,18 +437,18 @@ static const AVFilterPad avfilter_vf_frei0r_inputs[] = {
     },
 };
 
-const AVFilter ff_vf_frei0r = {
-    .name          = "frei0r",
-    .description   = NULL_IF_CONFIG_SMALL("Apply a frei0r effect."),
+const FFFilter ff_vf_frei0r = {
+    .p.name        = "frei0r",
+    .p.description = NULL_IF_CONFIG_SMALL("Apply a frei0r effect."),
+    .p.priv_class  = &frei0r_class,
+    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
     .init          = filter_init,
     .uninit        = uninit,
     .priv_size     = sizeof(Frei0rContext),
-    .priv_class    = &frei0r_class,
     FILTER_INPUTS(avfilter_vf_frei0r_inputs),
     FILTER_OUTPUTS(ff_video_default_filterpad),
-    FILTER_QUERY_FUNC(query_formats),
+    FILTER_QUERY_FUNC2(query_formats),
     .process_command = process_command,
-    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
 };
 
 static av_cold int source_init(AVFilterContext *ctx)
@@ -512,14 +526,14 @@ static const AVFilterPad avfilter_vsrc_frei0r_src_outputs[] = {
     },
 };
 
-const AVFilter ff_vsrc_frei0r_src = {
-    .name          = "frei0r_src",
-    .description   = NULL_IF_CONFIG_SMALL("Generate a frei0r source."),
+const FFFilter ff_vsrc_frei0r_src = {
+    .p.name        = "frei0r_src",
+    .p.description = NULL_IF_CONFIG_SMALL("Generate a frei0r source."),
+    .p.priv_class  = &frei0r_src_class,
+    .p.inputs      = NULL,
     .priv_size     = sizeof(Frei0rContext),
-    .priv_class    = &frei0r_src_class,
     .init          = source_init,
     .uninit        = uninit,
-    .inputs        = NULL,
     FILTER_OUTPUTS(avfilter_vsrc_frei0r_src_outputs),
-    FILTER_QUERY_FUNC(query_formats),
+    FILTER_QUERY_FUNC2(query_formats),
 };

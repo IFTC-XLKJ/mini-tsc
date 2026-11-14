@@ -39,6 +39,20 @@ static LCEVC_ColorFormat map_format(int format)
         return LCEVC_I420_8;
     case AV_PIX_FMT_YUV420P10:
         return LCEVC_I420_10_LE;
+    case AV_PIX_FMT_YUV420P12:
+        return LCEVC_I420_12_LE;
+    case AV_PIX_FMT_YUV422P:
+        return LCEVC_I422_8;
+    case AV_PIX_FMT_YUV422P10:
+        return LCEVC_I422_10_LE;
+    case AV_PIX_FMT_YUV422P12:
+        return LCEVC_I422_12_LE;
+    case AV_PIX_FMT_YUV444P:
+        return LCEVC_I444_8;
+    case AV_PIX_FMT_YUV444P10:
+        return LCEVC_I444_10_LE;
+    case AV_PIX_FMT_YUV444P12:
+        return LCEVC_I444_12_LE;
     case AV_PIX_FMT_NV12:
         return LCEVC_NV12_8;
     case AV_PIX_FMT_NV21:
@@ -47,6 +61,8 @@ static LCEVC_ColorFormat map_format(int format)
         return LCEVC_GRAY_8;
     case AV_PIX_FMT_GRAY10LE:
         return LCEVC_GRAY_10_LE;
+    case AV_PIX_FMT_GRAY12LE:
+        return LCEVC_GRAY_12_LE;
     }
 
     return LCEVC_ColorFormat_Unknown;
@@ -110,7 +126,7 @@ static int alloc_base_frame(AVFilterLink *inlink, const AVFrame *in,
     desc.matrixCoefficients = (LCEVC_MatrixCoefficients)in->colorspace;
     desc.transferCharacteristics = (LCEVC_TransferCharacteristics)in->color_trc;
     av_log(ctx, AV_LOG_DEBUG, "in  PTS %"PRId64", %dx%d, "
-                              "%"SIZE_SPECIFIER"/%"SIZE_SPECIFIER"/%"SIZE_SPECIFIER"/%"SIZE_SPECIFIER", "
+                              "%zu/%zu/%zu/%zu, "
                               "SAR %d:%d\n",
            in->pts, in->width, in->height,
            in->crop_top, in->crop_bottom, in->crop_left, in->crop_right,
@@ -139,11 +155,7 @@ static int send_frame(AVFilterLink *inlink, AVFrame *in)
         return ret;
 
     if (sd) {
-#ifdef LCEVC_DEC_VERSION_MAJOR
         res = LCEVC_SendDecoderEnhancementData(lcevc->decoder, in->pts, sd->data, sd->size);
-#else
-        res = LCEVC_SendDecoderEnhancementData(lcevc->decoder, in->pts, 0, sd->data, sd->size);
-#endif
         if (res == LCEVC_Again)
             return AVERROR(EAGAIN);
         else if (res != LCEVC_Success) {
@@ -159,11 +171,7 @@ static int send_frame(AVFilterLink *inlink, AVFrame *in)
         return AVERROR_EXTERNAL;
     }
 
-#ifdef LCEVC_DEC_VERSION_MAJOR
     res = LCEVC_SendDecoderBase(lcevc->decoder, in->pts, picture, -1, in);
-#else
-    res = LCEVC_SendDecoderBase(lcevc->decoder, in->pts, 0, picture, -1, in);
-#endif
     if (res != LCEVC_Success) {
         av_log(ctx, AV_LOG_ERROR, "LCEVC_SendDecoderBase failed\n");
         LCEVC_FreePicture(lcevc->decoder, picture);
@@ -247,7 +255,7 @@ static int generate_output(AVFilterLink *inlink, AVFrame *out)
     out->height = outlink->h = desc.height + out->crop_top + out->crop_bottom;
 
     av_log(ctx, AV_LOG_DEBUG, "out PTS %"PRId64", %dx%d, "
-                              "%"SIZE_SPECIFIER"/%"SIZE_SPECIFIER"/%"SIZE_SPECIFIER"/%"SIZE_SPECIFIER", "
+                              "%zu/%zu/%zu/%zu, "
                               "SAR %d:%d, "
                               "hasEnhancement %d, enhanced %d\n",
            out->pts, out->width, out->height,
@@ -285,8 +293,8 @@ static int config_props(AVFilterLink *outlink)
     AVFilterLink *inlink = ctx->inputs[0];
     LCEVCContext *lcevc = ctx->priv;
 
-    outlink->w = lcevc->w = inlink->w * 2 / FFMAX(inlink->sample_aspect_ratio.den, 1);
-    outlink->h = lcevc->h = inlink->h * 2 / FFMAX(inlink->sample_aspect_ratio.den, 1);
+    outlink->w = lcevc->w = inlink->w * 2;
+    outlink->h = lcevc->h = inlink->h * 2;
     outlink->sample_aspect_ratio = (AVRational) { 0, 1 };
 
     return 0;
@@ -430,15 +438,17 @@ static const AVFilterPad lcevc_outputs[] = {
 };
 
 static const enum AVPixelFormat pix_fmts[] = {
-    AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10LE,
+    AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10LE, AV_PIX_FMT_YUV420P12LE,
+    AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUV422P10LE, AV_PIX_FMT_YUV422P12LE,
+    AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV444P10LE, AV_PIX_FMT_YUV444P12LE,
     AV_PIX_FMT_NV12, AV_PIX_FMT_NV21,
-    AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY10LE,
+    AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY10LE, AV_PIX_FMT_GRAY12LE,
     AV_PIX_FMT_NONE
 };
 
-const AVFilter ff_vf_lcevc = {
-    .name          = "lcevc",
-    .description   = NULL_IF_CONFIG_SMALL("LCEVC"),
+const FFFilter ff_vf_lcevc = {
+    .p.name        = "lcevc",
+    .p.description = NULL_IF_CONFIG_SMALL("LCEVC"),
     .activate      = activate,
     FILTER_INPUTS(ff_video_default_filterpad),
     FILTER_OUTPUTS(lcevc_outputs),

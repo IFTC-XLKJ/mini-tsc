@@ -33,6 +33,7 @@
 typedef struct D3D12AV1DecodeContext {
     D3D12VADecodeContext ctx;
     uint8_t *bitstream_buffer;
+    size_t bitstream_size;
 } D3D12AV1DecodeContext;
 
 #define D3D12_AV1_DECODE_CONTEXT(avctx) ((D3D12AV1DecodeContext *)D3D12VA_DECODE_CONTEXT(avctx))
@@ -45,7 +46,10 @@ typedef struct AV1DecodePictureContext {
     unsigned            bitstream_size;
 } AV1DecodePictureContext;
 
-static int d3d12va_av1_start_frame(AVCodecContext *avctx, av_unused const uint8_t *buffer,  av_unused uint32_t size)
+static int d3d12va_av1_start_frame(AVCodecContext *avctx,
+                                   av_unused const AVBufferRef *buffer_ref,
+                                   av_unused const uint8_t *buffer,
+                                   av_unused uint32_t size)
 {
     const AV1DecContext     *h       = avctx->priv_data;
     AV1DecodePictureContext *ctx_pic = h->cur_frame.hwaccel_picture_private;
@@ -74,6 +78,7 @@ static int d3d12va_av1_decode_slice(AVCodecContext *avctx,
     const AV1DecContext     *h            = avctx->priv_data;
     const AV1RawFrameHeader *frame_header = h->raw_frame_header;
     AV1DecodePictureContext *ctx_pic      = h->cur_frame.hwaccel_picture_private;
+    D3D12AV1DecodeContext   *av1_ctx      = D3D12_AV1_DECODE_CONTEXT(avctx);
     int offset = 0;
     uint32_t tg_start, tg_end;
 
@@ -88,7 +93,11 @@ static int d3d12va_av1_decode_slice(AVCodecContext *avctx,
         ctx_pic->bitstream      = (uint8_t *)buffer;
         ctx_pic->bitstream_size = size;
     } else {
-        ctx_pic->bitstream = D3D12_AV1_DECODE_CONTEXT(avctx)->bitstream_buffer;
+        if (ctx_pic->bitstream_size + (uint64_t)size > av1_ctx->bitstream_size) {
+            av_log(avctx, AV_LOG_ERROR, "Slice bitstream size exceeds internal buffer!\n");
+            return AVERROR(EINVAL);
+        }
+        ctx_pic->bitstream = av1_ctx->bitstream_buffer;
         memcpy(ctx_pic->bitstream + ctx_pic->bitstream_size, buffer, size);
         tg_start = h->tg_start;
         tg_end   = h->tg_end;
@@ -109,6 +118,7 @@ static int d3d12va_av1_decode_slice(AVCodecContext *avctx,
 
 static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPUT_STREAM_ARGUMENTS *input_args, ID3D12Resource *buffer)
 {
+    D3D12VADecodeContext    *ctx          = D3D12VA_DECODE_CONTEXT(avctx);
     const AV1DecContext     *h            = avctx->priv_data;
     AV1DecodePictureContext *ctx_pic      = h->cur_frame.hwaccel_picture_private;
     void *mapped_data;
@@ -117,6 +127,11 @@ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPU
     args->Type  = D3D12_VIDEO_DECODE_ARGUMENT_TYPE_SLICE_CONTROL;
     args->Size  = sizeof(DXVA_Tile_AV1) * ctx_pic->tile_count;
     args->pData = ctx_pic->tiles;
+
+    if (ctx_pic->bitstream_size > ctx->bitstream_size) {
+        av_log(avctx, AV_LOG_ERROR, "Input frame bitstream size exceeds internal buffer!\n");
+        return AVERROR(EINVAL);
+    }
 
     input_args->CompressedBitstream = (D3D12_VIDEO_DECODE_COMPRESSED_BITSTREAM){
         .pBuffer = buffer,
@@ -151,7 +166,7 @@ static int d3d12va_av1_end_frame(AVCodecContext *avctx)
     return ret;
 }
 
-static int d3d12va_av1_decode_init(AVCodecContext *avctx)
+static av_cold int d3d12va_av1_decode_init(AVCodecContext *avctx)
 {
     D3D12VADecodeContext    *ctx     = D3D12VA_DECODE_CONTEXT(avctx);
     D3D12AV1DecodeContext   *av1_ctx = D3D12_AV1_DECODE_CONTEXT(avctx);
@@ -171,7 +186,8 @@ static int d3d12va_av1_decode_init(AVCodecContext *avctx)
         return ret;
 
     if (!av1_ctx->bitstream_buffer) {
-        av1_ctx->bitstream_buffer = av_malloc(ff_d3d12va_get_suitable_max_bitstream_size(avctx));
+        av1_ctx->bitstream_size = ff_d3d12va_get_suitable_max_bitstream_size(avctx);
+        av1_ctx->bitstream_buffer = av_malloc(av1_ctx->bitstream_size);
         if (!av1_ctx->bitstream_buffer)
             return AVERROR(ENOMEM);
     }
@@ -179,12 +195,13 @@ static int d3d12va_av1_decode_init(AVCodecContext *avctx)
     return 0;
 }
 
-static int d3d12va_av1_decode_uninit(AVCodecContext *avctx)
+static av_cold int d3d12va_av1_decode_uninit(AVCodecContext *avctx)
 {
     D3D12AV1DecodeContext   *ctx     = D3D12_AV1_DECODE_CONTEXT(avctx);
 
     if (ctx->bitstream_buffer)
         av_freep(&ctx->bitstream_buffer);
+    ctx->bitstream_size = 0;
 
     return ff_d3d12va_decode_uninit(avctx);
 }

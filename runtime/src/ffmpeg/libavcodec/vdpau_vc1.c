@@ -27,11 +27,13 @@
 
 #include "avcodec.h"
 #include "hwaccel_internal.h"
+#include "libavutil/attributes.h"
 #include "vc1.h"
 #include "vdpau.h"
 #include "vdpau_internal.h"
 
 static int vdpau_vc1_start_frame(AVCodecContext *avctx,
+                                 const AVBufferRef *buffer_ref,
                                  const uint8_t *buffer, uint32_t size)
 {
     VC1Context * const v  = avctx->priv_data;
@@ -52,7 +54,7 @@ static int vdpau_vc1_start_frame(AVCodecContext *avctx,
             assert(ref != VDP_INVALID_HANDLE);
             info->backward_reference = ref;
         }
-        /* fall-through */
+        av_fallthrough;
     case AV_PICTURE_TYPE_P:
         if (s->last_pic.ptr) {
             ref = ff_vdpau_get_surface_id(s->last_pic.ptr->f);
@@ -82,7 +84,7 @@ static int vdpau_vc1_start_frame(AVCodecContext *avctx,
     info->extended_dmv      = v->extended_dmv;
     info->overlap           = v->overlap;
     info->vstransform       = v->vstransform;
-    info->loopfilter        = v->s.loop_filter;
+    info->loopfilter        = v->loop_filter;
     info->fastuvmc          = v->fastuvmc;
     info->range_mapy_flag   = v->range_mapy_flag;
     info->range_mapy        = v->range_mapy;
@@ -92,7 +94,7 @@ static int vdpau_vc1_start_frame(AVCodecContext *avctx,
     info->multires          = v->multires;
     info->syncmarker        = v->resync_marker;
     info->rangered          = v->rangered | (v->rangeredfrm << 1);
-    info->maxbframes        = v->s.max_b_frames;
+    info->maxbframes        = v->max_b_frames;
     info->deblockEnable     = v->postprocflag & 1;
     info->pquant            = v->pq;
 
@@ -116,7 +118,7 @@ static int vdpau_vc1_decode_slice(AVCodecContext *avctx,
     return 0;
 }
 
-static int vdpau_vc1_init(AVCodecContext *avctx)
+static av_cold int vdpau_vc1_init(AVCodecContext *avctx)
 {
     VdpDecoderProfile profile;
 

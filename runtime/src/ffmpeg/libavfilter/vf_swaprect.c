@@ -56,25 +56,20 @@ static const AVOption swaprect_options[] = {
 
 AVFILTER_DEFINE_CLASS(swaprect);
 
-static int query_formats(AVFilterContext *ctx)
+static int query_formats(const AVFilterContext *ctx,
+                         AVFilterFormatsConfig **cfg_in,
+                         AVFilterFormatsConfig **cfg_out)
 {
     int reject_flags = AV_PIX_FMT_FLAG_PAL     |
                        AV_PIX_FMT_FLAG_HWACCEL |
                        AV_PIX_FMT_FLAG_BITSTREAM;
 
-    return ff_set_common_formats(ctx, ff_formats_pixdesc_filter(0, reject_flags));
+    return ff_set_common_formats2(ctx, cfg_in, cfg_out,
+                                  ff_formats_pixdesc_filter(0, reject_flags));
 }
 
-static const char *const var_names[] = {   "w",   "h",   "a",   "n",   "t",
-#if FF_API_FRAME_PKT
-                                                                           "pos",
-#endif
-                                                                                      "sar",   "dar",        NULL };
-enum                                   { VAR_W, VAR_H, VAR_A, VAR_N, VAR_T,
-#if FF_API_FRAME_PKT
-                                                                           VAR_POS,
-#endif
-                                                                                    VAR_SAR, VAR_DAR, VAR_VARS_NB };
+static const char *const var_names[] = {   "w",   "h",   "a",   "n",   "t",   "sar",   "dar",        NULL };
+enum                                   { VAR_W, VAR_H, VAR_A, VAR_N, VAR_T, VAR_SAR, VAR_DAR, VAR_VARS_NB };
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
@@ -100,11 +95,6 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     var_values[VAR_DAR] = var_values[VAR_A] * var_values[VAR_SAR];
     var_values[VAR_N]   = inl->frame_count_out;
     var_values[VAR_T]   = in->pts == AV_NOPTS_VALUE ? NAN : in->pts * av_q2d(inlink->time_base);
-#if FF_API_FRAME_PKT
-FF_DISABLE_DEPRECATION_WARNINGS
-    var_values[VAR_POS] = in->pkt_pos == -1 ? NAN : in->pkt_pos;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
 
     ret = av_expr_parse_and_eval(&dw, s->w,
                                  var_names, &var_values[0],
@@ -210,6 +200,7 @@ static int config_input(AVFilterLink *inlink)
 {
     AVFilterContext *ctx = inlink->dst;
     SwapRectContext *s = ctx->priv;
+    int size = 0;
 
     if (!s->w  || !s->h  ||
         !s->x1 || !s->y1 ||
@@ -220,7 +211,16 @@ static int config_input(AVFilterLink *inlink)
     av_image_fill_max_pixsteps(s->pixsteps, NULL, s->desc);
     s->nb_planes = av_pix_fmt_count_planes(inlink->format);
 
-    s->temp = av_malloc_array(inlink->w, s->pixsteps[0]);
+    for (int p = 0; p < s->nb_planes; p++) {
+        int shift = p == 1 || p == 2 ? s->desc->log2_chroma_w : 0;
+        int width = AV_CEIL_RSHIFT(inlink->w, shift);
+
+        if (width > INT_MAX / s->pixsteps[p])
+            return AVERROR(EINVAL);
+        size = FFMAX(size, width * s->pixsteps[p]);
+    }
+
+    s->temp = av_malloc(size);
     if (!s->temp)
         return AVERROR(ENOMEM);
 
@@ -243,15 +243,15 @@ static const AVFilterPad inputs[] = {
     },
 };
 
-const AVFilter ff_vf_swaprect = {
-    .name          = "swaprect",
-    .description   = NULL_IF_CONFIG_SMALL("Swap 2 rectangular objects in video."),
+const FFFilter ff_vf_swaprect = {
+    .p.name        = "swaprect",
+    .p.description = NULL_IF_CONFIG_SMALL("Swap 2 rectangular objects in video."),
+    .p.priv_class  = &swaprect_class,
+    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
     .priv_size     = sizeof(SwapRectContext),
-    .priv_class    = &swaprect_class,
     .uninit        = uninit,
     FILTER_INPUTS(inputs),
     FILTER_OUTPUTS(ff_video_default_filterpad),
-    FILTER_QUERY_FUNC(query_formats),
-    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
+    FILTER_QUERY_FUNC2(query_formats),
     .process_command = ff_filter_process_command,
 };

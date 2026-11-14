@@ -36,6 +36,7 @@ typedef struct QuircContext {
     const AVClass *class;
 
     struct quirc *quirc;
+    int width, height;
 } QuircContext;
 
 static av_cold int init(AVFilterContext *ctx)
@@ -67,25 +68,10 @@ static int config_input(AVFilterLink *inlink)
     if (err == -1) {
         return AVERROR(ENOMEM);
     }
+    quirc->width  = inlink->w;
+    quirc->height = inlink->h;
 
     return 0;
-}
-
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_GRAY8,
-        AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
-        AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
-        AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUV444P,
-        AV_PIX_FMT_NV12, AV_PIX_FMT_NV21,
-        AV_PIX_FMT_YUVJ411P, AV_PIX_FMT_YUVJ420P,
-        AV_PIX_FMT_YUVJ422P, AV_PIX_FMT_YUVJ444P,
-        AV_PIX_FMT_YUVJ440P,
-        AV_PIX_FMT_NONE
-    };
-
-    return ff_set_common_formats_from_list(ctx, pix_fmts);
 }
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
@@ -96,6 +82,15 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     QuircContext *quirc = ctx->priv;
     int codes_count;
     uint8_t *image;
+
+    if (quirc->width != inlink->w || quirc->height != inlink->h) {
+        if (quirc_resize(quirc->quirc, inlink->w, inlink->h) < 0) {
+            av_frame_free(&frame);
+            return AVERROR(ENOMEM);
+        }
+        quirc->width  = inlink->w;
+        quirc->height = inlink->h;
+    }
 
     /* copy input image to quirc buffer */
     image = quirc_begin(quirc->quirc, NULL, NULL);
@@ -154,6 +149,18 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     return ff_filter_frame(outlink, frame);
 }
 
+static const enum AVPixelFormat pix_fmts[] = {
+    AV_PIX_FMT_GRAY8,
+    AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
+    AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
+    AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUV444P,
+    AV_PIX_FMT_NV12, AV_PIX_FMT_NV21,
+    AV_PIX_FMT_YUVJ411P, AV_PIX_FMT_YUVJ420P,
+    AV_PIX_FMT_YUVJ422P, AV_PIX_FMT_YUVJ444P,
+    AV_PIX_FMT_YUVJ440P,
+    AV_PIX_FMT_NONE
+};
+
 static const AVClass quirc_class = {
     .class_name = "quirc",
     .version    = LIBAVUTIL_VERSION_INT,
@@ -169,16 +176,16 @@ static const AVFilterPad inputs[] = {
     },
 };
 
-const AVFilter ff_vf_quirc = {
-    .name        = "quirc",
-    .description = NULL_IF_CONFIG_SMALL("Decode and show QR codes content."),
+const FFFilter ff_vf_quirc = {
+    .p.name        = "quirc",
+    .p.description = NULL_IF_CONFIG_SMALL("Decode and show QR codes content."),
+    .p.priv_class  = &quirc_class,
+    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC |
+                     AVFILTER_FLAG_METADATA_ONLY,
     .priv_size   = sizeof(QuircContext),
-    .priv_class  = &quirc_class,
     .init        = init,
     .uninit      = uninit,
     FILTER_INPUTS(inputs),
     FILTER_OUTPUTS(ff_video_default_filterpad),
-    FILTER_QUERY_FUNC(query_formats),
-    .flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC |
-                   AVFILTER_FLAG_METADATA_ONLY,
+    FILTER_PIXFMTS_ARRAY(pix_fmts),
 };

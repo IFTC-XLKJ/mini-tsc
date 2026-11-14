@@ -91,15 +91,61 @@ static void parse_waveformatex(void *logctx, AVIOContext *pb, AVCodecParameters 
     }
 }
 
+/*
+ * Compute the expected bit_rate for codecs with a deterministic block
+ * structure. Returns 0 when the codec is not handled or the parameters
+ * are not sufficient to derive a reliable value.
+ */
+static int64_t compute_bitrate(const AVCodecParameters *par)
+{
+    if (par->sample_rate <= 0 || par->block_align <= 0 ||
+        par->ch_layout.nb_channels <= 0)
+        return 0;
+
+    switch (par->codec_id) {
+    case AV_CODEC_ID_PCM_S8:
+    case AV_CODEC_ID_PCM_U8:
+    case AV_CODEC_ID_PCM_S16LE:
+    case AV_CODEC_ID_PCM_S16BE:
+    case AV_CODEC_ID_PCM_U16LE:
+    case AV_CODEC_ID_PCM_U16BE:
+    case AV_CODEC_ID_PCM_S24LE:
+    case AV_CODEC_ID_PCM_S24BE:
+    case AV_CODEC_ID_PCM_S32LE:
+    case AV_CODEC_ID_PCM_S32BE:
+    case AV_CODEC_ID_PCM_S64LE:
+    case AV_CODEC_ID_PCM_F32LE:
+    case AV_CODEC_ID_PCM_F64LE:
+    case AV_CODEC_ID_PCM_ALAW:
+    case AV_CODEC_ID_PCM_MULAW: {
+        int block_align = ((par->bits_per_coded_sample + 7) / 8) *
+                         par->ch_layout.nb_channels;
+        if (par->block_align != block_align)
+            return 0;
+        return (int64_t)par->sample_rate * block_align * 8;
+    }
+    case AV_CODEC_ID_ADPCM_MS:
+    case AV_CODEC_ID_ADPCM_IMA_WAV: {
+        int frame_size = av_get_audio_frame_duration2((AVCodecParameters *)par,
+                                                      par->block_align);
+        if (frame_size <= 0)
+            return 0;
+        return 8LL * par->sample_rate * par->block_align / frame_size;
+    }
+    default:
+        return 0;
+    }
+}
+
 /* "big_endian" values are needed for RIFX file format */
-int ff_get_wav_header(void *logctx, AVIOContext *pb,
+int ff_get_wav_header(AVFormatContext *s, AVIOContext *pb,
                       AVCodecParameters *par, int size, int big_endian)
 {
     int id, channels = 0, ret;
     uint64_t bitrate = 0;
 
     if (size < 14) {
-        avpriv_request_sample(logctx, "wav header size < 14");
+        avpriv_request_sample(s, "wav header size < 14");
         return AVERROR_INVALIDDATA;
     }
 
@@ -140,18 +186,32 @@ int ff_get_wav_header(void *logctx, AVIOContext *pb,
     if (size >= 18 && id != 0x0165) {  /* We're obviously dealing with WAVEFORMATEX */
         int cbSize = avio_rl16(pb); /* cbSize */
         if (big_endian) {
-            avpriv_report_missing_feature(logctx, "WAVEFORMATEX support for RIFX files");
+            avpriv_report_missing_feature(s, "WAVEFORMATEX support for RIFX files");
             return AVERROR_PATCHWELCOME;
         }
         size  -= 18;
         cbSize = FFMIN(size, cbSize);
         if (cbSize >= 22 && id == 0xfffe) { /* WAVEFORMATEXTENSIBLE */
-            parse_waveformatex(logctx, pb, par);
+            parse_waveformatex(s, pb, par);
             cbSize -= 22;
             size   -= 22;
+        } else if (cbSize >= 12 && id == 0x1610) { /* HEAACWAVEFORMAT */
+            int wPayloadType = avio_rl16(pb);
+            if (wPayloadType == 3)
+                par->codec_id = AV_CODEC_ID_AAC_LATM;
+            avio_skip(pb, 2); // wAudioProfileLevelIndication
+            int wStructType = avio_rl16(pb);
+            if (wStructType) {
+                avpriv_report_missing_feature(s, "HEAACWAVEINFO wStructType \"%d\"", wStructType);
+                return AVERROR_PATCHWELCOME;
+            }
+            avio_skip(pb, 2); // wReserved1
+            avio_skip(pb, 4); // dwReserved2
+            cbSize -= 12;
+            size   -= 12;
         }
         if (cbSize > 0) {
-            ret = ff_get_extradata(logctx, par, pb, cbSize);
+            ret = ff_get_extradata(s, par, pb, cbSize);
             if (ret < 0)
                 return ret;
             size -= cbSize;
@@ -164,7 +224,7 @@ int ff_get_wav_header(void *logctx, AVIOContext *pb,
         int nb_streams, i;
 
         size -= 4;
-        ret = ff_get_extradata(logctx, par, pb, size);
+        ret = ff_get_extradata(s, par, pb, size);
         if (ret < 0)
             return ret;
         nb_streams         = AV_RL16(par->extradata + 4);
@@ -180,10 +240,11 @@ int ff_get_wav_header(void *logctx, AVIOContext *pb,
     par->bit_rate = bitrate;
 
     if (par->sample_rate <= 0) {
-        av_log(logctx, AV_LOG_ERROR,
+        av_log(s, AV_LOG_ERROR,
                "Invalid sample rate: %d\n", par->sample_rate);
         return AVERROR_INVALIDDATA;
     }
+
     if (par->codec_id == AV_CODEC_ID_AAC_LATM) {
         /* Channels and sample_rate values are those prior to applying SBR
          * and/or PS. */
@@ -199,6 +260,15 @@ int ff_get_wav_header(void *logctx, AVIOContext *pb,
         av_channel_layout_uninit(&par->ch_layout);
         par->ch_layout.order       = AV_CHANNEL_ORDER_UNSPEC;
         par->ch_layout.nb_channels = channels;
+    }
+
+    int64_t expected_bitrate = compute_bitrate(par);
+    if (expected_bitrate && par->bit_rate / 8 != expected_bitrate / 8) {
+        av_log(s, AV_LOG_WARNING,
+               "nAvgBytesPerSec %"PRId64" inconsistent with other fields"
+               " (expected %"PRId64"), overriding.\n",
+               par->bit_rate / 8, expected_bitrate / 8);
+        par->bit_rate = expected_bitrate;
     }
 
     return 0;

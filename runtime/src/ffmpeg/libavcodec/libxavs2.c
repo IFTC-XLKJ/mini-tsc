@@ -195,6 +195,7 @@ static int xavs2_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
                 xavs2_copy_frame(&pic, frame);
                 break;
             }
+            av_fallthrough;
         default:
             av_log(avctx, AV_LOG_ERROR, "Unsupported pixel format\n");
             return AVERROR(EINVAL);
@@ -299,8 +300,7 @@ const FFCodec ff_libxavs2_encoder = {
     .close          = xavs2_close,
     .caps_internal  = FF_CODEC_CAP_NOT_INIT_THREADSAFE |
                       FF_CODEC_CAP_AUTO_THREADS,
-    .p.pix_fmts     = (const enum AVPixelFormat[]) { AV_PIX_FMT_YUV420P,
-                                                     AV_PIX_FMT_NONE },
+    CODEC_PIXFMTS(AV_PIX_FMT_YUV420P),
     .color_ranges   = AVCOL_RANGE_MPEG,
     .p.priv_class   = &libxavs2,
     .defaults       = xavs2_defaults,

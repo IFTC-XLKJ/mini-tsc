@@ -2,6 +2,11 @@
 #fate-async: libavformat/tests/async$(EXESUF)
 #fate-async: CMD = run libavformat/tests/async
 
+FATE_LIBAVFORMAT += fate-mkdir
+fate-mkdir: libavformat/tests/mkdir$(EXESUF)
+fate-mkdir: CMD = run libavformat/tests/mkdir$(EXESUF)
+fate-mkdir: CMP = null
+
 FATE_LIBAVFORMAT-$(CONFIG_NETWORK) += fate-noproxy
 fate-noproxy: libavformat/tests/noproxy$(EXESUF)
 fate-noproxy: CMD = run libavformat/tests/noproxy$(EXESUF)
@@ -18,7 +23,7 @@ FATE_LIBAVFORMAT-yes += fate-url
 fate-url: libavformat/tests/url$(EXESUF)
 fate-url: CMD = run libavformat/tests/url$(EXESUF)
 
-FATE_LIBAVFORMAT-$(CONFIG_MOV_MUXER) += fate-movenc
+FATE_LIBAVFORMAT-$(call ALLYES, MP4_MUXER ISMV_MUXER) += fate-movenc
 fate-movenc: libavformat/tests/movenc$(EXESUF)
 fate-movenc: CMD = run libavformat/tests/movenc$(EXESUF)
 
