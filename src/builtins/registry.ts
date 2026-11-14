@@ -569,6 +569,19 @@ export const BUILTIN_MODULES: Map<string, BuiltinModule> = new Map([
       { tsName: "listenerCount",   cName: "node_mouse_listenerCount",   signature: "Value node_mouse_listenerCount(Value event)" },
     ],
   }],
+  ["ffmpeg", {
+    name: "ffmpeg",
+    headerFile: "node_ffmpeg.h",
+    cSourceFile: "node_ffmpeg.c",
+    functions: [
+      { tsName: "run", cName: "node_ffmpeg_run", signature: "Value node_ffmpeg_run(Value args, Value options)" },
+      { tsName: "exec", cName: "node_ffmpeg_exec", signature: "Value node_ffmpeg_exec(Value command, Value options)" },
+      { tsName: "ffprobe", cName: "node_ffmpeg_ffprobe", signature: "Value node_ffmpeg_ffprobe(Value args, Value options)" },
+      { tsName: "probe", cName: "node_ffmpeg_probe", signature: "Value node_ffmpeg_probe(Value file, Value options)" },
+      { tsName: "version", cName: "node_ffmpeg_version", signature: "Value node_ffmpeg_version(void)" },
+      { tsName: "isAvailable", cName: "node_ffmpeg_isAvailable", signature: "Value node_ffmpeg_isAvailable(void)" },
+    ],
+  }],
 ]);
 
 export function getBuiltinModule(name: string): BuiltinModule | undefined {
